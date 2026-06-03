@@ -34,6 +34,27 @@ proc gcc   {} { return [TCp msys64 ucrt64 bin gcc.exe] }
 
 proc stream {args} { exec {*}$args >@ stdout 2>@ stderr }
 
+# Cheap per-command guard: a task declares the tool(s) it needs; we only check
+# those exist (a microsecond `file exists`, NOT a full toolchain scan), and
+# point at `x toolcheck` if one is missing.
+proc tool_path {tool} {
+    switch $tool {
+        tclsh { return [tclsh] }
+        wish  { return [wish] }
+        gcc   { return [gcc] }
+        twapi { return [TCp twapi-dl twapi-5.2.0 pkgIndex.tcl] }
+        default { return "" }
+    }
+}
+proc need {args} {
+    foreach tool $args {
+        set p [tool_path $tool]
+        if {$p eq "" || ![file exists $p]} {
+            error "required tool '$tool' is missing — run: x toolcheck --prep"
+        }
+    }
+}
+
 # ---- tasks --------------------------------------------------------------
 proc task_help {args} {
     puts {els task runner — usage: x <command> [args]
@@ -43,7 +64,8 @@ proc task_help {args} {
   shot <out> [file]  screenshot the editor to <out> (twapi)
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
   fetch-twapi        vendor the twapi extension into .toolchain/
-  fetch-git          (optional) vendor MinGit into .toolchain/git/
+  fetch-git          vendor MinGit into .toolchain/git/
+  toolcheck [--prep] check the vendored toolchain (--prep fetches what's missing)
   env                print the resolved toolchain paths + versions
   help               this message}
 }
@@ -62,16 +84,23 @@ proc task_env {args} {
     if {[file exists $git]} { catch {puts "  git   [exec $git --version]"} }
 }
 
+proc task_toolcheck {args} {
+    stream [tclsh] [P tools toolcheck.tcl] {*}$args
+}
+
 proc task_test {args} {
+    need tclsh
     stream [tclsh] [P tests run.tcl] {*}$args
 }
 
 proc task_run {args} {
+    need wish
     exec [wish] [P els.tcl] {*}$args &
     puts "launched els"
 }
 
 proc task_shot {args} {
+    need tclsh wish twapi
     if {[llength $args] < 1} { error "usage: x shot <out.png> \[file ...\]" }
     set out [lindex $args 0]
     stream [tclsh] [P tools shot.tcl] [wish] [P els.tcl] $out {*}[lrange $args 1 end]
@@ -81,6 +110,7 @@ proc task_shot {args} {
 # pkgIndex.tcl so `package require <name>` works.  Init proc = Titlecased name
 # (elsx.c -> Elsx_Init), matching Tcl's load convention.
 proc task_build-ext {args} {
+    need gcc tclsh
     set inc [TCp tcl9 include]
     set lib [TCp tcl9 lib]
     file mkdir [P build]

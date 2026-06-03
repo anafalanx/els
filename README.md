@@ -26,8 +26,16 @@ x run [file...] # launch the editor
 x test          # in-process test suite (tcltest + Tk event generate)
 x shot out.png  # screenshot the editor (twapi, all-Tcl — no AutoIt)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
+x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
 x env           # show the resolved toolchain
 ```
+
+The toolchain (Tcl/Tk 9, gcc/C23, twapi, MinGit) lives under `.toolchain/` and is
+**relocatable** — verified by copying the folder to a different path and
+rebuilding + testing from there. `x toolcheck` reports each component; `x
+toolcheck --prep` fetches the auto-installable pieces (twapi, git) on a freshly
+cloned checkout. Everyday commands only fast-check the one or two tools they
+need, so they stay instant.
 
 ## C extensions (C23)
 
