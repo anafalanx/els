@@ -8,6 +8,10 @@ Local $wish = $CmdLine[1], $script = $CmdLine[2], $openf = $CmdLine[3], $png = $
 
 Local $cmd = '"' & $wish & '" "' & $script & '"'
 If $openf <> "-" Then $cmd &= ' "' & $openf & '"'
+; any args after the PNG are extra files (extra tabs)
+For $i = 5 To $CmdLine[0]
+    $cmd &= ' "' & $CmdLine[$i] & '"'
+Next
 Local $pid = Run($cmd)
 If $pid = 0 Then Exit 3
 

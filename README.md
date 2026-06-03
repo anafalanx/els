@@ -16,13 +16,15 @@ restrained chrome, opinionated defaults.
 ```
 els.cmd                       # Windows — uses the vendored Tcl/Tk 9 under .toolchain/
 # or directly:
-.toolchain/tcl9/bin/wish90.exe els.tcl [file]
+.toolchain/tcl9/bin/wish90.exe els.tcl [file ...]
 ```
 
 ## Status
 
-Early skeleton — open/save/new, menu, status bar (Ln/Col), icon, line-number
-gutter, current-line highlight, window geometry persistence, the els look.
-Porting v0.3 features (tabs, find/replace, go-to-line, whitespace view, …) onto Tk.
+Early skeleton — multi-file tabs, open/save/new, menu, status bar (Ln/Col),
+icon, line-number gutter, current-line highlight, window geometry persistence,
+the els look. Each tab is its own document (independent undo, selection, dirty
+state); open several at once from the command line. Porting the rest of the
+v0.3 features (find/replace, go-to-line, whitespace view, …) onto Tk.
 
 Built on **Tcl/Tk 9.0.3**. MIT licensed.
