@@ -1,0 +1,17 @@
+# vendored toolchain: MSYS2 + Tcl/Tk 9 build/install + AutoIt — huge, machine-specific.
+# Reproduced from source via scripts/ (the build recipe), not committed.
+/.toolchain/
+
+# Claude local settings
+/.claude/
+
+# scratch / test artifacts
+*-selftest.txt
+*-result.txt
+*-shot.png
+/smoke.tcl
+
+# OS / editor cruft
+*~
+Thumbs.db
+desktop.ini
