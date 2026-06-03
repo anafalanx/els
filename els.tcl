@@ -524,10 +524,22 @@ proc els::quit {} {
 }
 
 # ---- main ---------------------------------------------------------------
-els::build
-set ::a0 [lindex $argv 0]
-if {$::a0 eq "--selftest"} {
-    set tf [lindex $argv 1]
+proc els::main {} {
+    els::build
+    set a0 [lindex $::argv 0]
+    if {$a0 eq "--selftest"} {
+        els::selftest [lindex $::argv 1]
+    } else {
+        # open every file argument, each in its own tab (the first reuses the
+        # initial empty document)
+        foreach f $::argv {
+            if {[string index $f 0] ne "-"} { els::open $f }
+        }
+    }
+}
+
+# headless smoke test: open a file, exercise a second tab, write a report file
+proc els::selftest {tf} {
     set openok "skipped"
     if {$tf ne ""} {
         if {[catch {els::open $tf} err]} {
@@ -536,7 +548,6 @@ if {$::a0 eq "--selftest"} {
             set openok "ok lines=[els::line_count]"
         }
     }
-    # exercise a second tab + switching
     set d2 [els::new_doc]
     [els::W $d2] insert end "second tab body"
     set ndocs [llength $::els::docs]
@@ -563,10 +574,9 @@ if {$::a0 eq "--selftest"} {
     puts $out "open=$openok"
     close $out
     after 150 {exit}
-} else {
-    # open every file argument, each in its own tab (the first reuses the
-    # initial empty document)
-    foreach f $argv {
-        if {[string index $f 0] ne "-"} { els::open $f }
-    }
+}
+
+# run the UI only when executed as the main script, not when sourced by tests
+if {[file normalize [info script]] eq [file normalize $::argv0]} {
+    els::main
 }

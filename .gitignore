@@ -10,6 +10,7 @@
 *-result.txt
 *-shot.png
 /smoke.tcl
+/tests/_tmp/
 
 # OS / editor cruft
 *~

@@ -1,0 +1,140 @@
+# tests/els.test — behaviour tests for els, driven in-process against the real
+# Tk widgets.  Run via `tests/run.tcl` (or directly with tclsh90).
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+# ---- startup ------------------------------------------------------------
+test start-1.1 {fresh els has exactly one untitled document} -setup {els_reset} -body {
+    list [llength $::els::docs] [els::doc_name [lindex $::els::docs 0]] $::els::active
+} -result {1 untitled d0}
+
+# ---- tabs ---------------------------------------------------------------
+test tab-1.1 {new_doc adds a tab and makes it active} -setup {els_reset} -body {
+    set id [els::new_doc]
+    list [llength $::els::docs] [expr {$::els::active eq $id}] [winfo exists [els::tabW $id]]
+} -result {2 1 1}
+
+test tab-1.2 {cycle steps through documents in order and wraps} -setup {els_reset} -body {
+    els::new_doc ; els::new_doc   ;# d0 d1 d2, active d2
+    set seen {}
+    els::cycle 1  ; lappend seen $::els::active   ;# wrap -> d0
+    els::cycle 1  ; lappend seen $::els::active   ;# d1
+    els::cycle -1 ; lappend seen $::els::active   ;# d0
+    set seen
+} -result {d0 d1 d0}
+
+test tab-1.3 {active tab shows the page colour, inactive shows grey} -setup {els_reset} -body {
+    set a [lindex $::els::docs 0]
+    set b [els::new_doc]   ;# active b
+    list [[els::tabW $b].name cget -bg] [[els::tabW $a].name cget -bg]
+} -result [list $::els::TABON $::els::TABOFF]
+
+# ---- closing ------------------------------------------------------------
+test close-1.1 {closing the active document switches to a neighbour} -setup {els_reset} -body {
+    set b [els::new_doc]
+    els::close_doc $b
+    list [llength $::els::docs] $::els::active
+} -result {1 d0}
+
+test close-1.2 {closing the last document leaves a fresh untitled one} -setup {els_reset} -body {
+    els::close_doc [lindex $::els::docs 0]
+    list [llength $::els::docs] [els::pristine $::els::active]
+} -result {1 1}
+
+test close-1.3 {closing a non-active document leaves the active one untouched} -setup {els_reset} -body {
+    set a [lindex $::els::docs 0]
+    set b [els::new_doc]   ;# active b
+    els::close_doc $a      ;# close the inactive one
+    list [llength $::els::docs] $::els::active
+} -result {1 d1}
+
+# ---- open ---------------------------------------------------------------
+test open-1.1 {open reuses a pristine untitled tab} -setup {els_reset} -body {
+    set f [els_tmpfile open1.txt "alpha\nbeta\n"]
+    set before [llength $::els::docs]
+    els::open $f
+    list $before [llength $::els::docs] [els::doc_name $::els::active] [[els::T] get 1.0 1.end]
+} -result {1 1 open1.txt alpha}
+
+test open-1.2 {open uses a new tab when the current document is not pristine} -setup {els_reset} -body {
+    [els::T] insert end "dirty"
+    set f [els_tmpfile open2.txt "zzz\n"]
+    els::open $f
+    list [llength $::els::docs] [els::doc_name $::els::active]
+} -result {2 open2.txt}
+
+test open-1.3 {open multiple files, one document each} -setup {els_reset} -body {
+    set f1 [els_tmpfile multi1.txt "111\n"]
+    set f2 [els_tmpfile multi2.txt "222\n"]
+    els::open $f1
+    els::open $f2
+    list [llength $::els::docs] \
+        [els::doc_name [lindex $::els::docs 0]] [els::doc_name [lindex $::els::docs 1]]
+} -result {2 multi1.txt multi2.txt}
+
+# ---- save ---------------------------------------------------------------
+test save-1.1 {save writes the buffer and clears the dirty flag} -setup {els_reset} -body {
+    set f [file join $::ELS_TMP saveme.txt]
+    [els::T] insert end "save this"
+    set ::els::docPath($::els::active) $f
+    els::save
+    set fh [::open $f r]; fconfigure $fh -encoding utf-8; set c [read $fh]; close $fh
+    list [els::doc_dirty $::els::active] $c
+} -result {0 {save this}}
+
+# ---- dirty tracking -----------------------------------------------------
+test dirty-1.1 {an edit marks the document dirty and bullets the tab} -setup {els_reset} -body {
+    set clean [els::doc_dirty $::els::active]
+    [els::T] insert end "x"
+    list $clean [els::doc_dirty $::els::active] [els::tab_text $::els::active]
+} -result {0 1 {• untitled}}
+
+# ---- per-document undo independence -------------------------------------
+test undo-1.1 {undo in one document does not affect another} -setup {els_reset} -body {
+    set d0 $::els::active
+    [els::W $d0] insert end "AAA"
+    set d1 [els::new_doc]
+    [els::W $d1] insert end "BBB"
+    [els::W $d1] edit undo
+    list [els_text $d0] [els_text $d1]
+} -result {AAA {}}
+
+# ---- current-line + gutter ----------------------------------------------
+test view-1.1 {current-line tag follows the cursor} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "one\ntwo\nthree\n"
+    $w mark set insert 2.0
+    els::refresh_view
+    $w tag ranges currentLine
+} -result {2.0 3.0}
+
+test view-1.2 {gutter line count tracks the buffer} -setup {els_reset} -body {
+    [els::T] insert end "a\nb\nc\n"
+    els::refresh_view
+    els::line_count
+} -result 4
+
+# ---- key bindings (driven through Tk's real event path) -----------------
+test bind-1.1 {Ctrl+N opens a new tab} -setup {els_reset} -body {
+    set before [llength $::els::docs]
+    event generate [els::T] <Control-n>
+    update
+    expr {[llength $::els::docs] - $before}
+} -result 1
+
+test bind-1.2 {Ctrl+W closes the current (clean) tab} -setup {els_reset} -body {
+    els::new_doc
+    update   ;# realize the new widget before targeting it with a synthetic event
+    set before [llength $::els::docs]
+    event generate [els::T] <Control-w>
+    update
+    expr {$before - [llength $::els::docs]}
+} -result 1
+
+# ---- unicode round-trip -------------------------------------------------
+test unicode-1.1 {utf-8 content survives an open} -setup {els_reset} -body {
+    set f [els_tmpfile uni.txt "café ☕ 日本\n"]
+    els::open $f
+    [els::T] get 1.0 1.end
+} -result {café ☕ 日本}

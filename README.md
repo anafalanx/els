@@ -19,6 +19,15 @@ els.cmd                       # Windows — uses the vendored Tcl/Tk 9 under .to
 .toolchain/tcl9/bin/wish90.exe els.tcl [file ...]
 ```
 
+## Test
+
+The suite drives the real Tk widgets in-process (`tcltest` + Tk's
+`event generate`) — white-box and headless, no second runtime:
+
+```
+.toolchain/tcl9/bin/tclsh90.exe tests/run.tcl
+```
+
 ## Status
 
 Early skeleton — multi-file tabs, open/save/new, menu, status bar (Ln/Col),
