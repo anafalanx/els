@@ -1,18 +1,48 @@
 # els
 
-A tiny, scriptable text editor — **Tcl/Tk 9 edition**.
+A tiny, scriptable text editor for Windows — calm, opinionated, no-frills.
 
-els is being rebuilt on Tcl/Tk 9: a clean, cross-platform editor for everyday
-text files. The previous C23/Lua line shipped through v0.3 and is preserved
-separately. The new foundation trades a hand-written C core for Tk's mature
-**Text widget** (the buffer) and **Tcl** (the scripting language), for far less
-to maintain and Windows/macOS/Linux from one codebase.
+![els](docs/img/editor.png)
 
-Design language carried over: a calm grey page, the signature **red caret**,
-restrained chrome, opinionated defaults. The full rationale — palette,
-typography, the find/replace design, and explicit non-goals — is in
-[`docs/DESIGN.md`](docs/DESIGN.md), drawn from a study of EditPad Pro, Sublime,
-Zed and iA Writer.
+els is a clean editor for everyday text files: multi-file tabs, find & replace
+with real regex, word wrap, and charset auto-detection across 95 encodings — in
+a deliberately quiet look, a calm grey page with one red caret. It ships as a
+single self-contained **`els.exe`** (~5.7 MB, zero non-system dependencies),
+built on Tcl/Tk 9 with a C23 extension or two for the parts that need them.
+
+The design is opinionated to the point of having few knobs — the absence of
+settings is the point. The full rationale (palette, typography, the
+find/replace design, explicit non-goals) is in
+[`docs/DESIGN.md`](docs/DESIGN.md), drawn from a study of EditPad Pro, Sublime
+Text, Zed and iA Writer.
+
+## Download
+
+Grab the latest **`els.exe`** from the [Releases](../../releases) page — one
+file, nothing to install. It's unsigned, so Windows SmartScreen may warn on
+first launch: choose **More info → Run anyway**.
+
+## Features
+
+- **Multi-file tabs** — each document keeps its own undo, selection and dirty
+  state under a flat tab strip.
+- **Find & replace** (Ctrl+F / Ctrl+H) — Tcl ARE regex with live match
+  highlighting, Match Case / Whole Word / Regex, backreferences, an adapt-case
+  replace, search history, and a built-in regex reference.
+- **Encoding & EOL** — auto-detected on open, preserved on save, shown in the
+  status bar. All 95 Tcl encodings, BOM sniffing (UTF-8/16/32), and
+  chardet-quality detection via the Windows system ICU. Click the encoding or
+  EOL indicator to reopen-with / convert.
+- **Word wrap** with a line-number gutter that stays aligned across wrapped
+  lines; current-line highlight.
+- **Show Whitespace** — spaces, tabs and trailing whitespace in distinct subdued
+  tints.
+- **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel (the font
+  family is fixed — no picker, by design).
+- **Go to line**, window-geometry persistence, the els look and the red awl
+  icon.
+
+![Find & replace, Show Whitespace](docs/img/whitespace.png)
 
 ## Toolchain & tasks
 
@@ -63,23 +93,13 @@ via its `zipfs` image. `x build-ext` compiles them; tests live in
 Windows system ICU (`icu.dll`) to expose its charset detector to Tcl — the
 basis of els's encoding auto-detection.
 
-## Status
+## About
 
-Working editor (v0.13). Multi-file tabs (each its own document — independent
-undo, selection, dirty state), line-number gutter, current-line highlight,
-window-geometry persistence, the els look and the red awl icon.
+<img src="docs/img/about.png" width="270" align="right" alt="About els">
 
-- **Find & replace** (Ctrl+F / Ctrl+H) — Tcl ARE regex, live match highlighting,
-  Match Case / Whole Word / Regex toggles, Replace / Replace All.
-- **Go to line** (Ctrl+G) and a **View ▸ Show Whitespace** toggle (reveals tabs
-  and trailing whitespace).
-- **Encoding & EOL** — auto-detected on open and preserved on save, shown in
-  the status bar. **All 95 Tcl encodings** are supported: BOM sniffing
-  (UTF-8/16/32), strict-UTF-8, and **chardet-quality charset auto-detection**
-  via the Windows system ICU (a small C extension that dynamically loads
-  `icu.dll` — nothing vendored; falls back to BOM/UTF-8/cp1252 if unavailable).
-  Click the status-bar **encoding** indicator to *Reopen with* or *Save with*
-  any encoding (a curated common list plus an "Other (all)" submenu); click the
-  **EOL** indicator to convert LF/CRLF/CR.
+els = Dutch for *awl* — a small, sharp tool. It's a single-file Windows editor;
+the source and the build recipe are both in this repo, so you can read it, fork
+it, or build it yourself. Currently **v0.14** — a working editor, evolving.
 
-Built on **Tcl/Tk 9.0.3**. MIT licensed.
+Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed — see
+[`LICENSE`](LICENSE).
