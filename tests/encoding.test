@@ -2,6 +2,9 @@
 source [file join [file dirname [info script]] helpers.tcl]
 namespace import ::tcltest::test
 
+# ICU charset detection is optional (system icu.dll); gate those tests on it.
+::tcltest::testConstraint detect $::els::have_detect
+
 proc write_raw {name bytes} {
     set p [file join $::ELS_TMP $name]
     set fh [open $p w] ; fconfigure $fh -translation binary
@@ -41,6 +44,16 @@ test enc-1.4 {utf-16le with BOM} -setup {els_reset} -body {
     list [edoc Enc] [edoc Bom] [[els::T] get 1.0 1.end]
 } -result {utf-16le 1 Hi}
 
+test enc-1.5 {utf-32le with BOM (sniffed before utf-16le)} -setup {els_reset} -body {
+    els::open [write_raw g.txt "\xFF\xFE\x00\x00[encoding convertto utf-32le "Hi\n"]"]
+    list [edoc Enc] [edoc Bom] [[els::T] get 1.0 1.end]
+} -result {utf-32le 1 Hi}
+
+test enc-1.6 {utf-32be with BOM} -setup {els_reset} -body {
+    els::open [write_raw h.txt "\x00\x00\xFE\xFF[encoding convertto utf-32be "Hi\n"]"]
+    list [edoc Enc] [edoc Bom] [[els::T] get 1.0 1.end]
+} -result {utf-32be 1 Hi}
+
 test enc-2.1 {CRLF round-trips byte-for-byte on save} -setup {els_reset} -body {
     set p [write_raw rt.txt "x\r\ny\r\n"]
     els::open $p
@@ -64,3 +77,64 @@ test enc-2.3 {utf-16le BOM round-trips} -setup {els_reset} -body {
     els::save
     expr {[read_raw $p] eq $orig}
 } -result 1
+
+test enc-2.4 {utf-32be BOM round-trips byte-for-byte} -setup {els_reset} -body {
+    set orig "\x00\x00\xFE\xFF[encoding convertto utf-32be "ab\n"]"
+    set p [write_raw rt32.txt $orig]
+    els::open $p
+    els::save
+    expr {[read_raw $p] eq $orig}
+} -result 1
+
+# ---- charset auto-detection (ICU) ---------------------------------------
+test enc-3.1 {ICU detects BOM-less UTF-16 LE} -constraints detect -setup {els_reset} -body {
+    set p [write_raw d16.txt [encoding convertto utf-16le \
+        "The quick brown fox jumps over the lazy dog.\n"]]
+    els::open $p
+    list [edoc Enc] [edoc Bom] [string range [[els::T] get 1.0 1.end] 0 2]
+} -result {utf-16le 0 The}
+
+test enc-3.2 {ICU detects legacy Cyrillic as cp1251 (no mojibake)} -constraints detect -setup {els_reset} -body {
+    set ru "Это пример текста на русском языке для проверки кодировки."
+    set p [write_raw cyr.txt "[encoding convertto cp1251 $ru]\n"]
+    els::open $p
+    list [edoc Enc] [[els::T] get 1.0 1.end]
+} -result [list cp1251 "Это пример текста на русском языке для проверки кодировки."]
+
+# ---- manual override (reopen with / save with) --------------------------
+test enc-3.3 {reopen re-decodes the same raw bytes under a new encoding} -setup {els_reset} -body {
+    set p [write_raw r3.txt "\xFF\n"]
+    els::open $p
+    els::reopen_with iso8859-5 0   ;# 0xFF -> U+045F
+    set a [[els::T] get 1.0 1.end]
+    els::reopen_with iso8859-1 0   ;# 0xFF -> U+00FF
+    set b [[els::T] get 1.0 1.end]
+    list [edoc Enc] $a $b
+} -result "iso8859-1 џ ÿ"
+
+test enc-3.4 {save with a chosen encoding emits those bytes} -setup {els_reset} -body {
+    set p [write_raw s4.txt "x\n"]
+    els::open $p
+    [els::T] delete 1.0 end
+    [els::T] insert end "ÿ"    ;# ÿ
+    els::save_with iso8859-1 0
+    read_raw $p
+} -result "\xFF"
+
+test enc-3.5 {EOL override marks the doc saveable and rewrites line endings} -setup {els_reset} -body {
+    set p [write_raw e5.txt "a\nb\n"]
+    els::open $p
+    els::set_eol crlf
+    els::save
+    read_raw $p
+} -result "a\r\nb\r\n"
+
+# ---- picker menus -------------------------------------------------------
+test enc-4.1 {encoding & EOL picker menus build, "Other" lists every encoding} -setup {els_reset} -body {
+    els::build_enc_popup
+    els::build_eol_popup
+    list [winfo exists .encpop.re.other] [winfo exists .encpop.sv.other] \
+         [winfo exists .eolpop] \
+         [expr {[.encpop.re.other index end] + 1 == [llength [encoding names]]}] \
+         [.encpop entrycget 0 -label]
+} -result {1 1 1 1 {Reopen with Encoding}}

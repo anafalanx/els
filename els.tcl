@@ -27,6 +27,30 @@ namespace eval els {
     variable docEnc ; array set docEnc {}   ;# id -> Tcl encoding (utf-8, utf-16le, ...)
     variable docBom ; array set docBom {}   ;# id -> 1 if a byte-order mark was present
     variable docEol ; array set docEol {}   ;# id -> lf | crlf | cr
+    variable docRaw ; array set docRaw {}   ;# id -> exact bytes as loaded ("" = never from disk)
+    # charset detection (chardet quality via the system ICU; 0 until loaded)
+    variable have_detect 0
+    variable DETECT_MIN  15      ;# ignore ICU guesses below this confidence (0-100)
+    # curated encodings for the status-bar picker: {label encoding bom} triples,
+    # "-" marks a separator.  "Other (all)" exposes every Tcl encoding.
+    variable ENC_CURATED {
+        "UTF-8"                       utf-8      0
+        "UTF-8 with BOM"              utf-8      1
+        "UTF-16 LE"                   utf-16le   1
+        "UTF-16 BE"                   utf-16be   1
+        "-" - -
+        "Windows-1252 (Western)"      cp1252     0
+        "ISO-8859-1 (Latin-1)"        iso8859-1  0
+        "ISO-8859-15 (Latin-9)"       iso8859-15 0
+        "Windows-1250 (Central Eur.)" cp1250     0
+        "Windows-1251 (Cyrillic)"     cp1251     0
+        "-" - -
+        "Shift-JIS (Japanese)"        cp932      0
+        "GBK (Simplified Chinese)"    cp936      0
+        "Big5 (Traditional Chinese)"  big5       0
+        "EUC-JP (Japanese)"           euc-jp     0
+        "EUC-KR (Korean)"             euc-kr     0
+    }
     # find / replace
     variable find_q ""           ;# search text
     variable find_r ""           ;# replacement text
@@ -172,13 +196,16 @@ proc els::build {} {
     # the shared status bar
     ttk::frame .sb
     ttk::label .sb.pos  -font elsUI -anchor w -text "Ln 1, Col 1"
-    ttk::label .sb.eol  -font elsUI -anchor w -text "LF"    -foreground $::els::MUTED
-    ttk::label .sb.enc  -font elsUI -anchor w -text "UTF-8" -foreground $::els::MUTED
+    ttk::label .sb.eol  -font elsUI -anchor w -text "LF"    -foreground $::els::MUTED -cursor hand2
+    ttk::label .sb.enc  -font elsUI -anchor w -text "UTF-8" -foreground $::els::MUTED -cursor hand2
     ttk::label .sb.name -font elsUI -anchor e -text "untitled"
     pack .sb.pos  -side left  -padx {8 12} -pady 2
     pack .sb.eol  -side left  -padx {0 12} -pady 2
     pack .sb.enc  -side left  -padx {0 12} -pady 2
     pack .sb.name -side right -padx 8 -pady 2
+    # the EOL and encoding indicators are clickable pickers
+    bind .sb.eol <Button-1> {els::popup_eol_menu %X %Y}
+    bind .sb.enc <Button-1> {els::popup_enc_menu %X %Y}
 
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
     grid .ln   -row 1 -column 0 -sticky ns
@@ -262,6 +289,7 @@ proc els::new_doc {{path ""}} {
     set ::els::docEnc($id) utf-8
     set ::els::docBom($id) 0
     set ::els::docEol($id) lf
+    set ::els::docRaw($id) ""
     lappend docs $id
     els::make_tab $id
     els::switch_to $id
@@ -333,7 +361,8 @@ proc els::close_doc {id} {
     set docs [lreplace $docs $idx $idx]
     destroy [els::W $id]
     destroy [els::tabW $id]
-    unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) ::els::docEol($id)
+    unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
+        ::els::docEol($id) ::els::docRaw($id)
     if {$active eq $id} { set active "" }
     if {[llength $docs] == 0} {
         els::new_doc
@@ -487,16 +516,109 @@ proc els::refresh_view {} {
 }
 
 # ---- encoding / EOL -----------------------------------------------------
+# Load the optional ICU charset detector (build/icudet.dll in source trees, a
+# sibling of main.tcl in the packaged image).  Detection is a bonus: if the DLL
+# or the system icu.dll is absent, els falls back to BOM + UTF-8 + cp1252.
+proc els::load_detect {} {
+    set dir [file dirname [info script]]
+    foreach cand [list [file join $dir icudet.dll] [file join $dir build icudet.dll]] {
+        if {[file exists $cand] && ![catch {load $cand Icudet}]} {
+            # confirm icu.dll itself resolved (detect returns "" if not)
+            return [expr {[::elsdet::detect "the quick brown fox jumps over"] ne ""}]
+        }
+    }
+    if {![catch {package require icudet}] && \
+        [::elsdet::detect "the quick brown fox jumps over"] ne ""} { return 1 }
+    return 0
+}
+
+# Map an ICU canonical charset name onto a Tcl encoding name ("" = no match).
+proc els::icu_to_tcl {name} {
+    set key [string tolower [string map {- "" _ "" " " ""} $name]]
+    set map {
+        utf8 utf-8  utf16 utf-16le  utf16le utf-16le  utf16be utf-16be
+        utf32 utf-32le  utf32le utf-32le  utf32be utf-32be  usascii ascii
+        iso88591 iso8859-1   iso88592 iso8859-2   iso88593 iso8859-3
+        iso88594 iso8859-4   iso88595 iso8859-5   iso88596 iso8859-6
+        iso88597 iso8859-7   iso88598 iso8859-8   iso88599 iso8859-9
+        iso885910 iso8859-10 iso885913 iso8859-13 iso885914 iso8859-14
+        iso885915 iso8859-15 iso885916 iso8859-16
+        windows1250 cp1250 windows1251 cp1251 windows1252 cp1252 windows1253 cp1253
+        windows1254 cp1254 windows1255 cp1255 windows1256 cp1256 windows1257 cp1257
+        windows1258 cp1258 windows874 cp874 tis620 tis-620
+        shiftjis cp932 windows31j cp932 sjis cp932 ms932 cp932
+        gb18030 cp936 gbk cp936 windows936 cp936 gb2312 gb2312 hzgb2312 gb2312
+        big5 big5 big5hkscs big5
+        eucjp euc-jp euckr euc-kr euccn euc-cn euctw euc-cn
+        koi8r koi8-r koi8u koi8-u
+        iso2022jp iso2022-jp iso2022kr iso2022-kr
+        ibm420 ebcdic ibm424 ebcdic
+    }
+    if {[dict exists $map $key]} { return [dict get $map $key] }
+    foreach e [encoding names] {
+        if {[string map {- "" _ "" " " ""} $e] eq $key} { return $e }
+    }
+    return ""
+}
+
+# Resolve a BOM-less wide encoding (NUL bytes present).  ICU nails LE/BE/32;
+# without ICU, fall back to a NUL-parity guess (UTF-16 LE/BE only).
+proc els::detect_wide {raw sample} {
+    if {$::els::have_detect} {
+        set d [::elsdet::detect $raw]
+        if {[llength $d] == 2} {
+            set enc [els::icu_to_tcl [lindex $d 0]]
+            if {[string match utf-* $enc]} { return $enc }
+        }
+    }
+    set even 0 ; set odd 0 ; set i 0
+    foreach b [split $sample ""] {
+        if {$b eq "\x00"} { if {$i & 1} { incr odd } else { incr even } }
+        incr i
+    }
+    if {$even == 0 && $odd == 0} { return "" }
+    if {$even > $odd} { return utf-16be }
+    return utf-16le
+}
+
 proc els::detect_encoding {raw} {
-    # -> {encoding bom}, where bom is 1 if a byte-order mark is present
-    if {[string range $raw 0 2] eq "\xEF\xBB\xBF"} { return {utf-8 1} }
-    if {[string range $raw 0 1] eq "\xFF\xFE"}     { return {utf-16le 1} }
-    if {[string range $raw 0 1] eq "\xFE\xFF"}     { return {utf-16be 1} }
+    # -> {encoding bom}.  bom=1 if a byte-order mark was present (stripped on decode).
+    set n [string length $raw]
+    if {$n == 0} { return {utf-8 0} }
+    # 1. BOM sniff — UTF-32 before UTF-16 (the UTF-32 LE BOM begins FF FE too).
+    if {[string range $raw 0 3] eq "\x00\x00\xFE\xFF"} { return {utf-32be 1} }
+    if {[string range $raw 0 3] eq "\xFF\xFE\x00\x00"} { return {utf-32le 1} }
+    if {[string range $raw 0 2] eq "\xEF\xBB\xBF"}     { return {utf-8 1} }
+    if {[string range $raw 0 1] eq "\xFF\xFE"}         { return {utf-16le 1} }
+    if {[string range $raw 0 1] eq "\xFE\xFF"}         { return {utf-16be 1} }
+    set sample [string range $raw 0 4095]
+    # 2. NUL bytes => a wide encoding (BOM-less UTF-16/32).  Text in ASCII/UTF-8
+    #    or any 8-bit/CJN encoding never contains NUL — and UTF-16-of-ASCII would
+    #    otherwise sneak through the UTF-8 test below, so resolve it first.
+    if {[string first "\x00" $sample] >= 0} {
+        set enc [els::detect_wide $raw $sample]
+        if {$enc ne ""} { return [list $enc 0] }
+    }
+    # 3. valid UTF-8 without BOM — definitive and free.
     if {![catch {encoding convertfrom -profile strict utf-8 $raw}]} { return {utf-8 0} }
-    return [list [encoding system] 0]
+    # 4. ICU charset detection (chardet quality) for legacy 8-bit / CJK text.
+    if {$::els::have_detect} {
+        set d [::elsdet::detect $raw]
+        if {[llength $d] == 2} {
+            lassign $d icu conf
+            set enc [els::icu_to_tcl $icu]
+            if {$enc ne "" && $conf >= $::els::DETECT_MIN} { return [list $enc 0] }
+        }
+    }
+    # 5. fallback: Windows Western — a superset of ASCII/Latin-1; never errors.
+    return {cp1252 0}
 }
 proc els::decode {raw enc bom} {
-    if {$bom} { set raw [string range $raw [expr {$enc eq "utf-8" ? 3 : 2}] end] }
+    if {$bom} {
+        set skip 2
+        if {$enc eq "utf-8"} { set skip 3 } elseif {[string match utf-32* $enc]} { set skip 4 }
+        set raw [string range $raw $skip end]
+    }
     return [encoding convertfrom -profile replace $enc $raw]
 }
 proc els::detect_eol {text} {
@@ -506,12 +628,112 @@ proc els::detect_eol {text} {
     return lf
 }
 proc els::enc_label {enc bom} {
-    set m {utf-8 "UTF-8" utf-16le "UTF-16 LE" utf-16be "UTF-16 BE"}
+    set m {utf-8 "UTF-8" utf-16le "UTF-16 LE" utf-16be "UTF-16 BE" \
+           utf-32le "UTF-32 LE" utf-32be "UTF-32 BE"}
     set s [expr {[dict exists $m $enc] ? [dict get $m $enc] : [string toupper $enc]}]
     if {$bom} { append s " BOM" }
     return $s
 }
 proc els::eol_label {eol} { return [string map {lf LF crlf CRLF cr CR} $eol] }
+
+# ---- encoding / EOL pickers (clickable status-bar indicators) ------------
+# Build a menu of {label enc bom} curated entries plus an "Other (all)" cascade
+# of every Tcl encoding.  `action` is reopen|save.
+proc els::enc_menu {path action} {
+    menu $path -tearoff 0
+    foreach {label enc bom} $::els::ENC_CURATED {
+        if {$label eq "-"} { $path add separator; continue }
+        $path add command -label $label -command [list els::apply_enc $action $enc $bom]
+    }
+    $path add separator
+    set other $path.other
+    menu $other -tearoff 0
+    set i 0
+    foreach e [lsort -dictionary [encoding names]] {
+        # column-break the long list so it never runs off-screen
+        $other add command -label $e -command [list els::apply_enc $action $e 0] \
+            -columnbreak [expr {$i > 0 && $i % 28 == 0}]
+        incr i
+    }
+    $path add cascade -label "Other (all encodings)" -menu $other
+    return $path
+}
+proc els::build_enc_popup {} {
+    menu .encpop -tearoff 0
+    .encpop add cascade -label "Reopen with Encoding" -menu [els::enc_menu .encpop.re reopen]
+    .encpop add cascade -label "Save with Encoding"   -menu [els::enc_menu .encpop.sv save]
+}
+proc els::popup_enc_menu {x y} {
+    if {$::els::active eq ""} return
+    if {![winfo exists .encpop]} { els::build_enc_popup }
+    set canReopen [expr {$::els::docPath($::els::active) ne ""}]
+    .encpop entryconfigure "Reopen with Encoding" \
+        -state [expr {$canReopen ? "normal" : "disabled"}]
+    tk_popup .encpop $x $y
+}
+proc els::apply_enc {action enc bom} {
+    if {$::els::active eq ""} return
+    switch $action {
+        reopen { els::reopen_with $enc $bom }
+        save   { els::save_with   $enc $bom }
+    }
+}
+proc els::reopen_with {enc bom} {
+    set id $::els::active
+    if {$::els::docPath($id) eq ""} {
+        tk_messageBox -parent . -icon info -title els \
+            -message "Nothing to reopen — this document was never loaded from a file."
+        return
+    }
+    if {[els::doc_dirty $id]} {
+        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+            -message "Reopen [els::doc_name $id] as [els::enc_label $enc $bom]?\
+                      \nUnsaved changes will be lost."]
+        if {$ans ne "yes"} return
+    }
+    set raw $::els::docRaw($id)
+    set text [els::decode $raw $enc $bom]
+    set eol  [els::detect_eol $text]
+    set text [string map [list \r\n \n \r \n] $text]
+    set w [els::W $id]
+    $w delete 1.0 end
+    $w insert end $text
+    $w mark set insert 1.0 ; $w see insert
+    set ::els::docEnc($id) $enc
+    set ::els::docBom($id) $bom
+    set ::els::docEol($id) $eol
+    $w edit reset
+    $w edit modified 0
+    els::update_tab $id
+    els::settitle
+    els::refresh_view
+}
+proc els::save_with {enc bom} {
+    set id $::els::active
+    set ::els::docEnc($id) $enc
+    set ::els::docBom($id) $bom
+    els::settitle
+    els::save
+}
+proc els::build_eol_popup {} {
+    menu .eolpop -tearoff 0
+    foreach {lbl v} {"LF (Unix / macOS)" lf "CRLF (Windows)" crlf "CR (classic Mac)" cr} {
+        .eolpop add command -label $lbl -command [list els::set_eol $v]
+    }
+}
+proc els::popup_eol_menu {x y} {
+    if {$::els::active eq ""} return
+    if {![winfo exists .eolpop]} { els::build_eol_popup }
+    tk_popup .eolpop $x $y
+}
+proc els::set_eol {v} {
+    set id $::els::active
+    if {$id eq "" || $::els::docEol($id) eq $v} return
+    set ::els::docEol($id) $v
+    [els::W $id] edit modified 1   ;# make the change saveable
+    els::update_tab $id
+    els::settitle
+}
 
 # ---- file operations ----------------------------------------------------
 proc els::new {} {
@@ -553,6 +775,7 @@ proc els::open {{p ""}} {
     set ::els::docEnc($id) $enc
     set ::els::docBom($id) $bom
     set ::els::docEol($id) $eol
+    set ::els::docRaw($id) $raw
     $w edit reset
     $w edit modified 0
     els::switch_to $id
@@ -579,6 +802,8 @@ proc els::save {} {
             utf-8    { set bytes "\xEF\xBB\xBF$bytes" }
             utf-16le { set bytes "\xFF\xFE$bytes" }
             utf-16be { set bytes "\xFE\xFF$bytes" }
+            utf-32le { set bytes "\xFF\xFE\x00\x00$bytes" }
+            utf-32be { set bytes "\x00\x00\xFE\xFF$bytes" }
         }
     }
     if {[catch {
@@ -901,6 +1126,7 @@ proc els::selftest {tf} {
     puts $out "config=[els::config_file] geometry=[wm geometry .]"
     puts $out "theme=[ttk::style theme use] scaling=[format %.3f [tk scaling]]"
     puts $out "docs=$ndocs active=$::els::active tabs_ok=$tabs_ok"
+    puts $out "detect=$::els::have_detect"
     set dstate ""
     foreach id $::els::docs { append dstate "$id:[els::doc_dirty $id] " }
     puts $out "doc_dirty=[string trimright $dstate]"
@@ -908,6 +1134,10 @@ proc els::selftest {tf} {
     close $out
     after 150 {exit}
 }
+
+# load the optional ICU charset detector (chardet-quality auto-detection); a
+# missing DLL just leaves have_detect 0 and els falls back to BOM/UTF-8/cp1252
+catch { set ::els::have_detect [els::load_detect] }
 
 # run the UI only when executed as the main script, not when sourced by tests
 if {[file normalize [info script]] eq [file normalize $::argv0]} {

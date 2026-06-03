@@ -56,7 +56,9 @@ as ordinary commands. Extensions build against the Tcl *stubs* (compiler-
 independent, system-DLL-only) with the vendored gcc — see `src/elsx.c`. They can
 load dynamically (`package require`) or be embedded in the single-file `els.exe`
 via its `zipfs` image. `x build-ext` compiles them; tests live in
-`tests/elsx.test`.
+`tests/elsx.test`. A real example, **`src/icudet.c`**, dynamically loads the
+Windows system ICU (`icu.dll`) to expose its charset detector to Tcl — the
+basis of els's encoding auto-detection.
 
 ## Status
 
@@ -68,7 +70,13 @@ window-geometry persistence, the els look and the red awl icon.
   Match Case / Whole Word / Regex toggles, Replace / Replace All.
 - **Go to line** (Ctrl+G) and a **View ▸ Show Whitespace** toggle (reveals tabs
   and trailing whitespace).
-- **Encoding & EOL** detected on open and preserved on save (UTF-8/16, BOM,
-  LF/CRLF/CR), shown in the status bar.
+- **Encoding & EOL** — auto-detected on open and preserved on save, shown in
+  the status bar. **All 95 Tcl encodings** are supported: BOM sniffing
+  (UTF-8/16/32), strict-UTF-8, and **chardet-quality charset auto-detection**
+  via the Windows system ICU (a small C extension that dynamically loads
+  `icu.dll` — nothing vendored; falls back to BOM/UTF-8/cp1252 if unavailable).
+  Click the status-bar **encoding** indicator to *Reopen with* or *Save with*
+  any encoding (a curated common list plus an "Other (all)" submenu); click the
+  **EOL** indicator to convert LF/CRLF/CR.
 
 Built on **Tcl/Tk 9.0.3**. MIT licensed.
