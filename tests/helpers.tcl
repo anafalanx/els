@@ -30,6 +30,12 @@ set ::els_test_openfile ""
 set ::els_test_savefile ""
 set ::els_test_mbanswer "yes"
 
+# Stub the OS-level menu post.  A real `tk_popup` in an unfocused/automated
+# context blocks (waiting on a grab) and would flash a grabbing menu on the
+# user's screen.  The real <Button-1> bindings still fire and build/configure
+# the real menus; tests select entries via the canonical `<menu> invoke`.
+proc ::tk_popup {args} {}
+
 # Build a clean els UI for a test, resetting all document state.
 proc els_reset {} {
     catch {. configure -menu {}}

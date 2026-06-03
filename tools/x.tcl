@@ -64,6 +64,8 @@ proc task_help {args} {
     puts {els task runner — usage: x <command> [args]
 
   test               run the in-process test suite (tcltest + event generate)
+  stress             UI-driven encoding stress test (open/reopen/save every
+                     encoding, lots of mojibake; proves it never hangs)
   run [file ...]     launch the editor (wish + els.tcl)
   colors [name ...]  browse Tk's named colors (swatches + hex)
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
@@ -131,6 +133,11 @@ proc task_build {args} {
 proc task_test {args} {
     need tclsh
     stream [tclsh] [P tests run.tcl] {*}$args
+}
+
+proc task_stress {args} {
+    need tclsh
+    stream [tclsh] [P tests encoding_stress.tcl] {*}$args
 }
 
 proc task_run {args} {

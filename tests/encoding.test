@@ -138,3 +138,27 @@ test enc-4.1 {encoding & EOL picker menus build, "Other" lists every encoding} -
          [expr {[.encpop.re.other index end] + 1 == [llength [encoding names]]}] \
          [.encpop entrycget 0 -label]
 } -result {1 1 1 1 {Reopen with Encoding}}
+
+test enc-4.2 {UI-driven: click the encoding indicator, reopen-with then save-with} -setup {els_reset} -body {
+    set p [write_raw uidrv.txt [encoding convertto cp1251 "Текст для проверки\n"]]
+    # open through the File menu (dialog stubbed)
+    set ::els_test_openfile $p
+    .menu.file invoke "Open..."
+    update
+    # real <Button-1> on the status-bar encoding indicator builds the picker;
+    # choose a (wrong) encoding from the "Other (all)" submenu, as a user would
+    event generate .sb.enc <ButtonPress-1> -x 5 -y 5
+    catch {.encpop unpost}
+    .encpop.re.other invoke [.encpop.re.other index utf-16be]
+    update
+    set afterReopen $::els::docEnc($::els::active)
+    # Save As (to a temp path) then Save with Encoding via the picker
+    set ::els_test_savefile [file join $::ELS_TMP uidrv_out.txt]
+    .menu.file invoke "Save As..."
+    event generate .sb.enc <ButtonPress-1> -x 5 -y 5
+    catch {.encpop unpost}
+    .encpop.sv.other invoke [.encpop.sv.other index cp1252]
+    update
+    list $afterReopen $::els::docEnc($::els::active) \
+         [file exists [file join $::ELS_TMP uidrv_out.txt]]
+} -result {utf-16be cp1252 1}
