@@ -91,9 +91,9 @@ set ::els::TABOFF  "#E6E6E6"     ;# an inactive tab
 set ::els::TABON   "#F2F2F2"     ;# active tab merges into the page
 set ::els::FINDALL "#FFF1C4"     ;# all find matches (soft amber)
 set ::els::FINDONE "#FFD66B"     ;# the current find match (stronger amber)
-set ::els::WSSPACE "#DCE8F7"     ;# spaces — pastel blue
-set ::els::WSTAB   "#C5D9F2"     ;# tabs — a step deeper
-set ::els::WSTRAIL "#9FBEE8"     ;# trailing whitespace — darker blue
+set ::els::WSSPACE "#E2E2E2"     ;# a lone space — light grey (subtle; spaces are everywhere)
+set ::els::WSTAB   "#D3E1F5"     ;# tabs — light blue
+set ::els::WSTRAIL "#E9D9F1"     ;# 2+ spaces or trailing whitespace — light mauve
 set ::els::FLASH   "#F7D9D7"     ;# find field flash on no-match (its own faint red)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
@@ -1353,11 +1353,21 @@ proc els::ws_refresh {} {
     if {!$::els::show_ws} { return }
     set top [$w index @0,0]
     set bot [$w index "@0,[winfo height $w] + 1 line"]
-    foreach {tag pat var} {wsSpace { +} wl1  wsTab {\t+} wl2  wsTrail {[ \t]+$} wl3} {
-        set i 0
-        foreach s [$w search -all -regexp -count ::els::$var -- $pat $top $bot] {
-            $w tag add $tag $s "$s + [lindex [set ::els::$var] $i] chars" ; incr i
-        }
+    # tabs -> blue
+    set i 0
+    foreach s [$w search -all -regexp -count ::els::wl1 -- {\t+} $top $bot] {
+        $w tag add wsTab $s "$s + [lindex $::els::wl1 $i] chars" ; incr i
+    }
+    # space runs: a lone space -> grey, two or more -> mauve
+    set i 0
+    foreach s [$w search -all -regexp -count ::els::wl2 -- { +} $top $bot] {
+        set n [lindex $::els::wl2 $i] ; incr i
+        $w tag add [expr {$n >= 2 ? "wsTrail" : "wsSpace"}] $s "$s + $n chars"
+    }
+    # trailing spaces -> mauve (also flags a single trailing space)
+    set i 0
+    foreach s [$w search -all -regexp -count ::els::wl3 -- { +$} $top $bot] {
+        $w tag add wsTrail $s "$s + [lindex $::els::wl3 $i] chars" ; incr i
     }
 }
 

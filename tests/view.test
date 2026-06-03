@@ -49,6 +49,14 @@ test ws-1.2 {toggling Show Whitespace off clears every whitespace tag} -setup {e
          [llength [$w tag ranges wsTrail]]
 } -result {0 0 0}
 
+test ws-1.3 {a lone space is grey (wsSpace); 2+ spaces are mauve (wsTrail)} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "a b  c d\n" ; update   ;# single, double, single
+    set ::els::show_ws 1 ; els::ws_refresh ; update
+    list [expr {[llength [$w tag ranges wsSpace]] / 2}] \
+         [expr {[llength [$w tag ranges wsTrail]] / 2}]
+} -result {2 1}
+
 test ws-2.1 {Show Whitespace never dirties the document or alters its text} -setup {els_reset} -body {
     set w [els::T]
     $w insert end "alpha\nbeta\ngamma\n" ; update ; $w edit modified 0
