@@ -18,7 +18,7 @@ proc ui_reset {} {
 proc ui_settle {{ms 220}} { set ::__s 0 ; after $ms {set ::__s 1} ; vwait ::__s }
 # type into the focused find entry like a user: insert the char, fire KeyRelease
 proc ui_type_find {str} {
-    focus .find.fr.q
+    focus -force .find.fr.q
     foreach ch [split $str ""] {
         .find.fr.q insert insert $ch
         set ks [expr {[string is alnum -strict $ch] ? $ch : "space"}]
@@ -88,7 +88,7 @@ test ui-2.5 {the tab close button closes that document} -setup {ui_reset} -body 
 
 # ---- editing (generated keystrokes) -------------------------------------
 test ui-3.1 {typed keystrokes land in the buffer} -setup {ui_reset} -body {
-    set w [els::T] ; focus $w
+    set w [els::T] ; focus -force $w
     foreach ch {h e l l o} { event generate $w <KeyPress> -keysym $ch }
     update
     $w get 1.0 "end - 1 char"
@@ -103,7 +103,7 @@ test ui-3.2 {undo reverts an edit} -setup {ui_reset} -body {
 
 test ui-3.3 {arrow keys move the caret and update the status bar} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "one\ntwo\nthree" ; $w mark set insert 1.0
-    focus $w
+    focus -force $w
     event generate $w <Down> ; event generate $w <Right> ; update
     els::refresh_view
     .sb.pos cget -text

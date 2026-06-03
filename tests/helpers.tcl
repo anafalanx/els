@@ -61,6 +61,10 @@ proc els_reset {} {
     catch {set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]}
     els::build
     update
+    # Force Tk focus onto the document so synthetic key events are delivered even
+    # when the (transparent) test window isn't the OS-active window — otherwise
+    # `event generate <KeyPress>` is flaky depending on what else has focus.
+    catch {focus -force [els::T]}
 }
 
 # Active (or named) document's text, minus the widget's mandatory final newline.
