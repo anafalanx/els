@@ -287,10 +287,10 @@ proc els::build {} {
     pack .sb.hair -side top -fill x
     # name on the left (takes the slack, elided keeping the filename); the
     # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
-    pack .sb.name -side left  -padx {12 8} -pady 4 -fill x -expand 1
-    pack .sb.enc  -side right -padx {8 12} -pady 4
-    pack .sb.eol  -side right -padx {0 0}  -pady 4
-    pack .sb.pos  -side right -padx {16 0} -pady 4
+    pack .sb.name -side left  -padx {12 8}  -pady 4 -fill x -expand 1
+    pack .sb.enc  -side right -padx {12 12} -pady 4
+    pack .sb.eol  -side right -padx {12 0}  -pady 4
+    pack .sb.pos  -side right -padx {12 0}  -pady 4
     # the EOL and encoding indicators are clickable pickers
     bind .sb.eol  <Button-1>  {els::popup_eol_menu %X %Y}
     bind .sb.enc  <Button-1>  {els::popup_enc_menu %X %Y}
