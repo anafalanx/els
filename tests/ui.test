@@ -240,20 +240,22 @@ test ui-5.1 {Ctrl+G then Go jumps the caret to the line} -setup {ui_reset} -body
 } -result {1 4 0}
 
 # ---- show whitespace (menu toggle) --------------------------------------
-test ui-6.1 {Show Whitespace tags tabs and trailing whitespace} -setup {ui_reset} -body {
-    set w [els::T] ; $w insert end "\tindented\ntrailing   \nclean"
+test ui-6.1 {Show Whitespace tags spaces, tabs and trailing distinctly} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "a b\tindented   \nclean" ; update
     .menu.view invoke "Show Whitespace" ; update     ;# toggle on
-    set tabs   [expr {[llength [$w tag ranges wsTab]]   / 2}]
-    set trails [expr {[llength [$w tag ranges wsTrail]] / 2}]
-    list $::els::show_ws $tabs $trails
-} -result {1 1 1}
+    list $::els::show_ws \
+         [expr {[llength [$w tag ranges wsSpace]] > 0}] \
+         [expr {[llength [$w tag ranges wsTab]]   > 0}] \
+         [expr {[llength [$w tag ranges wsTrail]] > 0}]
+} -result {1 1 1 1}
 
 test ui-6.2 {toggling Show Whitespace off clears the tags} -setup {ui_reset} -body {
-    set w [els::T] ; $w insert end "\tx   "
+    set w [els::T] ; $w insert end "a b\tx   " ; update
     .menu.view invoke "Show Whitespace" ; update     ;# on
     .menu.view invoke "Show Whitespace" ; update     ;# off
-    list $::els::show_ws [llength [$w tag ranges wsTab]] [llength [$w tag ranges wsTrail]]
-} -result {0 0 0}
+    list $::els::show_ws [llength [$w tag ranges wsSpace]] \
+         [llength [$w tag ranges wsTab]] [llength [$w tag ranges wsTrail]]
+} -result {0 0 0 0}
 
 # ---- scrollbar auto-hide ------------------------------------------------
 test ui-7.1 {the scrollbar hides for a short doc, shows for a long one} -setup {ui_reset} -body {

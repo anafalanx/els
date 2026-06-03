@@ -30,18 +30,21 @@ test goto-1.3 {non-numeric input is ignored (cursor stays)} -setup {els_reset} -
     $w index insert
 } -result 2.0
 
-test ws-1.1 {Show Whitespace tags tabs and trailing whitespace} -setup {els_reset} -body {
+test ws-1.1 {Show Whitespace tags spaces, tabs and trailing distinctly} -setup {els_reset} -body {
     set w [els::T]
-    $w insert end "a\tb  \n\tc\n"
+    $w insert end "a b\tc   \nclean\n" ; update
     set ::els::show_ws 1
     els::ws_refresh
-    list [expr {[llength [$w tag ranges wsTab]]/2}] [expr {[llength [$w tag ranges wsTrail]]/2}]
-} -result {2 1}
+    list [expr {[llength [$w tag ranges wsSpace]] > 0}] \
+         [expr {[llength [$w tag ranges wsTab]]   > 0}] \
+         [expr {[llength [$w tag ranges wsTrail]] > 0}]
+} -result {1 1 1}
 
-test ws-1.2 {toggling Show Whitespace off clears the tags} -setup {els_reset} -body {
+test ws-1.2 {toggling Show Whitespace off clears every whitespace tag} -setup {els_reset} -body {
     set w [els::T]
-    $w insert end "x\ty   \n"
+    $w insert end "x y\tz   \n" ; update
     set ::els::show_ws 1 ; els::ws_refresh
     set ::els::show_ws 0 ; els::ws_refresh
-    list [llength [$w tag ranges wsTab]] [llength [$w tag ranges wsTrail]]
-} -result {0 0}
+    list [llength [$w tag ranges wsSpace]] [llength [$w tag ranges wsTab]] \
+         [llength [$w tag ranges wsTrail]]
+} -result {0 0 0}

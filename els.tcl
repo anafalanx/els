@@ -68,6 +68,7 @@ namespace eval els {
     variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
     variable vs_after ""         ;# pending (idle) scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
+    variable ws_after ""         ;# pending (idle) whitespace re-tag after a scroll
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -89,8 +90,10 @@ set ::els::TABOFF  "#E6E6E6"     ;# an inactive tab
 set ::els::TABON   "#F2F2F2"     ;# active tab merges into the page
 set ::els::FINDALL "#FFF1C4"     ;# all find matches (soft amber)
 set ::els::FINDONE "#FFD66B"     ;# the current find match (stronger amber)
-set ::els::WSTAB   "#D3D8F0"     ;# tabs (blue-grey block — visible on page + line)
-set ::els::WSTRAIL "#F3C0C0"     ;# trailing whitespace (clear red block)
+set ::els::WSSPACE "#D2DCEC"     ;# spaces — subdued blue block
+set ::els::WSTAB   "#D4E8D9"     ;# tabs — subdued green block (distinct from spaces)
+set ::els::WSTRAIL "#E6D6EE"     ;# trailing whitespace — subdued purple block
+set ::els::FLASH   "#F7D9D7"     ;# find field flash on no-match (its own faint red)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
@@ -183,7 +186,7 @@ proc els::init_style {} {
     $s map TEntry -bordercolor [list focus $::els::CARET]
     # a brief red-tinted field flashed on no-match / wrap-around (never a popup)
     $s configure Flash.TEntry -relief flat -borderwidth 1 -padding {6 4} \
-        -fieldbackground $::els::WSTRAIL -foreground $::els::INK \
+        -fieldbackground $::els::FLASH -foreground $::els::INK \
         -bordercolor $::els::CARET -lightcolor $::els::CARET -darkcolor $::els::CARET
     # buttons: flat, quiet until hovered
     $s configure TButton -background $bg -foreground $ink -anchor center \
@@ -343,13 +346,16 @@ proc els::new_doc {{path ""}} {
         -tabstyle wordprocessor \
         -yscrollcommand [list els::yscroll $id]
     $w tag configure currentLine -background $::els::LINE
+    $w tag configure wsSpace -background $::els::WSSPACE
     $w tag configure wsTab   -background $::els::WSTAB
     $w tag configure wsTrail -background $::els::WSTRAIL
     $w tag configure findAll -background $::els::FINDALL
     $w tag configure findOne -background $::els::FINDONE
-    # stacking, low -> high: current-line wash < whitespace < matches < selection
-    # (whitespace above the line wash so it's visible on the current line too)
+    # stacking, low -> high: current-line wash < space/tab < trailing < matches <
+    # selection (whitespace above the line wash so it shows on the current line;
+    # trailing above space/tab so it wins on a trailing run)
     $w tag lower currentLine
+    $w tag raise wsSpace
     $w tag raise wsTab
     $w tag raise wsTrail
     $w tag raise findAll
@@ -573,6 +579,11 @@ proc els::yscroll {id first last} {
     # loop. Coalesced so a burst of scrolls schedules one update.
     after cancel $vs_after
     set vs_after [after idle els::update_vscroll]
+    # whitespace markers are viewport-scoped, so re-tag after a scroll (coalesced)
+    if {$::els::show_ws} {
+        after cancel $::els::ws_after
+        set ::els::ws_after [after idle els::ws_refresh]
+    }
 }
 # Show the scrollbar only when the document doesn't fit (chrome defers).  Reads
 # the live yview rather than a possibly-stale -yscrollcommand value, so it's
@@ -1307,22 +1318,24 @@ proc els::goto_do {top} {
     if {$w ne ""} { focus $w }
 }
 
-# highlight tabs + trailing whitespace in the active doc (when Show Whitespace
-# is on).  Tk's Text widget can't substitute glyphs, so we reveal whitespace by
-# tagging it rather than drawing · / → marks.
+# Reveal whitespace by tagging it with subdued, per-type background tints (Tk's
+# Text widget can't substitute glyphs).  Spaces, tabs and trailing whitespace
+# each get a distinct colour.  Scoped to the visible viewport so it stays fast
+# on large files; re-runs on scroll (els::yscroll) and edits (els::refresh_view).
 proc els::ws_refresh {} {
     set w [els::T]
     if {$w eq ""} { return }
+    $w tag remove wsSpace 1.0 end
     $w tag remove wsTab   1.0 end
     $w tag remove wsTrail 1.0 end
     if {!$::els::show_ws} { return }
-    set i 0
-    foreach s [$w search -all -regexp -count ::els::ws_lens -- {\t+} 1.0 end] {
-        $w tag add wsTab $s "$s + [lindex $::els::ws_lens $i] chars" ; incr i
-    }
-    set i 0
-    foreach s [$w search -all -regexp -count ::els::ws_lens2 -- {[ \t]+$} 1.0 end] {
-        $w tag add wsTrail $s "$s + [lindex $::els::ws_lens2 $i] chars" ; incr i
+    set top [$w index @0,0]
+    set bot [$w index "@0,[winfo height $w] + 1 line"]
+    foreach {tag pat var} {wsSpace { +} wl1  wsTab {\t+} wl2  wsTrail {[ \t]+$} wl3} {
+        set i 0
+        foreach s [$w search -all -regexp -count ::els::$var -- $pat $top $bot] {
+            $w tag add $tag $s "$s + [lindex [set ::els::$var] $i] chars" ; incr i
+        }
     }
 }
 
