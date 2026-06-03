@@ -104,7 +104,28 @@ proc task_build {args} {
     if {![file exists $tclshs]} {
         error "static interpreter missing (.toolchain/tcl9s) — needed for `x build`; see `x toolcheck`"
     }
-    stream $tclshs [P tools package.tcl] {*}$args
+    # split out the output path (first non-flag) from flags like --with-ext
+    set out "" ; set rest {}
+    foreach a $args {
+        if {[string match -* $a]} { lappend rest $a } elseif {$out eq ""} { set out $a } else { lappend rest $a }
+    }
+    if {$out eq ""} { set out [P els.exe] }
+    # Icon the WRAPPER first: stamp the awl into a wish90s copy's PE resources,
+    # then mkimg appends the zip AFTER it so both icon and payload survive.
+    # (Editing the finished exe would strip the appended zipfs archive.)
+    set wargs {}
+    set tmpwrap [TCp _iconwrap.exe]
+    set wish90s [TCp tcl9s bin wish90s.exe]
+    catch {file delete -force $tmpwrap}
+    if {[file exists $wish90s] && ![catch {file copy -force $wish90s $tmpwrap}]} {
+        if {![catch {stream [tclsh] [P tools exeicon.tcl] $tmpwrap} e]} {
+            set wargs [list --wrapper $tmpwrap]
+        } else {
+            puts "warning: PE icon skipped: $e"
+        }
+    }
+    stream $tclshs [P tools package.tcl] $out {*}$wargs {*}$rest
+    catch {file delete -force $tmpwrap}
 }
 
 proc task_test {args} {

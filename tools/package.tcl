@@ -17,14 +17,23 @@ proc TCp {args} { return [file join $::TC {*}$args] }
 
 set positional {}
 set withExt 0
-foreach a $argv {
-    if {$a eq "--with-ext"} { set withExt 1 } else { lappend positional $a }
+set wrapperOverride ""
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    switch -- [lindex $argv $i] {
+        --with-ext { set withExt 1 }
+        --wrapper  { incr i ; set wrapperOverride [lindex $argv $i] }
+        default    { lappend positional [lindex $argv $i] }
+    }
 }
 set out [lindex $positional 0]
 if {$out eq ""} { set out [file join $ROOT els.exe] }
 
+# `wish` = the original static wrapper (used to extract tk_library); the mkimg
+# wrapper may be an icon-stamped copy (--wrapper) — its icon survives because
+# mkimg appends the zip AFTER the PE image.
 set wish [TCp tcl9s bin wish90s.exe]
 if {![file exists $wish]} { error "static wish missing: $wish" }
+set mkimgWrapper [expr {$wrapperOverride ne "" ? $wrapperOverride : $wish}]
 if {![file isdirectory //zipfs:/app/tcl_library]} {
     error "tcl_library not at //zipfs:/app — run package.tcl under tclsh90s, not tclsh90"
 }
@@ -60,6 +69,6 @@ if {$withExt} {
 
 # 4. fuse — STRIP=stage so the staged tree lands at the archive root
 file delete -force $out
-zipfs mkimg $out $stage $stage {} $wish
+zipfs mkimg $out $stage $stage {} $mkimgWrapper
 file delete -force $stage
-puts "built [file nativename $out]  ([file size $out] bytes; ext: $ndll)"
+puts "built [file nativename $out]  ([file size $out] bytes; ext: $ndll[expr {$wrapperOverride ne {} ? {; iconned wrapper} : {}}])"

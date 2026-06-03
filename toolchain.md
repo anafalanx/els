@@ -168,6 +168,16 @@ from inside the exe (Tcl auto-extracts the DLL to a temp file before
 `LoadLibrary`). `/els.exe` and `/build/` are gitignored — rebuild them; ship the
 exe via releases.
 
+**The .exe file icon** (the awl, shown in Explorer/taskbar) is the binary's PE
+icon resource, separate from the runtime *window* icon (which `els.tcl` sets via
+`wm iconphoto`).  `x build` stamps it via `tools/exeicon.tcl` (twapi
+`UpdateResource`, RT_GROUP_ICON + RT_ICON at 16–256 px).  **Order is critical:**
+editing PE resources rewrites the executable and DROPS anything appended after
+the PE image — i.e. the whole zipfs payload.  So the icon goes into a *copy of
+the wrapper FIRST*, and `mkimg` appends the zip after that (`package.tcl
+--wrapper`).  `exeicon.tcl` refuses outright to edit a packaged exe (one with
+`main.tcl` at the zip root) as a guard against that footgun.
+
 **Testing the single-exe safely:** els requires Tk, which only `wish90s` has (no
 Tk-capable `tclsh`), so a startup failure pops a modal dialog. Therefore: build,
 then **verify the exe's zipfs structure matches the proven layout** (`main.tcl`,
