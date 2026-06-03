@@ -35,11 +35,11 @@ x env           # show the resolved toolchain
 `x build` produces one self-contained `els.exe` (~6.7 MB, zero non-system DLLs)
 by fusing `els.tcl` + Tcl/Tk into a `zipfs` image on a static interpreter;
 `x build --with-ext` also embeds any compiled C extension so it loads from
-inside the exe. `bootstrap.cmd` provisions `.toolchain/` on a fresh `git clone`
-(the copy-paste model needs no bootstrap).
+inside the exe. Distribution is copy-paste of the whole folder (it carries the
+vendored `.toolchain/`) — no installer, no provisioning.
 
-The project uses **only C and Tcl 9**, plus two classical-`cmd` boot scripts
-(`x.cmd`, `bootstrap.cmd`) — no bash, PowerShell, or Python. See
+The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
+(`x.cmd`) — no bash, PowerShell, or Python. See
 [`toolchain.md`](toolchain.md) for the full setup.
 
 The toolchain (Tcl/Tk 9, gcc/C23, twapi, MinGit) lives under `.toolchain/` and is

@@ -8,26 +8,24 @@ and no dependency on anything already present on the system.
 
 ## Language policy
 
-The project and its tooling use **only two languages**, plus two boot scripts:
+The project and its tooling use **only two languages**, plus one boot script:
 
 | Allowed | Used for |
 |---|---|
 | **Tcl 9** | the editor (`els.tcl`), all tooling (`tools/*.tcl`), tests (`tests/*`) |
 | **C23** | optional native extensions (`src/*.c`), built with the vendored gcc |
-| **classical Windows `cmd`** | exactly two files: `x.cmd` and `bootstrap.cmd` |
+| **classical Windows `cmd`** | exactly one file: `x.cmd` |
 
-No bash, **no PowerShell**, no Python, nothing else. The two `.cmd` files exist
-only because PATH has to be set *before* Tcl is reachable (a chicken-and-egg the
-shell must solve). They are deliberately tiny; all real logic lives in Tcl.
-`bootstrap.cmd` downloads/unpacks using Windows' built-in `curl.exe` and
-`tar.exe` (in `System32` since Windows 10 1803) — never PowerShell.
+No bash, **no PowerShell**, no Python, nothing else. The single `.cmd` file
+exists only because PATH has to be set *before* Tcl is reachable (a
+chicken-and-egg the shell must solve). It is deliberately tiny; all real logic
+lives in Tcl.
 
 To audit compliance:
 
 ```
-x shell
 git ls-files            &:: only .tcl .test .c .cmd + assets/docs
-git grep -i powershell  &:: only the "No PowerShell" comment in bootstrap.cmd
+git grep -i powershell  &:: nothing
 ```
 
 ## What's vendored — `.toolchain/`
@@ -167,13 +165,16 @@ is Alt+PrintScreen → CF_DIB → PNG, converted in-tool (a BITMAPINFOHEADER par
 PrintWindow), retries the foreground-dependent grab, and crops to the window.
 For human review, not the test path. Run `x shot out.png [file ...]`.
 
-## Cold provisioning — `bootstrap.cmd`
+## Distribution
 
-For the `git clone` case where `.toolchain/` is absent (copy-paste needs none of
-this). Pure classical cmd: it downloads a toolchain-bundle `.zip` from
-`%ELS_TOOLCHAIN_URL%` with `curl.exe`, unpacks with `tar.exe`, then runs `x
-toolcheck --prep` to fetch the rest. Hosting the bundle (msys64 makes it large)
-is a separate step; the primary distribution model remains copy-paste.
+**Copy-paste the whole folder.** Because `.toolchain/` (gitignored, ~1 GB+ — the
+gcc toolchain dominates) travels with the folder, dropping it onto a fresh
+Windows 11 machine just works: no install, no provisioning, no network. There is
+deliberately *no* "bootstrap from nothing" script — a multi-hundred-MB gcc + Tcl
+toolchain can't be conjured without either downloading it (needs hosting) or
+building it from source (slow, and the Tcl/Tk build runs MSYS2's bash), so it
+would only add a fragile, half-working path. `x toolcheck --prep` can still fetch
+the small auto-installable pieces (twapi, git) when only those are missing.
 
 ## Portability / relocation
 
