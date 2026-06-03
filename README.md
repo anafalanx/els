@@ -21,7 +21,8 @@ els.cmd                       # Windows — uses the vendored Tcl/Tk 9 under .to
 
 ## Status
 
-Early skeleton — open/save/new, menu, status bar (Ln/Col), the els look.
+Early skeleton — open/save/new, menu, status bar (Ln/Col), icon, line-number
+gutter, current-line highlight, window geometry persistence, the els look.
 Porting v0.3 features (tabs, find/replace, go-to-line, whitespace view, …) onto Tk.
 
 Built on **Tcl/Tk 9.0.3**. MIT licensed.
