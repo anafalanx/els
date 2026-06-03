@@ -61,6 +61,9 @@ namespace eval els {
     variable find_matches {}     ;# list of {start end} index pairs in the active doc
     variable find_current -1     ;# index into find_matches
     variable find_count ""       ;# status text e.g. "3 of 12"
+    variable find_adapt 0        ;# adapt-case replace (replacement follows the match's case)
+    variable find_history {}     ;# recent search terms, newest first (cap 16)
+    variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
     variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
 }
@@ -176,6 +179,10 @@ proc els::init_style {} {
         -fieldbackground $::els::PAGE -foreground $ink -insertcolor $::els::CARET \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
     $s map TEntry -bordercolor [list focus $::els::CARET]
+    # a brief red-tinted field flashed on no-match / wrap-around (never a popup)
+    $s configure Flash.TEntry -relief flat -borderwidth 1 -padding {6 4} \
+        -fieldbackground $::els::WSTRAIL -foreground $::els::INK \
+        -bordercolor $::els::CARET -lightcolor $::els::CARET -darkcolor $::els::CARET
     # buttons: flat, quiet until hovered
     $s configure TButton -background $bg -foreground $ink -anchor center \
         -borderwidth 0 -relief flat -padding {8 4} -focuscolor $bg
@@ -942,22 +949,32 @@ proc els::build_findbar {} {
         -variable ::els::find_word  -command els::find_update
     ttk::checkbutton .find.fr.regex -text ".*" -style Toolbutton -takefocus 0 \
         -variable ::els::find_regex -command els::find_update
+    ttk::button .find.fr.help -text "?" -width 2 -takefocus 0 -command els::regex_help
     ttk::button .find.fr.prev -text "↑" -width 2 -takefocus 0 -command {els::find_step -1}
     ttk::button .find.fr.next -text "↓" -width 2 -takefocus 0 -command {els::find_step 1}
     ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
         -foreground $::els::MUTED -width 11 -anchor e
     ttk::button .find.fr.x -text "×" -width 2 -takefocus 0 -command els::find_hide
-    grid .find.fr.l .find.fr.q .find.fr.case .find.fr.word .find.fr.regex \
+    grid .find.fr.l .find.fr.q .find.fr.case .find.fr.word .find.fr.regex .find.fr.help \
          .find.fr.prev .find.fr.next .find.fr.n .find.fr.x -row 0 -padx 1 -sticky we
     grid columnconfigure .find.fr 1 -weight 1
+    els::tooltip .find.fr.case  "Match case"
+    els::tooltip .find.fr.word  "Whole word"
+    els::tooltip .find.fr.regex "Regular expression (Tcl ARE)"
+    els::tooltip .find.fr.help  "Regex reference"
+    els::tooltip .find.fr.prev  "Previous  (Shift+Enter)"
+    els::tooltip .find.fr.next  "Next  (Enter)"
 
     ttk::frame .find.rr
     ttk::label .find.rr.l -text "Replace" -font elsUI -width 7 -anchor w
     ttk::entry .find.rr.r -textvariable ::els::find_r -font elsUI
+    ttk::checkbutton .find.rr.adapt -text "Adapt case" -style Toolbutton -takefocus 0 \
+        -variable ::els::find_adapt
     ttk::button .find.rr.rep -text "Replace" -takefocus 0 -command els::find_replace_one
     ttk::button .find.rr.all -text "All"     -takefocus 0 -command els::find_replace_all
-    grid .find.rr.l .find.rr.r .find.rr.rep .find.rr.all -row 0 -padx 1 -sticky we
+    grid .find.rr.l .find.rr.r .find.rr.adapt .find.rr.rep .find.rr.all -row 0 -padx 1 -sticky we
     grid columnconfigure .find.rr 1 -weight 1
+    els::tooltip .find.rr.adapt "Adapt case — make each replacement follow the case of the match"
 
     frame .find.top -height 1 -bg $::els::HAIR
     grid .find.top -row 0 -column 0 -sticky ew -pady {0 6}
@@ -965,12 +982,115 @@ proc els::build_findbar {} {
     grid .find.rr -row 2 -column 0 -sticky ew -pady {4 0}
     grid columnconfigure .find 0 -weight 1
 
-    bind .find.fr.q <KeyRelease>   els::find_update
-    bind .find.fr.q <Return>       { els::find_step 1  ; break }
+    bind .find.fr.q <KeyRelease> {
+        if {"%K" ni {Up Down}} { set ::els::find_hidx -1 ; els::find_update }
+    }
+    bind .find.fr.q <Return>       { els::find_history_push $::els::find_q
+                                     els::find_step 1  ; break }
     bind .find.fr.q <Shift-Return> { els::find_step -1 ; break }
+    bind .find.fr.q <Up>           { els::find_history_recall  1 ; break }
+    bind .find.fr.q <Down>         { els::find_history_recall -1 ; break }
     bind .find.fr.q <Escape>       { els::find_hide    ; break }
     bind .find.rr.r <Return>       { els::find_replace_one ; break }
     bind .find.rr.r <Escape>       { els::find_hide    ; break }
+}
+
+# ---- find-bar polish: tooltips, flash, regex help, history --------------
+proc els::tooltip {w text} {
+    bind $w <Enter>      [list els::tip_schedule $w $text]
+    bind $w <Leave>      els::tip_cancel
+    bind $w <ButtonPress> els::tip_cancel
+}
+proc els::tip_schedule {w text} {
+    els::tip_cancel
+    set ::els::tip_after [after 550 [list els::tip_pop $w $text]]
+}
+proc els::tip_cancel {} {
+    if {[info exists ::els::tip_after]} { after cancel $::els::tip_after ; unset ::els::tip_after }
+    catch {destroy .tip}
+}
+proc els::tip_pop {w text} {
+    catch {destroy .tip}
+    if {![winfo exists $w]} { return }
+    toplevel .tip -bd 0
+    wm overrideredirect .tip 1
+    catch {wm attributes .tip -topmost 1}
+    label .tip.l -text $text -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
+    pack .tip.l
+    update idletasks
+    set x [expr {[winfo rootx $w] + [winfo width $w]/2 - [winfo reqwidth .tip]/2}]
+    set y [expr {[winfo rooty $w] + [winfo height $w] + 5}]
+    wm geometry .tip +$x+$y
+}
+
+# briefly flash the search field red — used instead of a popup on no-match/wrap
+proc els::find_flash {} {
+    if {![winfo exists .find.fr.q]} { return }
+    .find.fr.q configure -style Flash.TEntry
+    after 150 { catch {.find.fr.q configure -style TEntry} }
+}
+
+# a compact, scannable Tcl ARE cheat-sheet (opened from the greyed-until-on "?")
+proc els::regex_help {} {
+    catch {destroy .rehelp}
+    toplevel .rehelp
+    wm title .rehelp "Regular expressions — Tcl ARE"
+    wm transient .rehelp .
+    catch {wm attributes .rehelp -topmost 1}
+    ttk::frame .rehelp.f -padding 14
+    pack .rehelp.f -fill both -expand 1
+    ttk::label .rehelp.f.h -text "Tcl ARE — the syntax els searches with" \
+        -font elsUI -foreground $::els::MUTED
+    grid .rehelp.f.h -row 0 -column 0 -columnspan 2 -sticky w -pady {0 8}
+    set rows {
+        {.}           {any character}
+        {[abc]}       {any one of these characters}
+        {[^abc]}      {any character except these}
+        {[a-z]}       {a range}
+        {* + ?}       {0 or more,  1 or more,  0 or 1}
+        {{n} {n,m}}   {exactly n  /  n to m times}
+        {^ $}         {start / end of line}
+        {\m \M}       {start / end of a word}
+        {\w \d \s}    {word character / digit / whitespace}
+        {( ... )}     {capture group}
+        {\1 \2}       {backreference (use in Replace)}
+        {a|b}         {a or b}
+        {\\}          {a literal backslash}
+    }
+    set r 1
+    foreach {tok desc} $rows {
+        ttk::label .rehelp.f.t$r -text $tok  -font elsMono -foreground $::els::INK
+        ttk::label .rehelp.f.d$r -text $desc -font elsUI   -foreground $::els::MUTED
+        grid .rehelp.f.t$r -row $r -column 0 -sticky w -padx {0 22} -pady 1
+        grid .rehelp.f.d$r -row $r -column 1 -sticky w -pady 1
+        incr r
+    }
+    bind .rehelp <Escape> {destroy .rehelp}
+    focus .rehelp
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .rehelp]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .rehelp]) / 3}]
+    wm geometry .rehelp +$x+$y
+}
+
+proc els::find_history_push {term} {
+    variable find_history ; variable find_hidx
+    if {$term eq ""} { return }
+    set find_history [linsert [lsearch -all -inline -not -exact $find_history $term] 0 $term]
+    if {[llength $find_history] > 16} { set find_history [lrange $find_history 0 15] }
+    set find_hidx -1
+}
+proc els::find_history_recall {dir} {
+    variable find_history ; variable find_hidx
+    set n [llength $find_history]
+    if {$n == 0} { return }
+    set i [expr {$find_hidx + $dir}]
+    if {$i < 0}   { set find_hidx -1 ; return }   ;# back below newest: leave field as-is
+    if {$i >= $n} { set i [expr {$n - 1}] }
+    set find_hidx $i
+    set ::els::find_q [lindex $find_history $i]
+    .find.fr.q icursor end
+    els::find_update
 }
 
 # escape ARE metacharacters so a literal string searches literally
@@ -1011,6 +1131,8 @@ proc els::find_update {} {
     variable find_matches ; variable find_count
     set w [els::T]
     if {$w eq ""} { return }
+    # the regex reference is reachable only while Regex is on
+    catch {.find.fr.help configure -state [expr {$find_regex ? "normal" : "disabled"}]}
     $w tag remove findAll 1.0 end
     $w tag remove findOne 1.0 end
     set find_matches {}
@@ -1027,9 +1149,9 @@ proc els::find_update {} {
     if {$useRegex}   { lappend sargs -regexp }
     if {!$find_case} { lappend sargs -nocase }
     if {[catch {set starts [$w search {*}$sargs -count ::els::find_lens -- $pat 1.0 end]}]} {
-        set find_count "bad pattern" ; return
+        set find_count "bad pattern" ; els::find_flash ; return
     }
-    if {![llength $starts]} { set find_count "No results" ; return }
+    if {![llength $starts]} { set find_count "No results" ; els::find_flash ; return }
 
     set lens $::els::find_lens
     set i 0
@@ -1068,30 +1190,56 @@ proc els::find_highlight {idx} {
 proc els::find_step {dir} {
     variable find_matches ; variable find_current
     if {![llength $find_matches]} { els::find_update ; return }
-    els::find_highlight [expr {$find_current + $dir}]
+    set n [llength $find_matches]
+    set next [expr {$find_current + $dir}]
+    if {$next < 0 || $next >= $n} { els::find_flash }   ;# wrapped around
+    els::find_highlight $next
+}
+
+# Make a match's case template carry to its replacement (when Adapt case is on).
+proc els::adapt_case {match repl} {
+    if {!$::els::find_adapt || $match eq "" || ![regexp {[A-Za-z]} $match]} { return $repl }
+    if {$match eq [string toupper $match]} { return [string toupper $repl] }
+    if {$match eq [string tolower $match]} { return [string tolower $repl] }
+    if {$match eq [string totitle $match]} { return [string totitle $repl] }
+    return $repl
+}
+# The replacement text for the match at s..e: expands regex backreferences
+# (\1, \2, …) when Regex is on, then applies adapt-case.
+proc els::repl_for {w s e} {
+    variable find_q ; variable find_r ; variable find_regex ; variable find_word ; variable find_case
+    set matched [$w get $s $e]
+    set repl $find_r
+    if {$find_regex} {
+        set pat [expr {$find_word ? "\\m$find_q\\M" : $find_q}]
+        set fl {} ; if {!$find_case} { lappend fl -nocase }
+        catch {regsub {*}$fl -- $pat $matched $find_r repl}
+    }
+    return [els::adapt_case $matched $repl]
 }
 
 proc els::find_replace_one {} {
-    variable find_matches ; variable find_current ; variable find_r
+    variable find_matches ; variable find_current
     set w [els::T]
     if {$w eq ""} { return }
     if {![llength $find_matches] || $find_current < 0} { els::find_step 1 ; return }
     lassign [lindex $find_matches $find_current] s e
+    set repl [els::repl_for $w $s $e]
     $w edit separator
-    $w replace $s $e $find_r
-    $w mark set insert "$s + [string length $find_r] chars"
+    $w replace $s $e $repl
+    $w mark set insert "$s + [string length $repl] chars"
     els::find_update
 }
 
 proc els::find_replace_all {} {
-    variable find_matches ; variable find_r
+    variable find_matches
     set w [els::T]
     if {$w eq "" || ![llength $find_matches]} { return }
     set n [llength $find_matches]
     $w edit separator
     foreach m [lreverse $find_matches] {
         lassign $m s e
-        $w replace $s $e $find_r
+        $w replace $s $e [els::repl_for $w $s $e]
     }
     $w edit separator
     els::find_update

@@ -6,6 +6,7 @@ proc find_reset {} {
     els_reset
     set ::els::find_q "" ; set ::els::find_r ""
     set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
+    set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::find_matches {} ; set ::els::find_current -1
 }
 
@@ -76,3 +77,37 @@ test replace-1.3 {Replace All is a single undo} -setup {find_reset} -body {
     $w edit undo
     $w get 1.0 "end - 1 char"
 } -result {a a a a}
+
+# ---- Tier 2 polish ------------------------------------------------------
+test replace-2.1 {Adapt case carries the match's case to the replacement} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "cat CAT Cat cAt"
+    set ::els::find_q cat ; set ::els::find_r dog ; set ::els::find_adapt 1
+    els::find_update ; els::find_replace_all
+    $w get 1.0 "end - 1 char"
+} -result {dog DOG Dog dog}
+
+test replace-2.2 {regex backreferences expand in the replacement} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "John Smith, Jane Doe"
+    set ::els::find_q {(\w+) (\w+)} ; set ::els::find_r {\2 \1} ; set ::els::find_regex 1
+    els::find_update ; els::find_replace_all
+    $w get 1.0 "end - 1 char"
+} -result {Smith John, Doe Jane}
+
+test replace-2.3 {adapt-case maps lower/upper/title, skips mixed} \
+        -setup {find_reset ; set ::els::find_adapt 1} -body {
+    list [els::adapt_case foo bar] [els::adapt_case FOO bar] \
+         [els::adapt_case Foo bar] [els::adapt_case fOo bar]
+} -result {bar BAR Bar bar}
+
+test find-2.1 {history records terms newest-first, de-duped} -setup {find_reset} -body {
+    els::find_history_push foo ; els::find_history_push bar ; els::find_history_push foo
+    set ::els::find_history
+} -result {foo bar}
+
+test find-2.2 {Up/Down recall walks history into the query} -setup {find_reset} -body {
+    foreach t {one two three} { els::find_history_push $t }   ;# -> {three two one}
+    els::find_history_recall 1  ; set a $::els::find_q
+    els::find_history_recall 1  ; set b $::els::find_q
+    els::find_history_recall -1 ; set c $::els::find_q
+    list $a $b $c
+} -result {three two three}
