@@ -55,6 +55,7 @@ proc els_reset {} {
     set ::els::seq 0
     array unset ::els::docPath
     array set ::els::docPath {}
+    set ::els::show_ws 0 ; set ::els::word_wrap 0
     els::build
     update
 }

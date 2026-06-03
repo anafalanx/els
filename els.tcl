@@ -65,6 +65,7 @@ namespace eval els {
     variable find_history {}     ;# recent search terms, newest first (cap 16)
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
+    variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
     variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
     variable vs_after ""         ;# pending (idle) scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
@@ -90,9 +91,9 @@ set ::els::TABOFF  "#E6E6E6"     ;# an inactive tab
 set ::els::TABON   "#F2F2F2"     ;# active tab merges into the page
 set ::els::FINDALL "#FFF1C4"     ;# all find matches (soft amber)
 set ::els::FINDONE "#FFD66B"     ;# the current find match (stronger amber)
-set ::els::WSSPACE "#D2DCEC"     ;# spaces — subdued blue block
-set ::els::WSTAB   "#D4E8D9"     ;# tabs — subdued green block (distinct from spaces)
-set ::els::WSTRAIL "#E6D6EE"     ;# trailing whitespace — subdued purple block
+set ::els::WSSPACE "#DCE8F7"     ;# spaces — pastel blue
+set ::els::WSTAB   "#C5D9F2"     ;# tabs — a step deeper
+set ::els::WSTRAIL "#9FBEE8"     ;# trailing whitespace — darker blue
 set ::els::FLASH   "#F7D9D7"     ;# find field flash on no-match (its own faint red)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
@@ -237,6 +238,8 @@ proc els::build {} {
     .menu add cascade -label View -menu .menu.view
     .menu.view add command -label "Go to Line..." -accelerator Ctrl+G -command els::goto_line
     .menu.view add separator
+    .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \
+        -command els::set_wrap
     .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
         -command els::ws_refresh
     menu .menu.help
@@ -288,12 +291,12 @@ proc els::build {} {
     # runs BEFORE the default Text tag, so accelerators here pre-empt Tk's
     # emacs-style defaults (Ctrl+N = down-line, Ctrl+O = open-line, ...).
     bind elsText <<Modified>>    {els::on_modified %W}
-    bind elsText <KeyRelease>    {els::refresh_view ; els::ws_schedule}
+    bind elsText <KeyRelease>    {els::refresh_view}
     bind elsText <ButtonRelease> {els::refresh_view}
     bind elsText <FocusIn>       {els::refresh_view}
-    bind elsText <<Paste>>       {after idle {els::refresh_view ; els::ws_schedule}}
-    bind elsText <<Cut>>         {after idle {els::refresh_view ; els::ws_schedule}}
-    bind elsText <Configure>     {after idle {els::refresh_view ; els::ws_schedule}}
+    bind elsText <<Paste>>       {after idle els::refresh_view}
+    bind elsText <<Cut>>         {after idle els::refresh_view}
+    bind elsText <Configure>     {after idle els::refresh_view}
     bind elsText <Control-n> { els::new;       break }
     bind elsText <Control-o> { els::open;      break }
     bind elsText <Control-s> { els::save;      break }
@@ -336,7 +339,7 @@ proc els::new_doc {{path ""}} {
     set id "d$seq"
     incr seq
     set w [els::W $id]
-    text $w -undo 1 -wrap none -font elsMono \
+    text $w -undo 1 -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
         -insertbackground $::els::CARET -insertwidth 2 -insertofftime 0 \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
@@ -407,7 +410,6 @@ proc els::switch_to {id} {
     els::refresh_view
     if {$::els::find_mode ne ""} { els::find_update }
     after idle els::update_vscroll
-    els::ws_schedule
 }
 proc els::cycle {dir} {
     variable docs
@@ -546,16 +548,34 @@ proc els::update_current_line {} {
     $w tag remove currentLine 1.0 end
     $w tag add currentLine "$line.0" "$line.end + 1 char"
     .ln tag remove currentLine 1.0 end
-    .ln tag add currentLine "$line.0" "$line.end"
+    if {$::els::word_wrap} {
+        # the gutter row of this logical line = display lines before it + 1
+        set grow [expr {[$w count -displaylines 1.0 "$line.0"] + 1}]
+        .ln tag add currentLine "$grow.0" "$grow.end"
+    } else {
+        .ln tag add currentLine "$line.0" "$line.end"
+    }
 }
 proc els::update_line_numbers {} {
-    if {[els::T] eq ""} { return }
+    set w [els::T]
+    if {$w eq ""} { return }
     set lines [els::line_count]
     set digits [string length $lines]
     set width [expr {max(2, $digits + 1)}]
     set numbers ""
-    for {set i 1} {$i <= $lines} {incr i} {
-        append numbers [format "%*d\n" [expr {$width - 1}] $i]
+    if {$::els::word_wrap} {
+        # one number per logical line + a blank row for each extra display row it
+        # wraps onto, so the gutter rows align with the wrapped text
+        for {set i 1} {$i <= $lines} {incr i} {
+            if {$i < $lines} { set to "[expr {$i + 1}].0" } else { set to end }
+            set dl [$w count -displaylines "$i.0" $to]
+            if {$dl < 1} { set dl 1 }
+            append numbers [format "%*d" [expr {$width - 1}] $i] [string repeat "\n" $dl]
+        }
+    } else {
+        for {set i 1} {$i <= $lines} {incr i} {
+            append numbers [format "%*d\n" [expr {$width - 1}] $i]
+        }
     }
     .ln configure -state normal -width $width
     .ln delete 1.0 end
@@ -580,8 +600,11 @@ proc els::yscroll {id first last} {
     # loop. Coalesced so a burst of scrolls schedules one update.
     after cancel $vs_after
     set vs_after [after idle els::update_vscroll]
-    # return markers are viewport-scoped, so rebuild them after a scroll (debounced)
-    els::ws_schedule
+    # whitespace tints are viewport-scoped, so re-tag after a scroll (coalesced)
+    if {$::els::show_ws} {
+        after cancel $::els::ws_after
+        set ::els::ws_after [after idle els::ws_refresh]
+    }
 }
 # Show the scrollbar only when the document doesn't fit (chrome defers).  Reads
 # the live yview rather than a possibly-stale -yscrollcommand value, so it's
@@ -615,7 +638,7 @@ proc els::refresh_view {} {
     els::update_line_numbers
     els::update_current_line
     els::update_vscroll
-    if {$::els::show_ws} { els::ws_tags }
+    if {$::els::show_ws} { els::ws_refresh }
 }
 
 # ---- encoding / EOL -----------------------------------------------------
@@ -810,7 +833,6 @@ proc els::reopen_with {enc bom} {
     els::update_tab $id
     els::settitle
     els::refresh_view
-    els::ws_schedule
 }
 proc els::save_with {enc bom} {
     set id $::els::active
@@ -1317,20 +1339,12 @@ proc els::goto_do {top} {
     if {$w ne ""} { focus $w }
 }
 
-# Reveal whitespace when Show Whitespace is on.  Spaces, tabs and trailing
-# whitespace get distinct subdued background tints (Tk can't substitute glyphs);
-# line endings get a subdued return symbol (a per-line embedded image — the only
-# way to mark a return as a single block, since a tagged newline fills to the
-# margin).  Scoped to the visible viewport so it stays fast on large files;
-# re-runs on scroll (els::yscroll) and edits (els::refresh_view).
-#
-# The return markers are embedded images, so they're excluded from `$w get`
-# (save/copy keep the real text) and never reach the undo stack; the churn is
-# wrapped to keep the document's modified flag and undo history untouched, and
-# ws_busy suppresses the <<Modified>> handler so it can't loop back here.
-# Colour part: tag spaces/tabs/trailing in the visible viewport.  No content
-# change, so this is safe to call from refresh_view on every edit/scroll.
-proc els::ws_tags {} {
+# Reveal whitespace when Show Whitespace is on, by tagging it with subdued
+# background tints — spaces, tabs and trailing whitespace each a step of blue
+# (Tk can't substitute glyphs).  Scoped to the visible viewport so it stays fast
+# on large files; re-runs on scroll (els::yscroll) and edits (els::refresh_view).
+# Pure tagging (no content change), so it's safe anywhere.
+proc els::ws_refresh {} {
     set w [els::T]
     if {$w eq ""} { return }
     $w tag remove wsSpace 1.0 end
@@ -1346,67 +1360,19 @@ proc els::ws_tags {} {
         }
     }
 }
-# Marker part: rebuild the per-line return symbols (embedded images).  This DOES
-# change content, so it must NOT run from refresh_view / <<Modified>> (which the
-# marker churn would re-trigger -> infinite loop).  It runs only from explicit
-# edit/scroll/open triggers, debounced via els::ws_schedule.  The churn is
-# wrapped so it never reaches the undo stack; the modified flag is saved and
-# restored, so embedding markers never dirties the document.
-proc els::ws_returns {} {
-    set w [els::T]
-    if {$w eq ""} { return }
-    set mod [$w edit modified] ; set u [$w cget -undo]
-    $w configure -undo 0
-    els::ws_clear_returns $w
-    if {$::els::show_ws} {
-        set top [$w index @0,0]
-        set bot [$w index "@0,[winfo height $w] + 1 line"]
-        els::ws_add_returns $w $top $bot
+
+# Word wrap: soft-wrap long lines in every document.  The line-number gutter is
+# a separate -wrap none widget synced by fraction, so when wrap is on we give it
+# a blank continuation row for each extra display row a logical line occupies
+# (see update_line_numbers / update_current_line) so the numbers stay aligned.
+proc els::set_wrap {} {
+    variable docs
+    set mode [expr {$::els::word_wrap ? "word" : "none"}]
+    foreach id $docs {
+        if {[winfo exists [els::W $id]]} { [els::W $id] configure -wrap $mode }
     }
-    $w configure -undo $u
-    $w edit modified $mod
-}
-# both halves — for the toggle and for explicit refreshes (open, reopen, ...)
-proc els::ws_refresh {} { els::ws_tags ; els::ws_returns }
-# debounce the marker rebuild; only meaningful while Show Whitespace is on
-proc els::ws_schedule {} {
-    after cancel $::els::ws_after
-    if {$::els::show_ws} {
-        set ::els::ws_after [after 60 els::ws_returns]
-    }
-}
-# the subdued return symbol (↵), drawn once at the document font's metrics
-proc els::ws_ret_img {} {
-    if {[lsearch -exact [image names] ::els::retImg] >= 0} { return ::els::retImg }
-    set wd [font measure elsMono " "] ; if {$wd < 7} { set wd 7 }
-    set ht [font metrics elsMono -linespace]
-    set p [image create photo ::els::retImg -width $wd -height $ht]
-    set g $::els::GUTTINK
-    set cy [expr {$ht/2}] ; set x0 2 ; set x1 [expr {$wd-3}]
-    $p put $g -to $x0 $cy $x1 [expr {$cy+1}]                                  ;# shaft
-    $p put $g -to [expr {$x1-1}] [expr {$cy-$ht/4}] $x1 [expr {$cy+1}]        ;# up-hook
-    for {set k 1} {$k <= 3} {incr k} {                                       ;# left arrowhead
-        $p put $g -to [expr {$x0+$k}] [expr {$cy-$k}] [expr {$x0+$k+1}] [expr {$cy-$k+1}]
-        $p put $g -to [expr {$x0+$k}] [expr {$cy+$k}] [expr {$x0+$k+1}] [expr {$cy+$k+1}]
-    }
-    return ::els::retImg
-}
-proc els::ws_clear_returns {w} {
-    set ranges [$w tag ranges retMark]
-    for {set k [expr {[llength $ranges] - 2}]} {$k >= 0} {incr k -2} {
-        $w delete [lindex $ranges $k] [lindex $ranges [expr {$k + 1}]]
-    }
-}
-proc els::ws_add_returns {w top bot} {
-    set img [els::ws_ret_img]
-    set topl [lindex [split [$w index $top] .] 0]
-    set botl [lindex [split [$w index $bot] .] 0]
-    set markMax [expr {[lindex [split [$w index end] .] 0] - 2}]  ;# last newline-terminated line
-    if {$botl > $markMax} { set botl $markMax }
-    for {set ln $topl} {$ln <= $botl} {incr ln} {
-        $w image create "$ln.end" -image $img -align center
-        $w tag add retMark "$ln.end - 1 char" "$ln.end"
-    }
+    els::update_line_numbers
+    els::refresh_view
 }
 
 # ---- main ---------------------------------------------------------------
