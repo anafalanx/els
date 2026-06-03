@@ -44,6 +44,22 @@ machine-built), so it travels by *copy-paste of the folder*, not by `git clone`.
 
 `x toolcheck` reports the status and version of each.
 
+### Tcl/Tk version — always 9, never msys64's 8.6
+
+MSYS2's `ucrt64` bundles its own **Tcl/Tk 8.6** (`tclsh.exe`, `wish.exe`,
+`tcl86.dll`, an 8.6 `include/tcl.h`, `lib/tcl8.6`).  It is left intact (MSYS2 may
+want it), but **els never uses it**.  The rule:
+
+- Tooling invokes the interpreter only through the explicit vendored paths
+  `tcl9/bin/tclsh90.exe` / `wish90.exe` (and `tcl9s` for packaging) — **never a
+  bare `tclsh`/`wish`**, which on PATH could resolve to the 8.6 build.
+- PATH puts `tcl9/bin` **ahead of** `msys64/ucrt64/bin`.
+- C builds pass `-I.toolchain/tcl9/include` so `tcl.h` is the 9.x header.
+
+`x toolcheck --deep` enforces this: it confirms the live interpreters are 9.0.x
+and that a freshly compiled C extension links the 9.0 stubs and reports a 9.x
+`tcl.h`.
+
 ## Ignition — `x.cmd`
 
 The single entry point. It resolves the toolchain **relative to its own

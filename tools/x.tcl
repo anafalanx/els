@@ -7,10 +7,11 @@
 set ROOT [file normalize [file join [file dirname [info script]] ..]]
 set TC   [file join $ROOT .toolchain]
 
-# Make the vendored toolchain win on PATH (idempotent with x.cmd).  Git is
-# optional (the app and core tooling do not use it) — only added if vendored.
+# Make the vendored toolchain win on PATH (idempotent with x.cmd).  Tcl/Tk 9
+# comes BEFORE msys64 (which ships its own Tcl/Tk 8.6 that els must never use).
+# Git is optional (app and core tooling do not use it) — only added if vendored.
 set vbins {}
-foreach b [list [file join $TC msys64 ucrt64 bin] [file join $TC tcl9 bin] \
+foreach b [list [file join $TC tcl9 bin] [file join $TC msys64 ucrt64 bin] \
                 [file join $TC git cmd]] {
     if {[file isdirectory $b]} { lappend vbins [file nativename $b] }
 }
@@ -28,6 +29,9 @@ proc curl-exe {} {
 # ---- path helpers -------------------------------------------------------
 proc P  {args} { return [file join $::ROOT {*}$args] }
 proc TCp {args} { return [file join $::TC {*}$args] }
+# RULE: always go through these explicit vendored Tcl/Tk 9 paths — NEVER a bare
+# `tclsh`/`wish`, which on PATH could resolve to msys64's Tcl/Tk 8.6.  C builds
+# must likewise pass -I[TCp tcl9 include] (see build-ext / package).
 proc tclsh {} { return [TCp tcl9 bin tclsh90.exe] }
 proc wish  {} { return [TCp tcl9 bin wish90.exe] }
 proc gcc   {} { return [TCp msys64 ucrt64 bin gcc.exe] }

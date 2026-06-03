@@ -138,6 +138,24 @@ proc deep_ext {} {
     return [deep_line "C23<->Tcl extension" $ok $detail]
 }
 
+# Confirm the C build resolves els's Tcl 9 header — NOT msys64's bundled 8.6.
+proc deep_header {} {
+    set gcc [TCp msys64 ucrt64 bin gcc.exe]
+    if {![file exists $gcc]} { return [deep_line "C build uses Tcl 9 header" 0 "gcc missing"] }
+    set t [tmpdir] ; file delete -force $t ; file mkdir $t
+    set c [file join $t hv.c]
+    set fh [open $c w]
+    puts $fh {#include <tcl.h>}
+    puts $fh {const char *V = TCL_PATCH_LEVEL;}
+    close $fh
+    set v ""
+    if {![catch {exec $gcc -I[TCp tcl9 include] -E $c} out]} {
+        regexp {const char \*V = "([0-9.]+)"} $out -> v
+    }
+    file delete -force $t
+    return [deep_line "C build uses Tcl 9 header" [string match 9.* $v] "tcl.h = $v"]
+}
+
 proc deep {} {
     puts ""
     puts "  functional checks (does it actually run?):"
@@ -149,6 +167,7 @@ proc deep {} {
     lassign [tcl_eval "lappend auto_path {[fwd [TCp twapi-dl]]}; puts \[package require twapi\]"] ok out
     incr f [deep_line "twapi loads" [expr {$ok && [string match 5.* [string trim $out]]}] [string trim $out]]
     incr f [deep_ext]
+    incr f [deep_header]
     if {[file exists [TCp git cmd git.exe]]} {
         set ok [expr {![catch {exec [TCp git cmd git.exe] --version}]}]
         incr f [deep_line "git runs" $ok ""]

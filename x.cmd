@@ -13,7 +13,9 @@ rem ============================================================================
 setlocal
 set "ELS_ROOT=%~dp0"
 set "TC=%ELS_ROOT%.toolchain"
-set "PATH=%TC%\msys64\ucrt64\bin;%TC%\tcl9\bin;%PATH%"
+rem Tcl/Tk 9 FIRST, ahead of msys64 (which ships its own Tcl/Tk 8.6 we must not
+rem use).  Our tooling calls tclsh90.exe/wish90.exe explicitly anyway.
+set "PATH=%TC%\tcl9\bin;%TC%\msys64\ucrt64\bin;%PATH%"
 if exist "%TC%\git\cmd" set "PATH=%TC%\git\cmd;%PATH%"
 set "MSYSTEM=UCRT64"
 
