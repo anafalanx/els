@@ -297,3 +297,17 @@ test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
     .menu.edit invoke "Undo" ; update
     $w get 1.0 "end - 1 char"
 } -result keep
+
+test ui-9.1 {About is a Tk window with the icon + name, no tech reference} -setup {ui_reset} -body {
+    els::about
+    catch {wm withdraw .about}
+    set isWin   [winfo exists .about]
+    set name    [.about.name cget -text]
+    set hasicon [expr {[winfo exists .about.icon] || !$::els::iconLoaded}]
+    set tech 0
+    foreach w [winfo children .about] {
+        if {![catch {$w cget -text} t] && [string match -nocase "*tcl*" $t]} { set tech 1 }
+    }
+    destroy .about ; focus [els::T]
+    list $isWin $name $hasicon $tech
+} -result {1 els 1 0}

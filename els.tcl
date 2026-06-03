@@ -98,6 +98,7 @@ set ::els::WSTRAIL "#E9D9F1"     ;# 2+ spaces or trailing whitespace — light m
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
+font create elsTitle -family {Segoe UI Light} -size 40   ;# the About wordmark
 # leading: ~1.34x line height (the single biggest "calm" lever), scaled from
 # the font's own line box so it tracks DPI.  Applied as -spacing1/-spacing3.
 set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]
@@ -1020,8 +1021,36 @@ proc els::saveas {} {
     els::update_tab $active
 }
 proc els::about {} {
-    tk_messageBox -parent . -title "About els" -type ok \
-        -message "els $::els::version\nTcl/Tk [info patchlevel]\n\nA tiny, scriptable text editor."
+    catch {destroy .about}
+    toplevel .about -bg $::els::PAGE
+    wm withdraw .about        ;# build off-screen, reveal only when fully formed
+    wm title .about "About els"
+    wm transient .about .
+    wm resizable .about 0 0
+    set bg $::els::PAGE
+    if {$::els::iconLoaded} {
+        catch {image delete elsAboutIcon}
+        image create photo elsAboutIcon
+        elsAboutIcon copy elsIcon -subsample 2 -subsample 2   ;# 256px -> 128px
+        label .about.icon -image elsAboutIcon -bg $bg -bd 0
+        pack .about.icon -padx 56 -pady {36 16}
+    }
+    label .about.name -text "els" -font elsTitle -fg $::els::INK -bg $bg
+    pack .about.name
+    label .about.tag -text "a tiny, scriptable text editor" \
+        -font elsUI -fg $::els::MUTED -bg $bg
+    pack .about.tag -pady {6 14}
+    label .about.ver -text "version $::els::version" -font elsUI -fg $::els::MUTED -bg $bg
+    pack .about.ver -pady {0 30}
+    # a click anywhere, or Escape, dismisses it
+    bind .about <Escape>   {destroy .about}
+    bind .about <Button-1> {destroy .about}
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .about]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .about]) / 3}]
+    wm geometry .about +$x+$y
+    wm deiconify .about
+    focus .about
 }
 proc els::quit {} {
     variable docs
