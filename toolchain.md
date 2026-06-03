@@ -193,13 +193,17 @@ cursor index) — far more reliable than pixel-driving, and headless. `els.tcl`'
 `main` is guarded by `info script eq argv0`, so the suite sources the editor
 without launching its UI. Run `x test`.
 
-## Screenshots — `tools/shot.tcl`
+## Screenshots — `tools/shot.tcl` + `src/cap.c`
 
-All-Tcl (no AutoIt): twapi finds the window and reads the clipboard; the capture
-is Alt+PrintScreen → CF_DIB → PNG, converted in-tool (a BITMAPINFOHEADER parser
-→ P6 PPM → Tk photo → PNG). It raises els topmost (twapi has no occlusion-proof
-PrintWindow), retries the foreground-dependent grab, and crops to the window.
-For human review, not the test path. Run `x shot out.png [file ...]`.
+Robust, occlusion-proof window capture.  twapi finds the target window by PID;
+the **cap C extension** (`src/cap.c`, built by `x build-ext`) captures it with
+**`PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)`** — rendering that *one*
+window's pixels even when it is covered or in the background, with no foreground,
+no clipboard, no Snipping-Tool, and no full-screen crop.  It returns a DIB
+(BITMAPINFOHEADER + 32-bpp pixels) that `shot.tcl` converts to PNG (→ P6 PPM →
+Tk photo).  Deterministic — no retries.  `x shot out.png [file ...]` builds the
+extension on demand.  (`PrintWindow` is reliable for normal GDI/DWM windows like
+Tk's; it can fail on hardware-accelerated apps, but we only shoot our own.)
 
 ## Distribution
 

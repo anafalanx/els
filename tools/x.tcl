@@ -153,6 +153,8 @@ proc task_icon {args} {
 proc task_shot {args} {
     need tclsh wish twapi
     if {[llength $args] < 1} { error "usage: x shot <out.png> \[file ...\]" }
+    # shot.tcl captures via the cap extension (PrintWindow) — build it on demand
+    if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
     set out [lindex $args 0]
     stream [tclsh] [P tools shot.tcl] [wish] [P els.tcl] $out {*}[lrange $args 1 end]
 }
@@ -175,7 +177,7 @@ proc task_build-ext {args} {
         set init [string totitle $name]
         puts "cc  [file tail $src] -> build/$name.dll"
         stream [gcc] -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS \
-            -I$inc $src -o $dll -L$lib -ltclstub -static-libgcc
+            -I$inc $src -o $dll -L$lib -ltclstub -static-libgcc -luser32 -lgdi32
         puts $idx "package ifneeded $name 0.1 \[list load \[file join \$dir $name.dll\] $init\]"
     }
     close $idx

@@ -1,15 +1,16 @@
 #!/usr/bin/env tclsh
-# tools/shot.tcl — launch els and screenshot its window to PNG, all-Tcl.
+# tools/shot.tcl — launch a Tk app and screenshot ITS window to PNG, robustly.
 #
-# Driving + window-finding via twapi (Tcl Windows API extension); the capture
-# is Alt+PrintScreen -> clipboard CF_DIB -> PNG, converted here in pure Tcl/Tk.
-# Replaces the AutoIt screenshot harness.
+# Window-finding via twapi (by PID); the capture is the cap extension's
+# PrintWindow (occlusion-proof) -> a DIB, converted to PNG here.  No clipboard,
+# no foreground, no Snipping-Tool, no full-screen crop — it grabs only the one
+# window, even if covered or in the background.
 #
 #   tclsh90.exe tools/shot.tcl <wish.exe> <els.tcl> <out.png> [file ...]
+#   tclsh90.exe tools/shot.tcl <els.exe> - <out.png> [file ...]   # single-exe
 #   tclsh90.exe tools/shot.tcl --selftest        ;# headless converter checks
 #
-# Note: Alt+PrintScreen captures the *foreground* window, so els is raised and
-# must be unoccluded during the snap (unlike PrintWindow, which works occluded).
+# Requires build/cap.dll (`x build-ext`).
 
 package require Tk
 wm withdraw .
@@ -88,37 +89,18 @@ proc els_window_for_pid {pid timeoutMs} {
     return ""
 }
 
-# Make els the unoccluded, top-of-stack window.  twapi can only capture what is
-# actually on screen (no occlusion-proof PrintWindow), so we raise els above
-# other (non-topmost) windows.  Topmost z-order does NOT steal keyboard focus.
-proc raise_topmost {hwin} {
-    catch {twapi::set_window_zorder $hwin topmost}
-    catch {twapi::set_foreground_window $hwin}   ;# best effort; topmost is the lever
-    after 500
-}
-
-# Grab to clipboard CF_DIB, then crop to the els rect afterwards, so only the
-# window — never the whole desktop — is written to disk.  We use Alt+PrintScreen
-# (not bare PrintScreen): on Windows 11 the bare key is routed to the Snipping
-# Tool and never reaches the clipboard, whereas Alt+PrintScreen still copies a
-# bitmap.  (The Alt modifier does not narrow it to the active window via
-# send_keys here, so we capture the screen and crop.)
-proc grab_screen_dib {} {
-    catch {twapi::open_clipboard ; twapi::empty_clipboard ; twapi::close_clipboard}
-    twapi::send_keys {%{PRTSC}}
-    set deadline [expr {[clock milliseconds] + 4000}]
-    while {[clock milliseconds] < $deadline} {
-        after 150
-        if {![catch {twapi::read_clipboard 8} dib] && [string length $dib] > 40} {
-            return $dib
-        }
-    }
-    error "no CF_DIB appeared on the clipboard after PrintScreen"
+# A twapi handle is a {address TYPE} list (e.g. {5900116 HWND}); elscap::window
+# wants the integer address.
+proc hwnd_int {h} {
+    set a [lindex $h 0]
+    if {[regexp {(0x[0-9a-fA-F]+|[0-9]+)} $a -> n]} { return $n }
+    return $a
 }
 
 proc main {argv} {
     if {[lindex $argv 0] eq "--selftest"} { selftest ; return }
     package require twapi
+    load [file join $::SHOT_ROOT build cap.dll] Cap
 
     lassign $argv app script out
     set files [lrange $argv 3 end]
@@ -135,43 +117,12 @@ proc main {argv} {
     set hwin [els_window_for_pid $pid 12000]
     if {$hwin eq ""} {
         catch {twapi::end_process $pid -force}
-        puts stderr "els window for pid $pid never appeared"
+        puts stderr "window for pid $pid never appeared"
         exit 3
     }
     after 700                     ;# let Tk finish painting
-    # The clipboard capture is foreground-dependent and occasionally drops a
-    # frame, so retry.  Alt+PrintScreen yields either the active window (els,
-    # once topmost wins) or the whole screen — the former is used as-is, the
-    # latter is cropped to the els rect.
-    set img ""
-    for {set attempt 1} {$attempt <= 4} {incr attempt} {
-        raise_topmost $hwin
-        if {[catch {grab_screen_dib} dib]} {
-            puts "attempt $attempt: $dib; retrying"
-            after 400
-            continue
-        }
-        set full [dib_to_photo $dib]
-        set fw [image width $full] ; set fh [image height $full]
-        lassign [twapi::virtual_screen_dims] sx sy sw sh
-        if {$fw >= $sw - 8} {
-            lassign [twapi::get_window_coordinates $hwin] L T R B
-            set L [expr {max(0,$L)}] ; set T [expr {max(0,$T)}]
-            set R [expr {min($fw,$R)}] ; set B [expr {min($fh,$B)}]
-            puts "attempt $attempt: full screen ${fw}x${fh}; crop els rect $L $T $R $B"
-            set img [image create photo -width [expr {$R-$L}] -height [expr {$B-$T}]]
-            $img copy $full -from $L $T $R $B -to 0 0
-            image delete $full
-        } else {
-            puts "attempt $attempt: active-window capture ${fw}x${fh}"
-            set img $full
-        }
-        break
-    }
-    if {$img eq ""} {
-        catch {twapi::end_process $pid -force}
-        error "capture failed after retries"
-    }
+    # PrintWindow the target directly — occlusion-proof, no foreground needed.
+    set img [dib_to_photo [elscap::window [hwnd_int $hwin]]]
     $img write $out -format png
     puts "wrote $out ([image width $img]x[image height $img])"
     # close only the window we spawned (clean WM_CLOSE, then ensure exit)
