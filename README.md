@@ -65,7 +65,7 @@ basis of els's encoding auto-detection.
 
 ## Status
 
-Working editor (v0.12). Multi-file tabs (each its own document — independent
+Working editor (v0.13). Multi-file tabs (each its own document — independent
 undo, selection, dirty state), line-number gutter, current-line highlight,
 window-geometry persistence, the els look and the red awl icon.
 
