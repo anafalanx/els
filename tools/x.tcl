@@ -66,7 +66,8 @@ proc task_help {args} {
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
   fetch-twapi        vendor the twapi extension into .toolchain/
   fetch-git          vendor MinGit into .toolchain/git/
-  toolcheck [--prep] check the vendored toolchain (--prep fetches/updates)
+  toolcheck [opts]   check the toolchain — --prep fetches/updates, --deep runs
+                     functional checks (compile C, load Tk/twapi, run the chain)
   shell              open a shell with the vendored toolchain on PATH
   env                print the resolved toolchain paths + versions
   help               this message}

@@ -85,10 +85,20 @@ scan is `x toolcheck`, on demand.
 ## Toolchain check — `tools/toolcheck.tcl`
 
 A manifest-driven console report. Each component carries a pinned `want`
-version; status is `OK` / `UPDATE (have X, want Y)` / `MISSING`. `x toolcheck
---prep` fetches the auto-installable pieces (twapi, git) — re-fetching outdated
-ones after removing the stale copy — and prints instructions for the manual ones
-(Tcl, gcc, which are heavy/external). Adding a component is one manifest line.
+version; status is `OK` / `UPDATE (have X, want Y)` / `MISSING`. The basic report
+already *runs* most tools to read their version (`gcc -dumpversion`, `tclsh ...
+info patchlevel`, `git --version`), so a binary that can't launch is caught.
+`x toolcheck --prep` fetches the auto-installable pieces (twapi, git) —
+re-fetching outdated ones after removing the stale copy — and prints
+instructions for the manual ones (Tcl, gcc, which are heavy/external). Adding a
+component is one manifest line.
+
+**`x toolcheck --deep`** goes further — it verifies the toolchain actually
+*works*, the check to run after a copy-paste onto a new machine: it evaluates a
+Tcl script, loads and instantiates a **Tk** widget, loads **twapi**, **compiles
+a C file with gcc and loads the resulting stubs DLL** (the whole C23↔Tcl chain),
+and runs git. Everything goes through the console `tclsh`, so any failure prints
+as text — never a GUI dialog.
 
 ## C23 ↔ Tcl extensions
 

@@ -95,8 +95,70 @@ proc prep {} {
     }
 }
 
+# ---- deep functional checks (--deep): does it actually RUN? ---------------
+# Everything is exercised through the *console* tclsh90, so failures arrive as
+# text on stderr (never a GUI dialog), including the Tk check.
+proc tmpdir {} {
+    set d [expr {[info exists ::env(TEMP)] && $::env(TEMP) ne "" ? $::env(TEMP) : $::TC}]
+    return [file join $d els_toolcheck_[pid]]
+}
+proc fwd {p} { return [string map {\\ /} [file nativename $p]] }
+
+proc tcl_eval {script} {
+    # run a script in the vendored shared tclsh; return {ok output}
+    if {[catch {exec [TCp tcl9 bin tclsh90.exe] << $script} out]} { return [list 0 $out] }
+    return [list 1 $out]
+}
+proc deep_line {name ok detail} {
+    puts [format "  %-26s %-5s %s" $name [expr {$ok ? {PASS} : {FAIL}}] $detail]
+    return [expr {$ok ? 0 : 1}]
+}
+
+# Compile a tiny stubs extension and load it — proves gcc + headers + stubs +
+# Tcl's `load` all work together (the whole C23<->Tcl chain).
+proc deep_ext {} {
+    set gcc [TCp msys64 ucrt64 bin gcc.exe]
+    if {![file exists $gcc]} { return [deep_line "C23<->Tcl extension" 0 "gcc missing"] }
+    set t [tmpdir]; file delete -force $t; file mkdir $t
+    set c [file join $t tcverify.c]; set dll [file join $t tcverify.dll]
+    set fh [open $c w]
+    puts $fh {#include <tcl.h>}
+    puts $fh {static int Tc(void*cd,Tcl_Interp*ip,int o,Tcl_Obj*const v[]){Tcl_SetObjResult(ip,Tcl_NewIntObj(1234));return TCL_OK;}}
+    puts $fh {int Tcverify_Init(Tcl_Interp*ip){if(Tcl_InitStubs(ip,"9.0",0)==NULL)return TCL_ERROR;Tcl_CreateObjCommand(ip,"tcverify",Tc,NULL,NULL);return TCL_OK;}}
+    close $fh
+    set ok 1; set detail "gcc -std=c23 compile + stubs load OK"
+    if {[catch {exec $gcc -std=c23 -O1 -shared -DUSE_TCL_STUBS -I[TCp tcl9 include] \
+            $c -o $dll -L[TCp tcl9 lib] -ltclstub -static-libgcc} e]} {
+        set ok 0; set detail "compile failed: $e"
+    } else {
+        lassign [tcl_eval "load {[fwd $dll]} Tcverify; puts \[tcverify\]"] lok lout
+        if {!$lok || [string trim $lout] ne "1234"} { set ok 0; set detail "load failed: $lout" }
+    }
+    file delete -force $t
+    return [deep_line "C23<->Tcl extension" $ok $detail]
+}
+
+proc deep {} {
+    puts ""
+    puts "  functional checks (does it actually run?):"
+    set f 0
+    lassign [tcl_eval {puts [expr {6*7}]}] ok out
+    incr f [deep_line "Tcl evaluates a script" [expr {$ok && [string trim $out] eq "42"}] [string trim $out]]
+    lassign [tcl_eval {package require Tk; label .l -text hi; puts [winfo class .l]; exit}] ok out
+    incr f [deep_line "Tk creates a widget" [expr {$ok && [string match *abel [string trim $out]]}] [string trim $out]]
+    lassign [tcl_eval "lappend auto_path {[fwd [TCp twapi-dl]]}; puts \[package require twapi\]"] ok out
+    incr f [deep_line "twapi loads" [expr {$ok && [string match 5.* [string trim $out]]}] [string trim $out]]
+    incr f [deep_ext]
+    if {[file exists [TCp git cmd git.exe]]} {
+        set ok [expr {![catch {exec [TCp git cmd git.exe] --version}]}]
+        incr f [deep_line "git runs" $ok ""]
+    }
+    return $f
+}
+
 # ---- main ---------------------------------------------------------------
 set doPrep [expr {("--prep" in $argv) || ("--fix" in $argv)}]
+set doDeep [expr {"--deep" in $argv}]
 set issues [report]
 if {$doPrep} {
     if {$issues == 0} {
@@ -107,9 +169,12 @@ if {$doPrep} {
         set issues [report]
     }
 }
+if {$doDeep} { incr issues [deep] }
+puts ""
 if {$issues > 0} {
-    puts "  $issues core issue(s).  `x toolcheck --prep` fetches/updates the installable ones."
+    puts "  $issues issue(s). `x toolcheck --prep` fetches/updates; `--deep` runs functional checks."
     exit 1
 }
-puts "  all core components present and current."
+puts [expr {$doDeep ? "  all components present, current, and functional." \
+                    : "  all core components present and current.  (run `x toolcheck --deep` to verify they work)"}]
 exit 0
