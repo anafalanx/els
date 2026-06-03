@@ -11,6 +11,12 @@ set ::els_helpers_loaded 1
 package require Tk
 package require tcltest
 
+# Keep the test UI invisible without unmapping it. Keyboard `event generate`
+# needs a mapped, focusable window, so we can't withdraw the root; instead make
+# it fully transparent — present and focusable for the tests, unseen by the user.
+catch {wm attributes . -alpha 0.0}
+wm geometry . 900x620+100+100
+
 set ::ELS_ROOT [file normalize [file join [file dirname [info script]] ..]]
 set ::ELS_TMP  [file join $::ELS_ROOT tests _tmp]
 file mkdir $::ELS_TMP

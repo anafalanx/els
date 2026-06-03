@@ -87,8 +87,8 @@ set ::els::TABOFF  "#E6E6E6"     ;# an inactive tab
 set ::els::TABON   "#F2F2F2"     ;# active tab merges into the page
 set ::els::FINDALL "#FFF1C4"     ;# all find matches (soft amber)
 set ::els::FINDONE "#FFD66B"     ;# the current find match (stronger amber)
-set ::els::WSTAB   "#E6E6EF"     ;# tabs (faint blue-grey)
-set ::els::WSTRAIL "#F7D6D6"     ;# trailing whitespace (faint red)
+set ::els::WSTAB   "#D3D8F0"     ;# tabs (blue-grey block — visible on page + line)
+set ::els::WSTRAIL "#F3C0C0"     ;# trailing whitespace (clear red block)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
@@ -341,13 +341,15 @@ proc els::new_doc {{path ""}} {
         -tabstyle wordprocessor \
         -yscrollcommand [list els::yscroll $id]
     $w tag configure currentLine -background $::els::LINE
-    $w tag lower currentLine
-    $w tag configure findAll -background $::els::FINDALL
-    $w tag configure findOne -background $::els::FINDONE
     $w tag configure wsTab   -background $::els::WSTAB
     $w tag configure wsTrail -background $::els::WSTRAIL
-    $w tag lower wsTab currentLine
-    $w tag lower wsTrail currentLine
+    $w tag configure findAll -background $::els::FINDALL
+    $w tag configure findOne -background $::els::FINDONE
+    # stacking, low -> high: current-line wash < whitespace < matches < selection
+    # (whitespace above the line wash so it's visible on the current line too)
+    $w tag lower currentLine
+    $w tag raise wsTab
+    $w tag raise wsTrail
     $w tag raise findAll
     $w tag raise findOne
     $w tag raise sel
