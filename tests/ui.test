@@ -1,0 +1,281 @@
+# tests/ui.test — comprehensive UI-level tests: drive the REAL widgets the way a
+# user does, via `event generate` and menu/button `invoke`. Covers chrome, tabs,
+# editing, find/replace (hard), go-to-line, whitespace, scrollbar, menus, and a
+# no-hang stress of incremental search on a large buffer.
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+proc ui_reset {} {
+    els_reset
+    set ::els::find_q "" ; set ::els::find_r ""
+    set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
+    set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
+    set ::els::find_matches {} ; set ::els::find_current -1
+    set ::els::show_ws 0
+    set ::els_test_openfile "" ; set ::els_test_savefile "" ; set ::els_test_mbanswer yes
+}
+# run the real event loop for ms (lets debounced/idle `after`s fire)
+proc ui_settle {{ms 220}} { set ::__s 0 ; after $ms {set ::__s 1} ; vwait ::__s }
+# type into the focused find entry like a user: insert the char, fire KeyRelease
+proc ui_type_find {str} {
+    focus .find.fr.q
+    foreach ch [split $str ""] {
+        .find.fr.q insert insert $ch
+        set ks [expr {[string is alnum -strict $ch] ? $ch : "space"}]
+        event generate .find.fr.q <KeyRelease> -keysym $ks
+    }
+}
+proc cur_line {} { lindex [split [[els::T] index insert] .] 0 }
+proc raw_write {name bytes} {
+    set p [file join $::ELS_TMP $name]
+    set f [open $p w] ; fconfigure $f -translation binary
+    puts -nonewline $f $bytes ; close $f ; return $p
+}
+
+# ---- chrome / startup ---------------------------------------------------
+test ui-1.1 {core widgets exist after build} -setup {ui_reset} -body {
+    list [winfo exists .menu] [winfo exists .tabs] [winfo exists .ln] \
+         [winfo exists .vs] [winfo exists .sb] [winfo exists [els::T]]
+} -result {1 1 1 1 1 1}
+
+test ui-1.2 {the flat theme and the red accent caret are in effect} -setup {ui_reset} -body {
+    list [ttk::style theme use] [[els::T] cget -insertbackground] \
+         [[els::T] cget -insertofftime]
+} -result [list clam $::els::CARET 0]
+
+test ui-1.3 {status bar tracks the caret position} -setup {ui_reset} -body {
+    [els::T] insert end "hello\nworld"
+    [els::T] mark set insert 2.3 ; els::refresh_view   ;# char index 3 -> Col 4 (1-based)
+    .sb.pos cget -text
+} -result {Ln 2, Col 4}
+
+# ---- tabs (via generated events) ----------------------------------------
+test ui-2.1 {Ctrl+N opens a new tab} -setup {ui_reset} -body {
+    set b [llength $::els::docs]
+    event generate [els::T] <Control-n> ; update
+    expr {[llength $::els::docs] - $b}
+} -result 1
+
+test ui-2.2 {Ctrl+W closes the current clean tab} -setup {ui_reset} -body {
+    els::new_doc ; update
+    set b [llength $::els::docs]
+    event generate [els::T] <Control-w> ; update
+    expr {$b - [llength $::els::docs]}
+} -result 1
+
+test ui-2.3 {Ctrl+Tab cycles to the next document} -setup {ui_reset} -body {
+    set a $::els::active
+    els::new_doc ; update
+    event generate [els::T] <Control-Tab> ; update
+    expr {$::els::active eq $a}
+} -result 1
+
+test ui-2.4 {clicking a tab switches to it} -setup {ui_reset} -body {
+    set first $::els::active
+    set second [els::new_doc] ; update
+    event generate [els::tabW $first] <Button-1> ; update
+    set r [expr {$::els::active eq $first}]
+    event generate [els::tabW $second] <Button-1> ; update
+    list $r [expr {$::els::active eq $second}]
+} -result {1 1}
+
+test ui-2.5 {the tab close button closes that document} -setup {ui_reset} -body {
+    set extra [els::new_doc] ; update
+    set b [llength $::els::docs]
+    event generate [els::tabW $extra].close <Button-1> ; update
+    expr {$b - [llength $::els::docs]}
+} -result 1
+
+# ---- editing (generated keystrokes) -------------------------------------
+test ui-3.1 {typed keystrokes land in the buffer} -setup {ui_reset} -body {
+    set w [els::T] ; focus $w
+    foreach ch {h e l l o} { event generate $w <KeyPress> -keysym $ch }
+    update
+    $w get 1.0 "end - 1 char"
+} -result hello
+
+test ui-3.2 {undo reverts an edit} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "abc" ; $w edit separator
+    $w insert end "def"
+    $w edit undo
+    $w get 1.0 "end - 1 char"
+} -result abc
+
+test ui-3.3 {arrow keys move the caret and update the status bar} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "one\ntwo\nthree" ; $w mark set insert 1.0
+    focus $w
+    event generate $w <Down> ; event generate $w <Right> ; update
+    els::refresh_view
+    .sb.pos cget -text
+} -result {Ln 2, Col 2}
+
+# ---- find / replace (the hard part) -------------------------------------
+test ui-4.1 {Ctrl+F shows the find bar and focuses the field} -setup {ui_reset} -body {
+    event generate [els::T] <Control-f> ; update
+    list [winfo ismapped .find] [expr {[focus] eq ".find.fr.q"}]
+} -result {1 1}
+
+test ui-4.2 {typing in the find field highlights matches (debounced)} -setup {ui_reset} -body {
+    [els::T] insert end "foo bar foo baz foo"
+    event generate [els::T] <Control-f> ; update
+    ui_type_find "foo"
+    ui_settle
+    list [llength $::els::find_matches] $::els::find_count
+} -result {3 {1 of 3}}
+
+test ui-4.3 {Enter steps to the next match and wraps} -setup {ui_reset} -body {
+    [els::T] insert end "x x x"
+    event generate [els::T] <Control-f> ; update
+    ui_type_find "x" ; ui_settle
+    set seq [list $::els::find_current]
+    foreach _ {1 2 3} {
+        event generate .find.fr.q <Return> ; update
+        lappend seq $::els::find_current
+    }
+    set seq
+} -result {0 1 2 0}
+
+test ui-4.4 {Match Case toggle narrows the matches} -setup {ui_reset} -body {
+    [els::T] insert end "Foo foo FOO foo"
+    event generate [els::T] <Control-f> ; update
+    ui_type_find "foo" ; ui_settle
+    set before [llength $::els::find_matches]
+    .find.fr.case invoke ; ui_settle      ;# turn Match Case on
+    list $before [llength $::els::find_matches]
+} -result {4 2}
+
+test ui-4.5 {Regex toggle enables a pattern search; help button enables} -setup {ui_reset} -body {
+    [els::T] insert end "a1 b2 cc d3"
+    event generate [els::T] <Control-f> ; update
+    .find.fr.regex invoke
+    ui_type_find {[a-z][0-9]} ; ui_settle
+    list [llength $::els::find_matches] [.find.fr.help cget -state]
+} -result {3 normal}
+
+test ui-4.6 {Ctrl+H reveals replace; Replace All replaces every match} -setup {ui_reset} -body {
+    [els::T] insert end "cat cat cat"
+    event generate [els::T] <Control-h> ; update
+    set rowShown [winfo ismapped .find.rr]
+    ui_type_find "cat" ; ui_settle
+    set ::els::find_r "dog"
+    .find.rr.all invoke ; update
+    list $rowShown [[els::T] get 1.0 "end - 1 char"]
+} -result {1 {dog dog dog}}
+
+test ui-4.7 {Adapt-case toggle drives case-aware replacement} -setup {ui_reset} -body {
+    [els::T] insert end "cat CAT Cat"
+    event generate [els::T] <Control-h> ; update
+    ui_type_find "cat" ; ui_settle
+    set ::els::find_r "dog"
+    .find.rr.adapt invoke
+    .find.rr.all invoke ; update
+    [els::T] get 1.0 "end - 1 char"
+} -result {dog DOG Dog}
+
+test ui-4.8 {the regex reference opens and closes} -setup {ui_reset} -body {
+    event generate [els::T] <Control-f> ; update
+    .find.fr.regex invoke
+    .find.fr.help invoke ; update
+    set opened [winfo exists .rehelp]
+    event generate .rehelp <Escape> ; update
+    list $opened [winfo exists .rehelp]
+} -result {1 0}
+
+test ui-4.9 {search history records on Enter and recalls with Up} -setup {ui_reset} -body {
+    [els::T] insert end "alpha beta gamma"
+    event generate [els::T] <Control-f> ; update
+    ui_type_find "beta" ; ui_settle
+    event generate .find.fr.q <Return> ; update     ;# records "beta"
+    set ::els::find_q "" ; els::find_update
+    event generate .find.fr.q <Up> ; update          ;# recall "beta"
+    set ::els::find_q
+} -result beta
+
+test ui-4.10 {Escape hides the find bar} -setup {ui_reset} -body {
+    event generate [els::T] <Control-f> ; update
+    set shown [winfo ismapped .find]
+    event generate .find.fr.q <Escape> ; update
+    list $shown [winfo ismapped .find]
+} -result {1 0}
+
+test ui-4.11 {no-match reports calmly, never throws} -setup {ui_reset} -body {
+    [els::T] insert end "nothing here"
+    event generate [els::T] <Control-f> ; update
+    ui_type_find "zzzzz" ; ui_settle
+    list [llength $::els::find_matches] $::els::find_count
+} -result {0 {No results}}
+
+test ui-4.12 {STRESS: rapid incremental search on a big buffer never hangs} \
+        -constraints {} -setup {ui_reset} -body {
+    # ~55 KB buffer; debounced search must keep the UI responsive
+    set big "" ; for {set i 0} {$i < 1000} {incr i} {
+        append big "the quick brown fox jumps over the lazy dog $i\n"
+    }
+    [els::T] insert end $big
+    event generate [els::T] <Control-f> ; update
+    set t0 [clock milliseconds]
+    foreach q {t th the q qu o ov ove over} {     ;# rapid keystrokes
+        set ::els::find_q $q
+        event generate .find.fr.q <KeyRelease> -keysym [string index $q end]
+    }
+    .find.fr.regex invoke
+    foreach q {a a* .* {\w*}} {                    ;# empty-matching regexes
+        set ::els::find_q $q
+        event generate .find.fr.q <KeyRelease> -keysym space
+    }
+    ui_settle 400                                  ;# let the debounce resolve
+    set ms [expr {[clock milliseconds] - $t0}]
+    expr {$ms < 4000 && [llength $::els::find_matches] > 0 ? "ok" : "SLOW:$ms"}
+} -result ok
+
+# ---- go to line (modal, generated events) -------------------------------
+test ui-5.1 {Ctrl+G then Go jumps the caret to the line} -setup {ui_reset} -body {
+    [els::T] insert end "L1\nL2\nL3\nL4\nL5\nL6"
+    event generate [els::T] <Control-g> ; update
+    catch {wm withdraw .goto}
+    set built [winfo exists .goto.f.e]
+    .goto.f.e insert end 4
+    .goto.f.b.ok invoke ; update
+    list $built [cur_line] [winfo exists .goto]
+} -result {1 4 0}
+
+# ---- show whitespace (menu toggle) --------------------------------------
+test ui-6.1 {Show Whitespace tags tabs and trailing whitespace} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "\tindented\ntrailing   \nclean"
+    .menu.view invoke "Show Whitespace" ; update     ;# toggle on
+    set tabs   [expr {[llength [$w tag ranges wsTab]]   / 2}]
+    set trails [expr {[llength [$w tag ranges wsTrail]] / 2}]
+    list $::els::show_ws $tabs $trails
+} -result {1 1 1}
+
+test ui-6.2 {toggling Show Whitespace off clears the tags} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "\tx   "
+    .menu.view invoke "Show Whitespace" ; update     ;# on
+    .menu.view invoke "Show Whitespace" ; update     ;# off
+    list $::els::show_ws [llength [$w tag ranges wsTab]] [llength [$w tag ranges wsTrail]]
+} -result {0 0 0}
+
+# ---- scrollbar auto-hide ------------------------------------------------
+test ui-7.1 {the scrollbar hides for a short doc, shows for a long one} -setup {ui_reset} -body {
+    [els::T] insert end "one\ntwo\nthree"
+    els::refresh_view ; ui_settle
+    set fits $::els::vs_shown
+    [els::T] insert end [string repeat "\nline" 200]
+    els::refresh_view ; ui_settle
+    list $fits $::els::vs_shown
+} -result {0 1}
+
+# ---- menus --------------------------------------------------------------
+test ui-8.1 {the menu bar has File / View / Help cascades} -setup {ui_reset} -body {
+    set labels {}
+    for {set i 0} {$i <= [.menu index end]} {incr i} {
+        if {[.menu type $i] eq "cascade"} { lappend labels [.menu entrycget $i -label] }
+    }
+    set labels
+} -result {File View Help}
+
+test ui-8.2 {File menu items are wired} -setup {ui_reset} -body {
+    set b [llength $::els::docs]
+    .menu.file invoke "New Tab" ; update
+    expr {[llength $::els::docs] - $b}
+} -result 1

@@ -42,6 +42,10 @@ set ::els_test_mbanswer "yes"
 # the real menus; tests select entries via the canonical `<menu> invoke`.
 proc ::tk_popup {args} {}
 
+# Neutralize input grabs in tests: the go-to-line modal grabs, which could trap
+# the user's input during an automated run. (Tests never assert on grab state.)
+proc ::grab {args} {}
+
 # Build a clean els UI for a test, resetting all document state.
 proc els_reset {} {
     catch {. configure -menu {}}

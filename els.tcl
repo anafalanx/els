@@ -66,6 +66,8 @@ namespace eval els {
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
     variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
+    variable vs_after ""         ;# pending (idle) scrollbar-visibility update
+    variable find_after ""       ;# pending (debounced) incremental search
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -562,10 +564,15 @@ proc els::sync_scroll {} {
 }
 proc els::yscroll {id first last} {
     variable active
+    variable vs_after
     if {$id ne $active} { return }
     .vs set $first $last
     .ln yview moveto $first
-    els::update_vscroll
+    # Defer the scrollbar show/hide to idle: it calls `grid` (a geometry change),
+    # and running that from inside a -yscrollcommand can re-enter the display
+    # loop. Coalesced so a burst of scrolls schedules one update.
+    after cancel $vs_after
+    set vs_after [after idle els::update_vscroll]
 }
 # Show the scrollbar only when the document doesn't fit (chrome defers).  Reads
 # the live yview rather than a possibly-stale -yscrollcommand value, so it's
@@ -985,7 +992,7 @@ proc els::build_findbar {} {
     grid columnconfigure .find 0 -weight 1
 
     bind .find.fr.q <KeyRelease> {
-        if {"%K" ni {Up Down}} { set ::els::find_hidx -1 ; els::find_update }
+        if {"%K" ni {Up Down}} { set ::els::find_hidx -1 ; els::find_schedule }
     }
     bind .find.fr.q <Return>       { els::find_history_push $::els::find_q
                                      els::find_step 1  ; break }
@@ -1093,6 +1100,14 @@ proc els::find_history_recall {dir} {
     set ::els::find_q [lindex $find_history $i]
     .find.fr.q icursor end
     els::find_update
+}
+
+# Debounce incremental search: a burst of keystrokes runs ONE search after a
+# short pause, so a full-buffer search never blocks the UI on every key.
+proc els::find_schedule {} {
+    variable find_after
+    after cancel $find_after
+    set find_after [after 130 els::find_update]
 }
 
 # escape ARE metacharacters so a literal string searches literally

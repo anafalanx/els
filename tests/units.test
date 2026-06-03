@@ -1,0 +1,81 @@
+# tests/units.test — direct unit tests of the pure helper procs (no UI needed
+# beyond sourcing the library), complementing the integration-style suites.
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+# ---- EOL detection ------------------------------------------------------
+test unit-eol-1 {CRLF wins when present} -body { els::detect_eol "a\r\nb\r\n" } -result crlf
+test unit-eol-2 {LF}                      -body { els::detect_eol "a\nb\n" }     -result lf
+test unit-eol-3 {lone CR}                 -body { els::detect_eol "a\rb\r" }     -result cr
+test unit-eol-4 {no newline defaults LF}  -body { els::detect_eol "abc" }        -result lf
+
+# ---- labels -------------------------------------------------------------
+test unit-enclabel-1 {plain utf-8}     -body { els::enc_label utf-8 0 }    -result {UTF-8}
+test unit-enclabel-2 {utf-8 with BOM}  -body { els::enc_label utf-8 1 }    -result {UTF-8 BOM}
+test unit-enclabel-3 {utf-16le + BOM}  -body { els::enc_label utf-16le 1 } -result {UTF-16 LE BOM}
+test unit-enclabel-4 {utf-32be}        -body { els::enc_label utf-32be 0 } -result {UTF-32 BE}
+test unit-enclabel-5 {legacy upcased}  -body { els::enc_label cp1251 0 }   -result {CP1251}
+test unit-eollabel-1 {eol labels} -body {
+    list [els::eol_label lf] [els::eol_label crlf] [els::eol_label cr]
+} -result {LF CRLF CR}
+
+# ---- regex escaping -----------------------------------------------------
+test unit-reesc-1 {ARE metacharacters are escaped} -body {
+    els::re_escape {a.b*c+(d)[e]}
+} -result {a\.b\*c\+\(d\)\[e\]}
+test unit-reesc-2 {escaped pattern matches literally in the Text widget} -setup {els_reset} -body {
+    set w [els::T] ; $w insert end "a.c axc a.c"
+    set pat [els::re_escape "a.c"]      ;# the dot must be literal
+    llength [$w search -all -regexp -- $pat 1.0 end]
+} -result 2
+
+# ---- ICU name -> Tcl encoding mapping -----------------------------------
+test unit-icu-1 {windows codepage} -body { els::icu_to_tcl windows-1252 } -result cp1252
+test unit-icu-2 {Shift_JIS}        -body { els::icu_to_tcl Shift_JIS }    -result cp932
+test unit-icu-3 {GB18030 -> GBK}   -body { els::icu_to_tcl GB18030 }      -result cp936
+test unit-icu-4 {UTF-16LE}         -body { els::icu_to_tcl UTF-16LE }     -result utf-16le
+test unit-icu-5 {ISO-8859-2}       -body { els::icu_to_tcl ISO-8859-2 }   -result iso8859-2
+test unit-icu-6 {EUC-KR}           -body { els::icu_to_tcl EUC-KR }       -result euc-kr
+test unit-icu-7 {US-ASCII}         -body { els::icu_to_tcl US-ASCII }     -result ascii
+test unit-icu-8 {unknown -> empty} -body { els::icu_to_tcl Klingon-1 }    -result {}
+test unit-icu-9 {normalization is case/punct-insensitive} -body {
+    list [els::icu_to_tcl "koi8-r"] [els::icu_to_tcl "KOI8R"] [els::icu_to_tcl "koi8_r"]
+} -result {koi8-r koi8-r koi8-r}
+
+# ---- adapt-case (replacement case template) -----------------------------
+test unit-adapt-off {disabled -> replacement unchanged} -setup {els_reset} -body {
+    set ::els::find_adapt 0 ; els::adapt_case FOO bar
+} -result bar
+test unit-adapt-on {maps lower/upper/title, leaves mixed} -setup {els_reset} -body {
+    set ::els::find_adapt 1
+    list [els::adapt_case foo bar] [els::adapt_case FOO bar] \
+         [els::adapt_case Foo bar] [els::adapt_case fOo bar] [els::adapt_case 123 bar]
+} -result {bar BAR Bar bar bar}
+
+# ---- decode round-trips a chosen encoding -------------------------------
+test unit-decode-1 {decode strips a utf-8 BOM} -body {
+    els::decode "\xEF\xBB\xBF[encoding convertto utf-8 hi]" utf-8 1
+} -result hi
+test unit-decode-2 {decode strips a 4-byte utf-32 BOM} -body {
+    els::decode "\xFF\xFE\x00\x00[encoding convertto utf-32le hi]" utf-32le 1
+} -result hi
+test unit-decode-3 {legacy bytes decode without error (replace profile)} -body {
+    els::decode "\xE9\xE8" iso8859-1 0
+} -result "éè"
+
+# ---- document helpers ---------------------------------------------------
+test unit-doc-1 {line_count counts lines} -setup {els_reset} -body {
+    [els::T] insert end "a\nb\nc\nd" ; els::line_count
+} -result 4
+test unit-doc-2 {a fresh doc is pristine; editing dirties it} -setup {els_reset} -body {
+    set id $::els::active
+    set a [els::pristine $id]
+    [els::T] insert end "x" ; update
+    list $a [els::pristine $id]
+} -result {1 0}
+test unit-doc-3 {untitled name; path name is the basename} -setup {els_reset} -body {
+    set id $::els::active
+    set u [els::doc_name $id]
+    set ::els::docPath($id) [file join $::ELS_TMP hello.txt]
+    list $u [els::doc_name $id]
+} -result {untitled hello.txt}
