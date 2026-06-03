@@ -274,10 +274,26 @@ test ui-8.1 {the menu bar has File / View / Help cascades} -setup {ui_reset} -bo
         if {[.menu type $i] eq "cascade"} { lappend labels [.menu entrycget $i -label] }
     }
     set labels
-} -result {File View Help}
+} -result {File Edit View Help}
 
 test ui-8.2 {File menu items are wired} -setup {ui_reset} -body {
     set b [llength $::els::docs]
     .menu.file invoke "New Tab" ; update
     expr {[llength $::els::docs] - $b}
 } -result 1
+
+test ui-8.3 {Edit menu opens Find and Replace} -setup {ui_reset} -body {
+    [els::T] insert end "alpha beta alpha"
+    .menu.edit invoke "Find..." ; update
+    set f [winfo ismapped .find]
+    els::find_hide ; update
+    .menu.edit invoke "Replace..." ; update
+    list $f [winfo ismapped .find] [winfo ismapped .find.rr]
+} -result {1 1 1}
+
+test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "keep" ; $w edit separator
+    $w insert end "DROP"
+    .menu.edit invoke "Undo" ; update
+    $w get 1.0 "end - 1 char"
+} -result keep

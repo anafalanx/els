@@ -56,6 +56,9 @@ proc els_reset {} {
     array unset ::els::docPath
     array set ::els::docPath {}
     set ::els::show_ws 0 ; set ::els::word_wrap 0
+    catch {font configure elsMono -size 11}
+    set ::els::font_size 11
+    catch {set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]}
     els::build
     update
 }

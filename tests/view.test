@@ -79,6 +79,23 @@ test wrap-1.2 {new documents inherit the current wrap setting} -setup {els_reset
     [els::W $id] cget -wrap
 } -result word
 
+# ---- font zoom ----------------------------------------------------------
+test zoom-1.1 {zoom changes the document font size; the gutter shares the font} -setup {els_reset} -body {
+    set base [font configure elsMono -size]
+    els::zoom 3 ; set up [font configure elsMono -size]
+    list [expr {$up == $base + 3}] \
+         [expr {[font configure elsMono -size] == [font configure [.ln cget -font] -size]}] \
+         [expr {[lindex [[els::T] configure -spacing1] 4] == $::els::LEAD}]
+} -result {1 1 1}
+
+test zoom-1.2 {zoom out, reset, and clamping} -setup {els_reset} -body {
+    els::zoom -2 ; set down $::els::font_size
+    els::zoom_reset ; set reset $::els::font_size
+    els::set_font_size 999 ; set hi $::els::font_size
+    els::set_font_size 0   ; set lo $::els::font_size
+    list $down $reset $hi $lo
+} -result {9 11 48 6}
+
 test wrap-1.3 {with wrap on, the gutter gains a continuation row per wrapped line} -setup {els_reset} -body {
     set w [els::T]
     wm geometry . 360x300 ; update      ;# narrow, to force a wrap

@@ -66,6 +66,7 @@ namespace eval els {
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
+    variable font_size 11        ;# document text size (points); the family is fixed
     variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
     variable vs_after ""         ;# pending (idle) scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
@@ -94,7 +95,6 @@ set ::els::FINDONE "#FFD66B"     ;# the current find match (stronger amber)
 set ::els::WSSPACE "#E2E2E2"     ;# a lone space — light grey (subtle; spaces are everywhere)
 set ::els::WSTAB   "#D3E1F5"     ;# tabs — light blue
 set ::els::WSTRAIL "#E9D9F1"     ;# 2+ spaces or trailing whitespace — light mauve
-set ::els::FLASH   "#F7D9D7"     ;# find field flash on no-match (its own faint red)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
@@ -180,15 +180,13 @@ proc els::init_style {} {
         -bordercolor $hair -darkcolor $bg -lightcolor $bg
     $s configure TFrame -background $bg
     $s configure TLabel -background $bg -foreground $ink
-    # entries: flat, page-coloured field, hairline border, red insert caret
+    # entries: flat, page-coloured field, hairline border (focus = a slightly
+    # firmer grey, not red — red is reserved for the document caret)
     $s configure TEntry -relief flat -borderwidth 1 -padding {6 4} \
-        -fieldbackground $::els::PAGE -foreground $ink -insertcolor $::els::CARET \
+        -fieldbackground $::els::PAGE -foreground $ink -insertcolor $ink \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
-    $s map TEntry -bordercolor [list focus $::els::CARET]
-    # a brief red-tinted field flashed on no-match / wrap-around (never a popup)
-    $s configure Flash.TEntry -relief flat -borderwidth 1 -padding {6 4} \
-        -fieldbackground $::els::FLASH -foreground $::els::INK \
-        -bordercolor $::els::CARET -lightcolor $::els::CARET -darkcolor $::els::CARET
+    $s map TEntry -bordercolor [list focus "#A6ACB4"] \
+        -lightcolor [list focus "#A6ACB4"] -darkcolor [list focus "#A6ACB4"]
     # buttons: flat, quiet until hovered
     $s configure TButton -background $bg -foreground $ink -anchor center \
         -borderwidth 0 -relief flat -padding {8 4} -focuscolor $bg
@@ -234,14 +232,28 @@ proc els::build {} {
     .menu.file add separator
     .menu.file add command -label "Close Tab"  -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
+    menu .menu.edit
+    .menu add cascade -label Edit -menu .menu.edit
+    .menu.edit add command -label Undo  -accelerator Ctrl+Z -command els::menu_undo
+    .menu.edit add command -label Redo  -accelerator Ctrl+Y -command els::menu_redo
+    .menu.edit add separator
+    .menu.edit add command -label Cut   -accelerator Ctrl+X -command {els::menu_event <<Cut>>}
+    .menu.edit add command -label Copy  -accelerator Ctrl+C -command {els::menu_event <<Copy>>}
+    .menu.edit add command -label Paste -accelerator Ctrl+V -command {els::menu_event <<Paste>>}
+    .menu.edit add separator
+    .menu.edit add command -label "Find..."       -accelerator Ctrl+F -command {els::find_show find}
+    .menu.edit add command -label "Replace..."    -accelerator Ctrl+H -command {els::find_show replace}
+    .menu.edit add command -label "Go to Line..." -accelerator Ctrl+G -command els::goto_line
     menu .menu.view
     .menu add cascade -label View -menu .menu.view
-    .menu.view add command -label "Go to Line..." -accelerator Ctrl+G -command els::goto_line
-    .menu.view add separator
     .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \
         -command els::set_wrap
     .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
         -command els::ws_refresh
+    .menu.view add separator
+    .menu.view add command -label "Zoom In"    -accelerator Ctrl++ -command {els::zoom 1}
+    .menu.view add command -label "Zoom Out"   -accelerator Ctrl+- -command {els::zoom -1}
+    .menu.view add command -label "Reset Zoom" -accelerator Ctrl+0 -command els::zoom_reset
     menu .menu.help
     .menu add cascade -label Help -menu .menu.help
     .menu.help add command -label "About els" -command els::about
@@ -267,18 +279,21 @@ proc els::build {} {
     # the shared status bar — one thin, quiet line under a hairline
     ttk::frame .sb
     frame .sb.hair -height 1 -bg $::els::HAIR
-    ttk::label .sb.pos  -font elsUI -anchor w -text "Ln 1, Col 1" -foreground $::els::MUTED
-    ttk::label .sb.eol  -font elsUI -anchor w -text "LF"    -foreground $::els::MUTED -cursor hand2
-    ttk::label .sb.enc  -font elsUI -anchor w -text "UTF-8" -foreground $::els::MUTED -cursor hand2
-    ttk::label .sb.name -font elsUI -anchor e -text "untitled" -foreground $::els::MUTED
+    ttk::label .sb.name -font elsUI -anchor w -text "untitled" -foreground $::els::MUTED
+    ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1, Col 1" -foreground $::els::MUTED
+    ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED -cursor hand2
+    ttk::label .sb.enc  -font elsUI -anchor e -text "UTF-8" -foreground $::els::MUTED -cursor hand2
     pack .sb.hair -side top -fill x
-    pack .sb.pos  -side left  -padx {12 16} -pady 4
-    pack .sb.eol  -side left  -padx {0 16} -pady 4
-    pack .sb.enc  -side left  -padx {0 16} -pady 4
-    pack .sb.name -side right -padx 12 -pady 4
+    # name on the left (takes the slack, elided keeping the filename); the
+    # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
+    pack .sb.name -side left  -padx {12 8} -pady 4 -fill x -expand 1
+    pack .sb.enc  -side right -padx {8 12} -pady 4
+    pack .sb.eol  -side right -padx {0 0}  -pady 4
+    pack .sb.pos  -side right -padx {16 0} -pady 4
     # the EOL and encoding indicators are clickable pickers
-    bind .sb.eol <Button-1> {els::popup_eol_menu %X %Y}
-    bind .sb.enc <Button-1> {els::popup_enc_menu %X %Y}
+    bind .sb.eol  <Button-1>  {els::popup_eol_menu %X %Y}
+    bind .sb.enc  <Button-1>  {els::popup_enc_menu %X %Y}
+    bind .sb.name <Configure> {els::update_namelabel}
 
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
     grid .ln   -row 1 -column 0 -sticky ns
@@ -308,6 +323,13 @@ proc els::build {} {
     bind elsText <Control-f> { els::find_show find;    break }
     bind elsText <Control-h> { els::find_show replace; break }
     bind elsText <Control-g> { els::goto_line;         break }
+    bind elsText <Control-z> { els::menu_undo;         break }
+    bind elsText <Control-y> { els::menu_redo;         break }
+    bind elsText <Control-plus>       { els::zoom 1;     break }
+    bind elsText <Control-equal>      { els::zoom 1;     break }
+    bind elsText <Control-minus>      { els::zoom -1;    break }
+    bind elsText <Control-Key-0>      { els::zoom_reset; break }
+    bind elsText <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
 
     # the same accelerators on the toplevel, for when focus is off the text
     bind . <Control-n> { els::new;       break }
@@ -321,9 +343,15 @@ proc els::build {} {
     bind . <Control-f> { els::find_show find;    break }
     bind . <Control-h> { els::find_show replace; break }
     bind . <Control-g> { els::goto_line;         break }
+    bind . <Control-plus>       { els::zoom 1;     break }
+    bind . <Control-equal>      { els::zoom 1;     break }
+    bind . <Control-minus>      { els::zoom -1;    break }
+    bind . <Control-Key-0>      { els::zoom_reset; break }
+    bind . <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
 
     bind .ln <Button-1>   { focus [els::T]; break }
     bind .ln <MouseWheel> { els::wheel %D; break }
+    bind .ln <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
     bind .ln <Button-4>   { els::scroll scroll -3 units; break }
     bind .ln <Button-5>   { els::scroll scroll  3 units; break }
 
@@ -341,7 +369,7 @@ proc els::new_doc {{path ""}} {
     set w [els::W $id]
     text $w -undo 1 -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
-        -insertbackground $::els::CARET -insertwidth 2 -insertofftime 0 \
+        -insertbackground $::els::CARET -insertwidth 3 -insertofftime 0 \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
         -inactiveselectbackground $::els::SELOFF \
         -borderwidth 0 -highlightthickness 0 -padx 14 -pady 6 \
@@ -476,7 +504,7 @@ proc els::make_tab {id} {
     bind $tf       <Button-1> [list els::switch_to $id]
     bind $tf.name  <Button-1> [list els::switch_to $id]
     bind $tf.close <Button-1> [list els::close_doc $id]
-    bind $tf.close <Enter>    [list $tf.close configure -fg $::els::CARET]
+    bind $tf.close <Enter>    [list $tf.close configure -fg $::els::INK]
     bind $tf.close <Leave>    [list els::tab_close_leave $id]
 }
 proc els::tab_close_leave {id} {
@@ -511,13 +539,49 @@ proc els::settitle {} {
     variable active
     variable docPath
     if {$active eq ""} { wm title . "els"; return }
-    set p $docPath($active)
     set mark [expr {[els::doc_dirty $active] ? "• " : ""}]
     wm title . "els — $mark[els::doc_name $active]"
-    .sb.name configure -text [expr {$p eq "" ? "untitled" : $p}]
+    els::update_namelabel
     .sb.eol  configure -text [els::eol_label $::els::docEol($active)]
     .sb.enc  configure -text [els::enc_label $::els::docEnc($active) $::els::docBom($active)]
 }
+# The left status item shows the active document's path, elided to fit — the
+# filename always survives, the leading directories are dropped behind a "…/".
+proc els::update_namelabel {} {
+    variable active
+    if {![winfo exists .sb.name]} { return }
+    if {$active eq "" || ![info exists ::els::docPath($active)]} {
+        .sb.name configure -text "" ; return
+    }
+    set p $::els::docPath($active)
+    if {$p eq ""} { .sb.name configure -text "untitled" ; return }
+    set avail [expr {[winfo width .sb.name] - 4}]
+    if {$avail < 24} { .sb.name configure -text [file tail $p] ; return }  ;# unrealized
+    .sb.name configure -text [els::elide_path $p $avail]
+}
+proc els::elide_path {p avail} {
+    if {[font measure elsUI $p] <= $avail} { return $p }
+    set parts [file split $p]
+    set best ""
+    # grow outward from the filename, keeping as much trailing path as fits
+    for {set i [expr {[llength $parts] - 1}]} {$i >= 0} {incr i -1} {
+        set tail [file join {*}[lrange $parts $i end]]
+        set cand [expr {$i == 0 ? $tail : "…/$tail"}]
+        if {[font measure elsUI $cand] <= $avail} { set best $cand } else { break }
+    }
+    if {$best ne ""} { return $best }
+    # even the filename alone is too wide — clip its head, keep the end
+    set s [file tail $p]
+    while {[string length $s] > 1 && [font measure elsUI "…$s"] > $avail} {
+        set s [string range $s 1 end]
+    }
+    return "…$s"
+}
+
+# ---- Edit-menu actions, routed to the active document -------------------
+proc els::menu_undo {}    { set w [els::T] ; if {$w ne ""} { catch {$w edit undo} } }
+proc els::menu_redo {}    { set w [els::T] ; if {$w ne ""} { catch {$w edit redo} } }
+proc els::menu_event {ev} { set w [els::T] ; if {$w ne ""} { event generate $w $ev } }
 proc els::on_modified {w} {
     variable active
     set id [els::id_of $w]
@@ -1064,13 +1128,6 @@ proc els::tip_pop {w text} {
     wm geometry .tip +$x+$y
 }
 
-# briefly flash the search field red — used instead of a popup on no-match/wrap
-proc els::find_flash {} {
-    if {![winfo exists .find.fr.q]} { return }
-    .find.fr.q configure -style Flash.TEntry
-    after 150 { catch {.find.fr.q configure -style TEntry} }
-}
-
 # a compact, scannable Tcl ARE cheat-sheet (opened from the greyed-until-on "?")
 proc els::regex_help {} {
     catch {destroy .rehelp}
@@ -1198,9 +1255,9 @@ proc els::find_update {} {
     if {$useRegex}   { lappend sargs -regexp }
     if {!$find_case} { lappend sargs -nocase }
     if {[catch {set starts [$w search {*}$sargs -count ::els::find_lens -- $pat 1.0 end]}]} {
-        set find_count "bad pattern" ; els::find_flash ; return
+        set find_count "bad pattern" ; return
     }
-    if {![llength $starts]} { set find_count "No results" ; els::find_flash ; return }
+    if {![llength $starts]} { set find_count "No results" ; return }
 
     set lens $::els::find_lens
     set i 0
@@ -1239,10 +1296,7 @@ proc els::find_highlight {idx} {
 proc els::find_step {dir} {
     variable find_matches ; variable find_current
     if {![llength $find_matches]} { els::find_update ; return }
-    set n [llength $find_matches]
-    set next [expr {$find_current + $dir}]
-    if {$next < 0 || $next >= $n} { els::find_flash }   ;# wrapped around
-    els::find_highlight $next
+    els::find_highlight [expr {$find_current + $dir}]
 }
 
 # Make a match's case template carry to its replacement (when Adapt case is on).
@@ -1375,6 +1429,25 @@ proc els::set_wrap {} {
     els::update_line_numbers
     els::refresh_view
 }
+
+# Text size (the font FAMILY is fixed; users can only zoom).  elsMono is a named
+# font shared by every document and the gutter, so resizing it scales them all;
+# we then recompute the leading and rebuild the gutter so numbers stay aligned.
+proc els::set_font_size {size} {
+    set size [expr {max(6, min(48, $size))}]
+    set ::els::font_size $size
+    font configure elsMono -size $size
+    set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]
+    foreach id $::els::docs {
+        set w [els::W $id]
+        if {[winfo exists $w]} { $w configure -spacing1 $::els::LEAD -spacing3 $::els::LEAD }
+    }
+    catch {.ln configure -spacing1 $::els::LEAD -spacing3 $::els::LEAD}
+    els::update_line_numbers
+    els::refresh_view
+}
+proc els::zoom {d}      { els::set_font_size [expr {$::els::font_size + $d}] }
+proc els::zoom_reset {} { els::set_font_size 11 }
 
 # ---- main ---------------------------------------------------------------
 proc els::main {} {
