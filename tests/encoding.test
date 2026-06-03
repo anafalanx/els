@@ -1,0 +1,66 @@
+# tests/encoding.test — encoding + EOL detection and preservation.
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+proc write_raw {name bytes} {
+    set p [file join $::ELS_TMP $name]
+    set fh [open $p w] ; fconfigure $fh -translation binary
+    puts -nonewline $fh $bytes ; close $fh
+    return $p
+}
+proc read_raw {p} {
+    set fh [open $p r] ; fconfigure $fh -translation binary
+    set d [read $fh] ; close $fh ; return $d
+}
+proc edoc {k} {
+    set a $::els::active
+    switch $k {
+        Enc { return $::els::docEnc($a) }
+        Bom { return $::els::docBom($a) }
+        Eol { return $::els::docEol($a) }
+    }
+}
+
+test enc-1.1 {utf-8, no BOM, LF} -setup {els_reset} -body {
+    els::open [write_raw a.txt "hello\nworld\n"]
+    list [edoc Enc] [edoc Bom] [edoc Eol]
+} -result {utf-8 0 lf}
+
+test enc-1.2 {CRLF detected; buffer is LF-internal} -setup {els_reset} -body {
+    els::open [write_raw b.txt "a\r\nb\r\n"]
+    list [edoc Eol] [string first \r [[els::T] get 1.0 end]]
+} -result {crlf -1}
+
+test enc-1.3 {utf-8 with BOM} -setup {els_reset} -body {
+    els::open [write_raw c.txt "\xEF\xBB\xBFhi\n"]
+    list [edoc Enc] [edoc Bom] [[els::T] get 1.0 1.end]
+} -result {utf-8 1 hi}
+
+test enc-1.4 {utf-16le with BOM} -setup {els_reset} -body {
+    els::open [write_raw d.txt "\xFF\xFE[encoding convertto utf-16le "Hi\n"]"]
+    list [edoc Enc] [edoc Bom] [[els::T] get 1.0 1.end]
+} -result {utf-16le 1 Hi}
+
+test enc-2.1 {CRLF round-trips byte-for-byte on save} -setup {els_reset} -body {
+    set p [write_raw rt.txt "x\r\ny\r\n"]
+    els::open $p
+    [els::T] insert end "z"
+    els::save
+    read_raw $p
+} -result "x\r\ny\r\nz"
+
+test enc-2.2 {utf-8 BOM is preserved on save} -setup {els_reset} -body {
+    set orig "\xEF\xBB\xBF[encoding convertto utf-8 "café\n"]"
+    set p [write_raw e.txt $orig]
+    els::open $p
+    els::save
+    expr {[read_raw $p] eq $orig}
+} -result 1
+
+test enc-2.3 {utf-16le BOM round-trips} -setup {els_reset} -body {
+    set orig "\xFF\xFE[encoding convertto utf-16le "ab\n"]"
+    set p [write_raw f.txt $orig]
+    els::open $p
+    els::save
+    expr {[read_raw $p] eq $orig}
+} -result 1

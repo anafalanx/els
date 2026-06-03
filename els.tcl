@@ -24,6 +24,9 @@ namespace eval els {
     variable selftest [expr {[lindex $::argv 0] eq "--selftest"}]
     variable docPath             ;# array: id -> file path ("" = untitled)
     array set docPath {}
+    variable docEnc ; array set docEnc {}   ;# id -> Tcl encoding (utf-8, utf-16le, ...)
+    variable docBom ; array set docBom {}   ;# id -> 1 if a byte-order mark was present
+    variable docEol ; array set docEol {}   ;# id -> lf | crlf | cr
     # find / replace
     variable find_q ""           ;# search text
     variable find_r ""           ;# replacement text
@@ -169,8 +172,12 @@ proc els::build {} {
     # the shared status bar
     ttk::frame .sb
     ttk::label .sb.pos  -font elsUI -anchor w -text "Ln 1, Col 1"
+    ttk::label .sb.eol  -font elsUI -anchor w -text "LF"    -foreground $::els::MUTED
+    ttk::label .sb.enc  -font elsUI -anchor w -text "UTF-8" -foreground $::els::MUTED
     ttk::label .sb.name -font elsUI -anchor e -text "untitled"
-    pack .sb.pos  -side left  -padx 8 -pady 2
+    pack .sb.pos  -side left  -padx {8 12} -pady 2
+    pack .sb.eol  -side left  -padx {0 12} -pady 2
+    pack .sb.enc  -side left  -padx {0 12} -pady 2
     pack .sb.name -side right -padx 8 -pady 2
 
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
@@ -252,6 +259,9 @@ proc els::new_doc {{path ""}} {
     # let the shared class bindings fire (run before the default Text tag)
     bindtags $w [linsert [bindtags $w] 1 elsText]
     set docPath($id) $path
+    set ::els::docEnc($id) utf-8
+    set ::els::docBom($id) 0
+    set ::els::docEol($id) lf
     lappend docs $id
     els::make_tab $id
     els::switch_to $id
@@ -323,7 +333,7 @@ proc els::close_doc {id} {
     set docs [lreplace $docs $idx $idx]
     destroy [els::W $id]
     destroy [els::tabW $id]
-    unset -nocomplain docPath($id)
+    unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) ::els::docEol($id)
     if {$active eq $id} { set active "" }
     if {[llength $docs] == 0} {
         els::new_doc
@@ -394,6 +404,8 @@ proc els::settitle {} {
     set mark [expr {[els::doc_dirty $active] ? "• " : ""}]
     wm title . "els — $mark[els::doc_name $active]"
     .sb.name configure -text [expr {$p eq "" ? "untitled" : $p}]
+    .sb.eol  configure -text [els::eol_label $::els::docEol($active)]
+    .sb.enc  configure -text [els::enc_label $::els::docEnc($active) $::els::docBom($active)]
 }
 proc els::on_modified {w} {
     variable active
@@ -474,6 +486,33 @@ proc els::refresh_view {} {
     if {$::els::show_ws} { els::ws_refresh }
 }
 
+# ---- encoding / EOL -----------------------------------------------------
+proc els::detect_encoding {raw} {
+    # -> {encoding bom}, where bom is 1 if a byte-order mark is present
+    if {[string range $raw 0 2] eq "\xEF\xBB\xBF"} { return {utf-8 1} }
+    if {[string range $raw 0 1] eq "\xFF\xFE"}     { return {utf-16le 1} }
+    if {[string range $raw 0 1] eq "\xFE\xFF"}     { return {utf-16be 1} }
+    if {![catch {encoding convertfrom -profile strict utf-8 $raw}]} { return {utf-8 0} }
+    return [list [encoding system] 0]
+}
+proc els::decode {raw enc bom} {
+    if {$bom} { set raw [string range $raw [expr {$enc eq "utf-8" ? 3 : 2}] end] }
+    return [encoding convertfrom -profile replace $enc $raw]
+}
+proc els::detect_eol {text} {
+    if {[string first "\r\n" $text] >= 0} { return crlf }
+    if {[string first "\n"   $text] >= 0} { return lf }
+    if {[string first "\r"   $text] >= 0} { return cr }
+    return lf
+}
+proc els::enc_label {enc bom} {
+    set m {utf-8 "UTF-8" utf-16le "UTF-16 LE" utf-16be "UTF-16 BE"}
+    set s [expr {[dict exists $m $enc] ? [dict get $m $enc] : [string toupper $enc]}]
+    if {$bom} { append s " BOM" }
+    return $s
+}
+proc els::eol_label {eol} { return [string map {lf LF crlf CRLF cr CR} $eol] }
+
 # ---- file operations ----------------------------------------------------
 proc els::new {} {
     els::new_doc
@@ -493,19 +532,27 @@ proc els::open {{p ""}} {
     set w [els::W $id]
     if {[catch {
         set fh [::open $p r]
-        fconfigure $fh -encoding utf-8
-        set data [read $fh]
+        fconfigure $fh -translation binary
+        set raw [read $fh]
         close $fh
     } err]} {
         tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
         if {[els::pristine $id] && [llength $::els::docs] > 1} { els::close_doc $id }
         return
     }
+    # detect encoding + EOL, decode, normalise the buffer to LF internally
+    lassign [els::detect_encoding $raw] enc bom
+    set text [els::decode $raw $enc $bom]
+    set eol [els::detect_eol $text]
+    set text [string map [list \r\n \n \r \n] $text]
     $w delete 1.0 end
-    $w insert end $data
+    $w insert end $text
     $w mark set insert 1.0
     $w see insert
     set docPath($id) $p
+    set ::els::docEnc($id) $enc
+    set ::els::docBom($id) $bom
+    set ::els::docEol($id) $eol
     $w edit reset
     $w edit modified 0
     els::switch_to $id
@@ -519,10 +566,25 @@ proc els::save {} {
     if {$active eq ""} { return }
     if {$docPath($active) eq ""} { return [els::saveas] }
     set w [els::W $active]
+    set text [$w get 1.0 "end - 1 char"]
+    # re-apply the document's original EOL (buffer is LF-internal)
+    switch $::els::docEol($active) {
+        crlf { set text [string map [list \n \r\n] $text] }
+        cr   { set text [string map [list \n \r]   $text] }
+    }
+    # encode in the document's original encoding, restoring a BOM if it had one
+    set bytes [encoding convertto -profile replace $::els::docEnc($active) $text]
+    if {$::els::docBom($active)} {
+        switch $::els::docEnc($active) {
+            utf-8    { set bytes "\xEF\xBB\xBF$bytes" }
+            utf-16le { set bytes "\xFF\xFE$bytes" }
+            utf-16be { set bytes "\xFE\xFF$bytes" }
+        }
+    }
     if {[catch {
         set fh [::open $docPath($active) w]
-        fconfigure $fh -encoding utf-8
-        puts -nonewline $fh [$w get 1.0 "end - 1 char"]
+        fconfigure $fh -translation binary
+        puts -nonewline $fh $bytes
         close $fh
     } err]} {
         tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
