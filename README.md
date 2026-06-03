@@ -60,10 +60,15 @@ via its `zipfs` image. `x build-ext` compiles them; tests live in
 
 ## Status
 
-Early skeleton — multi-file tabs, open/save/new, menu, status bar (Ln/Col),
-icon, line-number gutter, current-line highlight, window geometry persistence,
-the els look. Each tab is its own document (independent undo, selection, dirty
-state); open several at once from the command line. Porting the rest of the
-v0.3 features (find/replace, go-to-line, whitespace view, …) onto Tk.
+Working editor (v0.10). Multi-file tabs (each its own document — independent
+undo, selection, dirty state), line-number gutter, current-line highlight,
+window-geometry persistence, the els look and the red awl icon.
+
+- **Find & replace** (Ctrl+F / Ctrl+H) — Tcl ARE regex, live match highlighting,
+  Match Case / Whole Word / Regex toggles, Replace / Replace All.
+- **Go to line** (Ctrl+G) and a **View ▸ Show Whitespace** toggle (reveals tabs
+  and trailing whitespace).
+- **Encoding & EOL** detected on open and preserved on save (UTF-8/16, BOM,
+  LF/CRLF/CR), shown in the status bar.
 
 Built on **Tcl/Tk 9.0.3**. MIT licensed.
