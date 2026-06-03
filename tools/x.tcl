@@ -61,6 +61,7 @@ proc task_help {args} {
 
   test               run the in-process test suite (tcltest + event generate)
   run [file ...]     launch the editor (wish + els.tcl)
+  colors [name ...]  browse Tk's named colors (swatches + hex)
   shot <out> [file]  screenshot the editor to <out> (twapi)
   build [--with-ext] fuse the single-file els.exe (--with-ext embeds build/*.dll)
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
@@ -110,6 +111,12 @@ proc task_run {args} {
     need wish
     exec [wish] [P els.tcl] {*}$args &
     puts "launched els"
+}
+
+proc task_colors {args} {
+    need wish
+    exec [wish] [P tools colors.tcl] {*}$args &
+    puts "launched color viewer"
 }
 
 proc task_shot {args} {
