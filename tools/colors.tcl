@@ -128,7 +128,19 @@ ttk::scrollbar .vs -orient vertical -command {.c yview}
 pack .vs -side right -fill y
 pack .c -side left -fill both -expand 1
 
-set CW 156 ; set CH 92 ; set SWH 44 ; set PAD 16 ; set HEADH 34 ; set GAP 16
+# DPI-aware layout: derive everything from the real font line-heights (which
+# already scale with screen DPI), so name and hex never collide.
+set LSname  [font metrics cName -linespace]
+set LShex   [font metrics cHex  -linespace]
+set LShead  [font metrics cHead -linespace]
+set u       $LSname
+set PAD     [expr {round($u*0.7)}]
+set SWH     [expr {round($u*1.9)}]
+set CW      [expr {round($u*7.6)}]
+set NAMEGAP [expr {round($u*0.35)}]
+set CH      [expr {$SWH + $NAMEGAP + $LSname + $LShex + round($u*0.5)}]
+set HEADH   [expr {$LShead + round($u*0.7)}]
+set GAP     [expr {round($u*0.8)}]
 
 proc pick {name} {
     set hx [dict get $::HEX $name]
@@ -137,7 +149,7 @@ proc pick {name} {
 }
 
 proc redraw {} {
-    global HEX FAM FAMORDER CW CH SWH PAD HEADH GAP filter countlbl NCOLORS
+    global HEX FAM FAMORDER CW CH SWH PAD HEADH GAP filter countlbl NCOLORS LSname NAMEGAP
     .c delete all
     set f [string tolower $filter]
     set w [winfo width .c]
@@ -162,11 +174,12 @@ proc redraw {} {
             set col [expr {$i % $cols}] ; set row [expr {$i / $cols}]
             set x [expr {$PAD + $col*$CW}] ; set yy [expr {$y + $row*$CH}]
             set tag c_$n
+            set cx [expr {$x+($CW-$PAD)/2}]
             .c create rectangle $x $yy [expr {$x+$CW-$PAD}] [expr {$yy+$SWH}] \
                 -fill [dict get $HEX $n] -outline "#0A0A0A" -width 1 -tags $tag
-            .c create text [expr {$x+($CW-$PAD)/2}] [expr {$yy+$SWH+15}] \
+            .c create text $cx [expr {$yy+$SWH+$NAMEGAP}] -anchor n \
                 -text $n -fill "#E6E6E6" -font cName -tags $tag
-            .c create text [expr {$x+($CW-$PAD)/2}] [expr {$yy+$SWH+31}] \
+            .c create text $cx [expr {$yy+$SWH+$NAMEGAP+$LSname}] -anchor n \
                 -text [dict get $HEX $n] -fill "#9AA0A8" -font cHex -tags $tag
             .c bind $tag <Button-1> [list pick $n]
             .c bind $tag <Enter> [list .c configure -cursor hand2]

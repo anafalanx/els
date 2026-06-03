@@ -26,8 +26,8 @@ if /i "%~1"=="shell" set "ELS_SHELL=1"
 if defined ELS_SHELL (
   if not exist "%TC%\tcl9\bin\tclsh90.exe" echo [els] Warning: toolchain not found at %TC%\tcl9
   echo.
-  echo   els toolchain shell — the vendored toolchain is on PATH.
-  echo   Try:  x help   x test   x colors        ^(or `exit` to leave^)
+  echo   els toolchain shell - the vendored toolchain is on PATH.
+  echo   Try:  x help   x test   x colors     ^(or 'exit' to leave^)
   echo.
   cmd /k prompt els$G$S
   exit /b
