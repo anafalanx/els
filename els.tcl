@@ -1353,21 +1353,12 @@ proc els::ws_refresh {} {
     if {!$::els::show_ws} { return }
     set top [$w index @0,0]
     set bot [$w index "@0,[winfo height $w] + 1 line"]
-    # tabs -> blue
-    set i 0
-    foreach s [$w search -all -regexp -count ::els::wl1 -- {\t+} $top $bot] {
-        $w tag add wsTab $s "$s + [lindex $::els::wl1 $i] chars" ; incr i
-    }
-    # space runs: a lone space -> grey, two or more -> mauve
-    set i 0
-    foreach s [$w search -all -regexp -count ::els::wl2 -- { +} $top $bot] {
-        set n [lindex $::els::wl2 $i] ; incr i
-        $w tag add [expr {$n >= 2 ? "wsTrail" : "wsSpace"}] $s "$s + $n chars"
-    }
-    # trailing spaces -> mauve (also flags a single trailing space)
-    set i 0
-    foreach s [$w search -all -regexp -count ::els::wl3 -- { +$} $top $bot] {
-        $w tag add wsTrail $s "$s + [lindex $::els::wl3 $i] chars" ; incr i
+    # spaces -> grey, tabs -> blue, trailing spaces -> mauve (overrides)
+    foreach {tag pat var} {wsSpace { +} wl1  wsTab {\t+} wl2  wsTrail { +$} wl3} {
+        set i 0
+        foreach s [$w search -all -regexp -count ::els::$var -- $pat $top $bot] {
+            $w tag add $tag $s "$s + [lindex [set ::els::$var] $i] chars" ; incr i
+        }
     }
 }
 
