@@ -9,7 +9,10 @@ separately. The new foundation trades a hand-written C core for Tk's mature
 to maintain and Windows/macOS/Linux from one codebase.
 
 Design language carried over: a calm grey page, the signature **red caret**,
-restrained chrome, opinionated defaults.
+restrained chrome, opinionated defaults. The full rationale — palette,
+typography, the find/replace design, and explicit non-goals — is in
+[`docs/DESIGN.md`](docs/DESIGN.md), drawn from a study of EditPad Pro, Sublime,
+Zed and iA Writer.
 
 ## Toolchain & tasks
 
