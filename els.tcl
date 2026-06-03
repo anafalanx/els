@@ -62,25 +62,36 @@ namespace eval els {
     variable find_current -1     ;# index into find_matches
     variable find_count ""       ;# status text e.g. "3 of 12"
     variable show_ws 0           ;# View ▸ Show Whitespace
+    variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
 }
 
 # ---- look: the els visual identity --------------------------------------
-set ::els::PAGE   "#F2F2F2"      ;# calm grey page (not pure white)
-set ::els::INK    "#1A1A1A"
-set ::els::CARET  "#EE2C2C"      ;# the signature red caret (firebrick2)
-set ::els::LINE   "#E8E8E8"
-set ::els::GUTTER "#E2E2E2"
-set ::els::MUTED  "#666666"
-set ::els::TABBG  "#D6D6D6"      ;# the strip behind the tabs
-set ::els::TABOFF "#E2E2E2"      ;# an inactive tab
-set ::els::TABON  "#F2F2F2"      ;# active tab merges into the page
-set ::els::FINDALL "#FCE7A6"     ;# all find matches (soft amber)
-set ::els::FINDONE "#F5B638"     ;# the current find match (stronger amber)
+# A calm grey page, generously leaded, with one red flourish.  Chrome defers
+# to the text: flat, tonal, hairline-thin; separation by value, not borders.
+set ::els::PAGE    "#F2F2F2"     ;# calm grey page (#FFF glares; ~15.8:1 w/ ink)
+set ::els::INK     "#1A1A1A"     ;# near-black ink (not pure #000)
+set ::els::CARET   "#DC322F"     ;# the signature red caret + accent
+set ::els::LINE    "#EAEAEA"     ;# current-line wash — a whisper, not a band
+set ::els::GUTTER  "#ECECEC"     ;# gutter ground (a tonal step off the page)
+set ::els::GUTTINK "#8C8C8C"     ;# line numbers — quiet, deferential
+set ::els::MUTED   "#6B7177"     ;# chrome text (muted slate)
+set ::els::SEL     "#D6E2F2"     ;# selection — a calm cool tint, not vivid
+set ::els::SELOFF  "#E2E2E2"     ;# selection while the buffer is unfocused
+set ::els::CHROME  "#E9E9E9"     ;# flat chrome panels (status / find bar)
+set ::els::HAIR    "#D4D4D4"     ;# 1px hairline separators
+set ::els::TABBG   "#DEDEDE"     ;# the strip behind the tabs
+set ::els::TABOFF  "#E6E6E6"     ;# an inactive tab
+set ::els::TABON   "#F2F2F2"     ;# active tab merges into the page
+set ::els::FINDALL "#FFF1C4"     ;# all find matches (soft amber)
+set ::els::FINDONE "#FFD66B"     ;# the current find match (stronger amber)
 set ::els::WSTAB   "#E6E6EF"     ;# tabs (faint blue-grey)
 set ::els::WSTRAIL "#F7D6D6"     ;# trailing whitespace (faint red)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
+# leading: ~1.34x line height (the single biggest "calm" lever), scaled from
+# the font's own line box so it tracks DPI.  Applied as -spacing1/-spacing3.
+set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]
 
 # ---- widget-name helpers ------------------------------------------------
 proc els::W {id}    { return ".txt_$id" }       ;# a document's Text widget
@@ -147,10 +158,53 @@ proc els::save_geometry {} {
     }]} { return }
 }
 
+# ---- flat chrome styling ------------------------------------------------
+# The native 'vista' ttk theme can't be recoloured or flattened, so we base
+# the chrome on 'clam' (full colour control) and build flat, borderless styles.
+# Separation is by tone, not borders; one 4px spacing quantum throughout.
+proc els::init_style {} {
+    set s ttk::style
+    catch {$s theme use clam}
+    set bg $::els::CHROME ; set ink $::els::INK ; set hair $::els::HAIR
+    $s configure . -background $bg -foreground $ink -font elsUI \
+        -borderwidth 0 -focuscolor $bg -troughcolor $::els::PAGE \
+        -bordercolor $hair -darkcolor $bg -lightcolor $bg
+    $s configure TFrame -background $bg
+    $s configure TLabel -background $bg -foreground $ink
+    # entries: flat, page-coloured field, hairline border, red insert caret
+    $s configure TEntry -relief flat -borderwidth 1 -padding {6 4} \
+        -fieldbackground $::els::PAGE -foreground $ink -insertcolor $::els::CARET \
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair
+    $s map TEntry -bordercolor [list focus $::els::CARET]
+    # buttons: flat, quiet until hovered
+    $s configure TButton -background $bg -foreground $ink -anchor center \
+        -borderwidth 0 -relief flat -padding {8 4} -focuscolor $bg
+    $s map TButton -background [list pressed $hair active $::els::TABBG] \
+        -foreground [list disabled $::els::MUTED]
+    # find toggles (Aa / W / .*): a flat chip that fills grey when active
+    $s configure Toolbutton -background $bg -foreground $::els::MUTED \
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center
+    $s map Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
+        -foreground [list selected $ink active $ink]
+    # a slim, arrow-less vertical scrollbar (thumb only)
+    $s layout Vertical.TScrollbar {
+        Vertical.Scrollbar.trough -sticky ns -children {
+            Vertical.Scrollbar.thumb -expand 1 -sticky nswe
+        }
+    }
+    $s configure Vertical.TScrollbar -troughcolor $::els::PAGE \
+        -background #CACACA -bordercolor $::els::PAGE \
+        -lightcolor #CACACA -darkcolor #CACACA \
+        -borderwidth 0 -arrowsize 0 -width 12 -gripcount 0
+    $s map Vertical.TScrollbar -background [list active #B0B0B0 disabled $::els::PAGE]
+}
+
 # ---- build the UI -------------------------------------------------------
 proc els::build {} {
     wm title . "els"
     wm geometry . 900x620
+    els::init_style
+    . configure -background $::els::PAGE
     els::load_icon
     els::load_geometry
     wm minsize . 360 240
@@ -180,10 +234,12 @@ proc els::build {} {
     # the tab strip
     frame .tabs -bg $::els::TABBG
 
-    # the shared line-number gutter
+    # the shared line-number gutter — mirrors the buffer's padding + leading so
+    # numbers align with their text rows; quiet ink so it defers to the page
     text .ln -width 4 -wrap none -font elsMono \
-        -bg $::els::GUTTER -fg $::els::MUTED \
-        -borderwidth 0 -highlightthickness 0 -padx 5 -pady 4 \
+        -bg $::els::GUTTER -fg $::els::GUTTINK \
+        -borderwidth 0 -highlightthickness 0 -padx 6 -pady 6 \
+        -spacing1 $::els::LEAD -spacing3 $::els::LEAD \
         -takefocus 0 -cursor arrow -insertwidth 0 -state disabled
     .ln tag configure currentLine -background $::els::LINE
 
@@ -193,16 +249,18 @@ proc els::build {} {
     # the find / replace bar (hidden until Ctrl+F / Ctrl+H)
     els::build_findbar
 
-    # the shared status bar
+    # the shared status bar — one thin, quiet line under a hairline
     ttk::frame .sb
-    ttk::label .sb.pos  -font elsUI -anchor w -text "Ln 1, Col 1"
+    frame .sb.hair -height 1 -bg $::els::HAIR
+    ttk::label .sb.pos  -font elsUI -anchor w -text "Ln 1, Col 1" -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor w -text "LF"    -foreground $::els::MUTED -cursor hand2
     ttk::label .sb.enc  -font elsUI -anchor w -text "UTF-8" -foreground $::els::MUTED -cursor hand2
-    ttk::label .sb.name -font elsUI -anchor e -text "untitled"
-    pack .sb.pos  -side left  -padx {8 12} -pady 2
-    pack .sb.eol  -side left  -padx {0 12} -pady 2
-    pack .sb.enc  -side left  -padx {0 12} -pady 2
-    pack .sb.name -side right -padx 8 -pady 2
+    ttk::label .sb.name -font elsUI -anchor e -text "untitled" -foreground $::els::MUTED
+    pack .sb.hair -side top -fill x
+    pack .sb.pos  -side left  -padx {12 16} -pady 4
+    pack .sb.eol  -side left  -padx {0 16} -pady 4
+    pack .sb.enc  -side left  -padx {0 16} -pady 4
+    pack .sb.name -side right -padx 12 -pady 4
     # the EOL and encoding indicators are clickable pickers
     bind .sb.eol <Button-1> {els::popup_eol_menu %X %Y}
     bind .sb.enc <Button-1> {els::popup_enc_menu %X %Y}
@@ -268,8 +326,11 @@ proc els::new_doc {{path ""}} {
     set w [els::W $id]
     text $w -undo 1 -wrap none -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
-        -insertbackground $::els::CARET -insertwidth 2 \
-        -borderwidth 0 -highlightthickness 0 -padx 6 -pady 4 \
+        -insertbackground $::els::CARET -insertwidth 2 -insertofftime 0 \
+        -selectbackground $::els::SEL -selectforeground $::els::INK \
+        -inactiveselectbackground $::els::SELOFF \
+        -borderwidth 0 -highlightthickness 0 -padx 14 -pady 6 \
+        -spacing1 $::els::LEAD -spacing3 $::els::LEAD \
         -tabstyle wordprocessor \
         -yscrollcommand [list els::yscroll $id]
     $w tag configure currentLine -background $::els::LINE
@@ -328,6 +389,7 @@ proc els::switch_to {id} {
     els::settitle
     els::refresh_view
     if {$::els::find_mode ne ""} { els::find_update }
+    after idle els::update_vscroll
 }
 proc els::cycle {dir} {
     variable docs
@@ -494,6 +556,21 @@ proc els::yscroll {id first last} {
     if {$id ne $active} { return }
     .vs set $first $last
     .ln yview moveto $first
+    els::update_vscroll
+}
+# Show the scrollbar only when the document doesn't fit (chrome defers).  Reads
+# the live yview rather than a possibly-stale -yscrollcommand value, so it's
+# correct after a load settles (yscrollcommand only fires on view *change*).
+proc els::update_vscroll {} {
+    variable active
+    variable vs_shown
+    if {$active eq "" || ![winfo exists [els::W $active]]} { return }
+    lassign [[els::W $active] yview] first last
+    set need [expr {$first > 0.0001 || $last < 0.9999}]
+    if {$need != $vs_shown} {
+        set vs_shown $need
+        if {$need} { grid .vs } else { grid remove .vs }
+    }
 }
 proc els::scroll {args} {
     set w [els::T]
@@ -512,6 +589,7 @@ proc els::refresh_view {} {
     els::update_pos
     els::update_line_numbers
     els::update_current_line
+    els::update_vscroll
     if {$::els::show_ws} { els::ws_refresh }
 }
 
@@ -853,7 +931,7 @@ proc els::quit {} {
 
 # ---- find / replace -----------------------------------------------------
 proc els::build_findbar {} {
-    ttk::frame .find -padding {6 4 6 4}
+    ttk::frame .find -padding {8 0 8 6}
 
     ttk::frame .find.fr
     ttk::label .find.fr.l -text "Find" -font elsUI -width 7 -anchor w
@@ -881,8 +959,10 @@ proc els::build_findbar {} {
     grid .find.rr.l .find.rr.r .find.rr.rep .find.rr.all -row 0 -padx 1 -sticky we
     grid columnconfigure .find.rr 1 -weight 1
 
-    grid .find.fr -row 0 -column 0 -sticky ew
-    grid .find.rr -row 1 -column 0 -sticky ew -pady {3 0}
+    frame .find.top -height 1 -bg $::els::HAIR
+    grid .find.top -row 0 -column 0 -sticky ew -pady {0 6}
+    grid .find.fr -row 1 -column 0 -sticky ew
+    grid .find.rr -row 2 -column 0 -sticky ew -pady {4 0}
     grid columnconfigure .find 0 -weight 1
 
     bind .find.fr.q <KeyRelease>   els::find_update

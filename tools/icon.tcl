@@ -21,7 +21,7 @@ set k [expr {$S/256.0}]
 set TILE   {29 32 39}     ;# #1D2027  dark slate tile
 set HANDLE {223 226 233}  ;# #DFE2E9  pale handle
 set FERR   {150 170 198}  ;# #96AAC6  ferrule band
-set BLADE  {238 44 44}    ;# #EE2C2C  firebrick2 — the accent
+set BLADE  {220 50 47}    ;# #DC322F  the signature red — the accent
 
 # ---- SDF helpers (coordinates in actual pixels) -------------------------
 proc cl01 {x} { expr {$x<0.0?0.0:($x>1.0?1.0:$x)} }
