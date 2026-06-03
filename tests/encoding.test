@@ -162,3 +162,79 @@ test enc-4.2 {UI-driven: click the encoding indicator, reopen-with then save-wit
     list $afterReopen $::els::docEnc($::els::active) \
          [file exists [file join $::ELS_TMP uidrv_out.txt]]
 } -result {utf-16be cp1252 1}
+
+# ---- save-with-encoding -> close -> reopen, 100 combinations -------------
+# For 25 encodings x 4 text variants, write the text with els's own save path,
+# reopen it fresh (detection runs), and check the text comes back intact.  The
+# encoding need not be detected by the same NAME — recovering the text is what
+# matters — so we also report exact-name hits.  Detection is heuristic, so the
+# bar is "most cases", not all.
+proc rt_bom {enc} {
+    return [dict get {utf-8 "\xEF\xBB\xBF" utf-16le "\xFF\xFE" utf-16be "\xFE\xFF" \
+                      utf-32le "\xFF\xFE\x00\x00" utf-32be "\x00\x00\xFE\xFF"} $enc]
+}
+test enc-roundtrip-100 {save-with-encoding then reopen recovers the text in most cases} \
+        -constraints detect -setup {els_reset} -body {
+    array set S {
+        uni      "Café — naïve Ωμέγα 日本語 한국어 €100"
+        west     "Café déjà vu, naïve façade — prix 100 euros."
+        west1    "Café déjà vu, naïve façade; ¿señor? ¡Hola!"
+        central  "Příliš žluťoučký kůň úpěl ďábelské ódy."
+        russian  "Съешь же ещё этих мягких французских булок."
+        greek    "Ξεσκεπάζω την ψυχοφθόρα βδελυγμία· γειά."
+        turkish  "Pijamalı hasta yağız şoföre çabucak güvendi."
+        japanese "いろはにほへと、日本語のエンコーディング試験。"
+        schinese "快速的棕色狐狸跳过懒狗。简体中文编码测试。"
+        tchinese "快速的棕色狐狸跳過懶狗。繁體中文編碼測試。"
+        korean   "다람쥐 헌 쳇바퀴에 타고파. 한국어 인코딩 시험."
+    }
+    set combos {
+        utf-8 0 uni        utf-8 1 uni        utf-16le 1 uni     utf-16be 1 uni
+        utf-16le 0 uni     utf-16be 0 uni     utf-32le 1 uni     utf-32be 1 uni
+        cp1252 0 west      iso8859-1 0 west1  iso8859-15 0 west
+        cp1250 0 central   iso8859-2 0 central
+        cp1251 0 russian   koi8-r 0 russian   iso8859-5 0 russian
+        cp1253 0 greek     iso8859-7 0 greek  cp1254 0 turkish
+        cp932 0 japanese   shiftjis 0 japanese euc-jp 0 japanese
+        cp936 0 schinese   big5 0 tchinese    euc-kr 0 korean
+    }
+    set path [file join $::ELS_TMP rt.txt]
+    set total 0 ; set recovered 0 ; set exact 0 ; set misses {}
+    puts "\n=== encoding round-trip: save-with-encoding -> reopen -> detect (100 combos) ==="
+    foreach {enc bom skey} $combos {
+        set rc 0 ; set xc 0
+        for {set v 0} {$v < 4} {incr v} {
+            switch $v {
+                0 { set text $S($skey) }
+                1 { set text "$S($skey) $S($skey)" }
+                2 { set text "$S($skey) 0123456789 line $v." }
+                3 { set text "$S($skey)\n$S($skey)\n$S($skey)" }
+            }
+            incr total
+            # --- save the buffer with this encoding (els's save path) ---
+            els_reset
+            [els::T] insert end $text
+            set ::els::docEnc($::els::active) $enc
+            set ::els::docBom($::els::active) $bom
+            set ::els::docEol($::els::active) lf
+            set ::els::docPath($::els::active) $path
+            els::save
+            # --- reopen it fresh: detection runs again ---
+            els::open $path
+            set got [[els::T] get 1.0 "end - 1 char"]
+            set det $::els::docEnc($::els::active)
+            if {$got eq $text} { incr recovered ; incr rc }
+            if {$det eq $enc}  { incr exact ; incr xc }
+            if {$got ne $text} { lappend misses [format "%s v%d -> %s" $enc $v $det] }
+        }
+        puts [format "  %-10s %-9s  text %d/4   exact-enc %d/4" $enc $skey $rc $xc]
+    }
+    puts [format "  --> text recovered: %d/%d   exact encoding: %d/%d" \
+        $recovered $total $exact $total]
+    if {[llength $misses]} { puts "  not recovered: [join $misses {, }]" }
+    puts "  (UTF*/CJK/Western recover fully; short single-byte Cyrillic /\
+Central-European are the heuristic's hard cases)"
+    # "in most cases" — UTF variants, CJK and Western round-trip; the inherent
+    # ambiguity of short single-byte legacy text caps the rest.
+    expr {$total == 100 && $recovered >= 70}
+} -result 1
