@@ -25,10 +25,18 @@ x help          # list tasks
 x run [file...] # launch the editor
 x test          # in-process test suite (tcltest + Tk event generate)
 x shot out.png  # screenshot the editor (twapi, all-Tcl — no AutoIt)
+x build         # fuse the single-file els.exe (--with-ext embeds build/*.dll)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
 x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
+x shell         # a shell with the vendored toolchain on PATH
 x env           # show the resolved toolchain
 ```
+
+`x build` produces one self-contained `els.exe` (~6.7 MB, zero non-system DLLs)
+by fusing `els.tcl` + Tcl/Tk into a `zipfs` image on a static interpreter;
+`x build --with-ext` also embeds any compiled C extension so it loads from
+inside the exe. `bootstrap.cmd` provisions `.toolchain/` on a fresh `git clone`
+(the copy-paste model needs no bootstrap).
 
 The toolchain (Tcl/Tk 9, gcc/C23, twapi, MinGit) lives under `.toolchain/` and is
 **relocatable** — verified by copying the folder to a different path and

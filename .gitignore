@@ -15,6 +15,9 @@
 # compiled C extensions / build output (rebuilt via `x build-ext`)
 /build/
 
+# the fused single-file exe (rebuilt via `x build`; ship via releases)
+/els.exe
+
 # OS / editor cruft
 *~
 Thumbs.db

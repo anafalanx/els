@@ -62,6 +62,7 @@ proc task_help {args} {
   test               run the in-process test suite (tcltest + event generate)
   run [file ...]     launch the editor (wish + els.tcl)
   shot <out> [file]  screenshot the editor to <out> (twapi)
+  build [--with-ext] fuse the single-file els.exe (--with-ext embeds build/*.dll)
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
   fetch-twapi        vendor the twapi extension into .toolchain/
   fetch-git          vendor MinGit into .toolchain/git/
@@ -87,6 +88,16 @@ proc task_env {args} {
 
 proc task_toolcheck {args} {
     stream [tclsh] [P tools toolcheck.tcl] {*}$args
+}
+
+# Build the single-file els.exe.  Runs package.tcl under the STATIC tclsh90s
+# (whose tcl_library is mounted at //zipfs:/app — package.tcl needs that).
+proc task_build {args} {
+    set tclshs [TCp tcl9s bin tclsh90s.exe]
+    if {![file exists $tclshs]} {
+        error "static interpreter missing (.toolchain/tcl9s) — needed for `x build`; see `x toolcheck`"
+    }
+    stream $tclshs [P tools package.tcl] {*}$args
 }
 
 proc task_test {args} {
