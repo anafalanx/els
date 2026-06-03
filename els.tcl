@@ -1020,6 +1020,12 @@ proc els::saveas {} {
     els::save
     els::update_tab $active
 }
+# bind an event on a widget and every descendant, so a click anywhere inside a
+# composite window is caught — not just on its background
+proc els::bindtree {w seq script} {
+    bind $w $seq $script
+    foreach c [winfo children $w] { els::bindtree $c $seq $script }
+}
 proc els::about {} {
     catch {destroy .about}
     toplevel .about -bg $::els::PAGE
@@ -1028,23 +1034,35 @@ proc els::about {} {
     wm transient .about .
     wm resizable .about 0 0
     set bg $::els::PAGE
+    # icon on the left, text on the right — a calm landscape card
+    frame .about.row -bg $bg
+    pack  .about.row -padx 34 -pady 30
     if {$::els::iconLoaded} {
         catch {image delete elsAboutIcon}
         image create photo elsAboutIcon
         elsAboutIcon copy elsIcon -subsample 2 -subsample 2   ;# 256px -> 128px
-        label .about.icon -image elsAboutIcon -bg $bg -bd 0
-        pack .about.icon -padx 56 -pady {36 16}
+        label .about.row.icon -image elsAboutIcon -bg $bg -bd 0
+        pack  .about.row.icon -side left -padx {0 28}
     }
-    label .about.name -text "els" -font elsTitle -fg $::els::INK -bg $bg
-    pack .about.name
-    label .about.tag -text "a tiny, scriptable text editor" \
+    frame .about.row.txt -bg $bg
+    pack  .about.row.txt -side left
+    label .about.row.txt.name -text "els" -font elsTitle -fg $::els::INK -bg $bg
+    pack  .about.row.txt.name -anchor w
+    label .about.row.txt.tag -text "a programmable text editor" \
         -font elsUI -fg $::els::MUTED -bg $bg
-    pack .about.tag -pady {6 14}
-    label .about.ver -text "version $::els::version" -font elsUI -fg $::els::MUTED -bg $bg
-    pack .about.ver -pady {0 30}
+    pack  .about.row.txt.tag -anchor w -pady {4 16}
+    label .about.row.txt.ver -text "version $::els::version" \
+        -font elsUI -fg $::els::MUTED -bg $bg
+    pack  .about.row.txt.ver -anchor w
+    label .about.row.txt.copy -text "© 2026 Vincent Vercauteren" \
+        -font elsUI -fg $::els::MUTED -bg $bg
+    pack  .about.row.txt.copy -anchor w -pady {16 0}
+    label .about.row.txt.lic -text "MIT License" \
+        -font elsUI -fg $::els::MUTED -bg $bg
+    pack  .about.row.txt.lic -anchor w -pady {2 0}
     # a click anywhere, or Escape, dismisses it
-    bind .about <Escape>   {destroy .about}
-    bind .about <Button-1> {destroy .about}
+    bind .about <Escape> {destroy .about}
+    els::bindtree .about <Button-1> {destroy .about}
     update idletasks
     set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .about]) / 2}]
     set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .about]) / 3}]

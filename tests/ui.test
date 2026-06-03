@@ -298,16 +298,24 @@ test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
     $w get 1.0 "end - 1 char"
 } -result keep
 
-test ui-9.1 {About is a Tk window with the icon + name, no tech reference} -setup {ui_reset} -body {
+test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup {ui_reset} -body {
     els::about
     catch {wm withdraw .about}
     set isWin   [winfo exists .about]
-    set name    [.about.name cget -text]
-    set hasicon [expr {[winfo exists .about.icon] || !$::els::iconLoaded}]
-    set tech 0
-    foreach w [winfo children .about] {
-        if {![catch {$w cget -text} t] && [string match -nocase "*tcl*" $t]} { set tech 1 }
+    set name    [.about.row.txt.name cget -text]
+    set hasicon [expr {[winfo exists .about.row.icon] || !$::els::iconLoaded}]
+    # gather every label's text in the window, recursively
+    set texts {} ; set stack [list .about]
+    while {[llength $stack]} {
+        set w [lindex $stack 0] ; set stack [lrange $stack 1 end]
+        if {![catch {$w cget -text} t]} { lappend texts $t }
+        foreach c [winfo children $w] { lappend stack $c }
     }
+    set blob [join $texts \n]
+    set tech    [string match -nocase *tcl* $blob]
+    set hasprog [string match -nocase *programmable* $blob]
+    set hascopy [string match -nocase *Vercauteren* $blob]
+    set haslic  [string match -nocase *MIT* $blob]
     destroy .about ; focus [els::T]
-    list $isWin $name $hasicon $tech
-} -result {1 els 1 0}
+    list $isWin $name $hasicon $tech $hasprog $hascopy $haslic
+} -result {1 els 1 0 1 1 1}
