@@ -29,7 +29,7 @@ namespace eval els {
 # ---- look: the els visual identity --------------------------------------
 set ::els::PAGE   "#F2F2F2"      ;# calm grey page (not pure white)
 set ::els::INK    "#1A1A1A"
-set ::els::CARET  "#DC2626"      ;# the signature red caret
+set ::els::CARET  "#EE2C2C"      ;# the signature red caret (firebrick2)
 set ::els::LINE   "#E8E8E8"
 set ::els::GUTTER "#E2E2E2"
 set ::els::MUTED  "#666666"

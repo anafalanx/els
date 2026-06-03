@@ -114,7 +114,7 @@ font create cHead -family {Segoe UI Semibold} -size 12
 frame .top -bg "#1E1E1E"
 label .top.l -bg "#1E1E1E" -fg "#E6E6E6" -text "Filter:" -font {{Segoe UI} 10}
 entry .top.e -textvariable ::filter -width 22 -bg "#2C2C2C" -fg "#E6E6E6" \
-    -insertbackground "#DC2626" -relief flat
+    -insertbackground "#EE2C2C" -relief flat
 label .top.n -bg "#1E1E1E" -fg "#8A8F98" -textvariable ::countlbl -font {{Segoe UI} 9}
 label .top.s -bg "#1E1E1E" -fg "#C8CDD4" -textvariable ::status -font {Consolas 9} -anchor w
 pack .top.l -side left -padx {12 5} -pady 7
