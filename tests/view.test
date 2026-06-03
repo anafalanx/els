@@ -48,3 +48,21 @@ test ws-1.2 {toggling Show Whitespace off clears every whitespace tag} -setup {e
     list [llength [$w tag ranges wsSpace]] [llength [$w tag ranges wsTab]] \
          [llength [$w tag ranges wsTrail]]
 } -result {0 0 0}
+
+test ws-2.1 {return markers appear and never dirty the document or its text} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "alpha\nbeta\ngamma\n" ; update ; $w edit modified 0
+    set ::els::show_ws 1
+    els::ws_refresh ; update
+    list [expr {[llength [$w tag ranges retMark]] > 0}] \
+         [$w edit modified] \
+         [string equal [$w get 1.0 "end - 1 char"] "alpha\nbeta\ngamma\n"]
+} -result {1 0 1}
+
+test ws-2.2 {turning Show Whitespace off removes every marker image} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "x\ny\n" ; update ; $w edit modified 0
+    set ::els::show_ws 1 ; els::ws_refresh ; update
+    set ::els::show_ws 0 ; els::ws_refresh ; update
+    list [llength [$w tag ranges retMark]] [llength [$w image names]] [$w edit modified]
+} -result {0 0 0}

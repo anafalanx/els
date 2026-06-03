@@ -68,7 +68,7 @@ namespace eval els {
     variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
     variable vs_after ""         ;# pending (idle) scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
-    variable ws_after ""         ;# pending (idle) whitespace re-tag after a scroll
+    variable ws_after ""         ;# pending (debounced) whitespace return-marker update
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -288,12 +288,12 @@ proc els::build {} {
     # runs BEFORE the default Text tag, so accelerators here pre-empt Tk's
     # emacs-style defaults (Ctrl+N = down-line, Ctrl+O = open-line, ...).
     bind elsText <<Modified>>    {els::on_modified %W}
-    bind elsText <KeyRelease>    {els::refresh_view}
+    bind elsText <KeyRelease>    {els::refresh_view ; els::ws_schedule}
     bind elsText <ButtonRelease> {els::refresh_view}
     bind elsText <FocusIn>       {els::refresh_view}
-    bind elsText <<Paste>>       {after idle els::refresh_view}
-    bind elsText <<Cut>>         {after idle els::refresh_view}
-    bind elsText <Configure>     {after idle els::refresh_view}
+    bind elsText <<Paste>>       {after idle {els::refresh_view ; els::ws_schedule}}
+    bind elsText <<Cut>>         {after idle {els::refresh_view ; els::ws_schedule}}
+    bind elsText <Configure>     {after idle {els::refresh_view ; els::ws_schedule}}
     bind elsText <Control-n> { els::new;       break }
     bind elsText <Control-o> { els::open;      break }
     bind elsText <Control-s> { els::save;      break }
@@ -407,6 +407,7 @@ proc els::switch_to {id} {
     els::refresh_view
     if {$::els::find_mode ne ""} { els::find_update }
     after idle els::update_vscroll
+    els::ws_schedule
 }
 proc els::cycle {dir} {
     variable docs
@@ -579,11 +580,8 @@ proc els::yscroll {id first last} {
     # loop. Coalesced so a burst of scrolls schedules one update.
     after cancel $vs_after
     set vs_after [after idle els::update_vscroll]
-    # whitespace markers are viewport-scoped, so re-tag after a scroll (coalesced)
-    if {$::els::show_ws} {
-        after cancel $::els::ws_after
-        set ::els::ws_after [after idle els::ws_refresh]
-    }
+    # return markers are viewport-scoped, so rebuild them after a scroll (debounced)
+    els::ws_schedule
 }
 # Show the scrollbar only when the document doesn't fit (chrome defers).  Reads
 # the live yview rather than a possibly-stale -yscrollcommand value, so it's
@@ -617,7 +615,7 @@ proc els::refresh_view {} {
     els::update_line_numbers
     els::update_current_line
     els::update_vscroll
-    if {$::els::show_ws} { els::ws_refresh }
+    if {$::els::show_ws} { els::ws_tags }
 }
 
 # ---- encoding / EOL -----------------------------------------------------
@@ -812,6 +810,7 @@ proc els::reopen_with {enc bom} {
     els::update_tab $id
     els::settitle
     els::refresh_view
+    els::ws_schedule
 }
 proc els::save_with {enc bom} {
     set id $::els::active
@@ -1318,11 +1317,20 @@ proc els::goto_do {top} {
     if {$w ne ""} { focus $w }
 }
 
-# Reveal whitespace by tagging it with subdued, per-type background tints (Tk's
-# Text widget can't substitute glyphs).  Spaces, tabs and trailing whitespace
-# each get a distinct colour.  Scoped to the visible viewport so it stays fast
-# on large files; re-runs on scroll (els::yscroll) and edits (els::refresh_view).
-proc els::ws_refresh {} {
+# Reveal whitespace when Show Whitespace is on.  Spaces, tabs and trailing
+# whitespace get distinct subdued background tints (Tk can't substitute glyphs);
+# line endings get a subdued return symbol (a per-line embedded image — the only
+# way to mark a return as a single block, since a tagged newline fills to the
+# margin).  Scoped to the visible viewport so it stays fast on large files;
+# re-runs on scroll (els::yscroll) and edits (els::refresh_view).
+#
+# The return markers are embedded images, so they're excluded from `$w get`
+# (save/copy keep the real text) and never reach the undo stack; the churn is
+# wrapped to keep the document's modified flag and undo history untouched, and
+# ws_busy suppresses the <<Modified>> handler so it can't loop back here.
+# Colour part: tag spaces/tabs/trailing in the visible viewport.  No content
+# change, so this is safe to call from refresh_view on every edit/scroll.
+proc els::ws_tags {} {
     set w [els::T]
     if {$w eq ""} { return }
     $w tag remove wsSpace 1.0 end
@@ -1336,6 +1344,68 @@ proc els::ws_refresh {} {
         foreach s [$w search -all -regexp -count ::els::$var -- $pat $top $bot] {
             $w tag add $tag $s "$s + [lindex [set ::els::$var] $i] chars" ; incr i
         }
+    }
+}
+# Marker part: rebuild the per-line return symbols (embedded images).  This DOES
+# change content, so it must NOT run from refresh_view / <<Modified>> (which the
+# marker churn would re-trigger -> infinite loop).  It runs only from explicit
+# edit/scroll/open triggers, debounced via els::ws_schedule.  The churn is
+# wrapped so it never reaches the undo stack; the modified flag is saved and
+# restored, so embedding markers never dirties the document.
+proc els::ws_returns {} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    set mod [$w edit modified] ; set u [$w cget -undo]
+    $w configure -undo 0
+    els::ws_clear_returns $w
+    if {$::els::show_ws} {
+        set top [$w index @0,0]
+        set bot [$w index "@0,[winfo height $w] + 1 line"]
+        els::ws_add_returns $w $top $bot
+    }
+    $w configure -undo $u
+    $w edit modified $mod
+}
+# both halves — for the toggle and for explicit refreshes (open, reopen, ...)
+proc els::ws_refresh {} { els::ws_tags ; els::ws_returns }
+# debounce the marker rebuild; only meaningful while Show Whitespace is on
+proc els::ws_schedule {} {
+    after cancel $::els::ws_after
+    if {$::els::show_ws} {
+        set ::els::ws_after [after 60 els::ws_returns]
+    }
+}
+# the subdued return symbol (↵), drawn once at the document font's metrics
+proc els::ws_ret_img {} {
+    if {[lsearch -exact [image names] ::els::retImg] >= 0} { return ::els::retImg }
+    set wd [font measure elsMono " "] ; if {$wd < 7} { set wd 7 }
+    set ht [font metrics elsMono -linespace]
+    set p [image create photo ::els::retImg -width $wd -height $ht]
+    set g $::els::GUTTINK
+    set cy [expr {$ht/2}] ; set x0 2 ; set x1 [expr {$wd-3}]
+    $p put $g -to $x0 $cy $x1 [expr {$cy+1}]                                  ;# shaft
+    $p put $g -to [expr {$x1-1}] [expr {$cy-$ht/4}] $x1 [expr {$cy+1}]        ;# up-hook
+    for {set k 1} {$k <= 3} {incr k} {                                       ;# left arrowhead
+        $p put $g -to [expr {$x0+$k}] [expr {$cy-$k}] [expr {$x0+$k+1}] [expr {$cy-$k+1}]
+        $p put $g -to [expr {$x0+$k}] [expr {$cy+$k}] [expr {$x0+$k+1}] [expr {$cy+$k+1}]
+    }
+    return ::els::retImg
+}
+proc els::ws_clear_returns {w} {
+    set ranges [$w tag ranges retMark]
+    for {set k [expr {[llength $ranges] - 2}]} {$k >= 0} {incr k -2} {
+        $w delete [lindex $ranges $k] [lindex $ranges [expr {$k + 1}]]
+    }
+}
+proc els::ws_add_returns {w top bot} {
+    set img [els::ws_ret_img]
+    set topl [lindex [split [$w index $top] .] 0]
+    set botl [lindex [split [$w index $bot] .] 0]
+    set markMax [expr {[lindex [split [$w index end] .] 0] - 2}]  ;# last newline-terminated line
+    if {$botl > $markMax} { set botl $markMax }
+    for {set ln $topl} {$ln <= $botl} {incr ln} {
+        $w image create "$ln.end" -image $img -align center
+        $w tag add retMark "$ln.end - 1 char" "$ln.end"
     }
 }
 
