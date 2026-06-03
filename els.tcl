@@ -34,6 +34,7 @@ namespace eval els {
     variable find_matches {}     ;# list of {start end} index pairs in the active doc
     variable find_current -1     ;# index into find_matches
     variable find_count ""       ;# status text e.g. "3 of 12"
+    variable show_ws 0           ;# View ▸ Show Whitespace
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -48,6 +49,8 @@ set ::els::TABOFF "#E2E2E2"      ;# an inactive tab
 set ::els::TABON  "#F2F2F2"      ;# active tab merges into the page
 set ::els::FINDALL "#FCE7A6"     ;# all find matches (soft amber)
 set ::els::FINDONE "#F5B638"     ;# the current find match (stronger amber)
+set ::els::WSTAB   "#E6E6EF"     ;# tabs (faint blue-grey)
+set ::els::WSTRAIL "#F7D6D6"     ;# trailing whitespace (faint red)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
@@ -137,6 +140,12 @@ proc els::build {} {
     .menu.file add separator
     .menu.file add command -label "Close Tab"  -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
+    menu .menu.view
+    .menu add cascade -label View -menu .menu.view
+    .menu.view add command -label "Go to Line..." -accelerator Ctrl+G -command els::goto_line
+    .menu.view add separator
+    .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
+        -command els::ws_refresh
     menu .menu.help
     .menu add cascade -label Help -menu .menu.help
     .menu.help add command -label "About els" -command els::about
@@ -191,6 +200,7 @@ proc els::build {} {
     bind elsText <Control-ISO_Left_Tab> { els::cycle -1; break }
     bind elsText <Control-f> { els::find_show find;    break }
     bind elsText <Control-h> { els::find_show replace; break }
+    bind elsText <Control-g> { els::goto_line;         break }
 
     # the same accelerators on the toplevel, for when focus is off the text
     bind . <Control-n> { els::new;       break }
@@ -203,6 +213,7 @@ proc els::build {} {
     bind . <Control-ISO_Left_Tab> { els::cycle -1; break }
     bind . <Control-f> { els::find_show find;    break }
     bind . <Control-h> { els::find_show replace; break }
+    bind . <Control-g> { els::goto_line;         break }
 
     bind .ln <Button-1>   { focus [els::T]; break }
     bind .ln <MouseWheel> { els::wheel %D; break }
@@ -231,6 +242,10 @@ proc els::new_doc {{path ""}} {
     $w tag lower currentLine
     $w tag configure findAll -background $::els::FINDALL
     $w tag configure findOne -background $::els::FINDONE
+    $w tag configure wsTab   -background $::els::WSTAB
+    $w tag configure wsTrail -background $::els::WSTRAIL
+    $w tag lower wsTab currentLine
+    $w tag lower wsTrail currentLine
     $w tag raise findAll
     $w tag raise findOne
     $w tag raise sel
@@ -456,6 +471,7 @@ proc els::refresh_view {} {
     els::update_pos
     els::update_line_numbers
     els::update_current_line
+    if {$::els::show_ws} { els::ws_refresh }
 }
 
 # ---- file operations ----------------------------------------------------
@@ -713,6 +729,69 @@ proc els::find_replace_all {} {
     $w edit separator
     els::find_update
     set ::els::find_count "Replaced $n"
+}
+
+# ---- go to line + whitespace --------------------------------------------
+proc els::goto_line {} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    set max [els::line_count]
+    set top .goto
+    catch {destroy $top}
+    toplevel $top -bg $::els::PAGE
+    wm title $top "Go to Line"
+    wm resizable $top 0 0
+    wm transient $top .
+    ttk::frame $top.f -padding 12
+    ttk::label $top.f.l -text "Line (1 - $max):" -font elsUI
+    ttk::entry $top.f.e -width 10 -font elsMono
+    ttk::frame $top.f.b
+    ttk::button $top.f.b.ok     -text "Go"     -command [list els::goto_do $top]
+    ttk::button $top.f.b.cancel -text "Cancel" -command [list destroy $top]
+    pack $top.f.b.ok $top.f.b.cancel -side left -padx 3
+    grid $top.f.l -row 0 -column 0 -sticky w
+    grid $top.f.e -row 0 -column 1 -padx 6 -sticky ew
+    grid $top.f.b -row 1 -column 0 -columnspan 2 -pady {10 0}
+    pack $top.f
+    bind $top.f.e <Return> [list els::goto_do $top]
+    bind $top <Escape> [list destroy $top]
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
+    wm geometry $top +$x+$y
+    focus $top.f.e
+    catch {grab $top}
+}
+proc els::goto_do {top} {
+    set w [els::T]
+    set ln [string trim [$top.f.e get]]
+    if {$w ne "" && [string is integer -strict $ln] && $ln >= 1} {
+        set ln [expr {min($ln, [els::line_count])}]
+        $w mark set insert $ln.0
+        $w see $ln.0
+        els::refresh_view
+    }
+    destroy $top
+    if {$w ne ""} { focus $w }
+}
+
+# highlight tabs + trailing whitespace in the active doc (when Show Whitespace
+# is on).  Tk's Text widget can't substitute glyphs, so we reveal whitespace by
+# tagging it rather than drawing · / → marks.
+proc els::ws_refresh {} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    $w tag remove wsTab   1.0 end
+    $w tag remove wsTrail 1.0 end
+    if {!$::els::show_ws} { return }
+    set i 0
+    foreach s [$w search -all -regexp -count ::els::ws_lens -- {\t+} 1.0 end] {
+        $w tag add wsTab $s "$s + [lindex $::els::ws_lens $i] chars" ; incr i
+    }
+    set i 0
+    foreach s [$w search -all -regexp -count ::els::ws_lens2 -- {[ \t]+$} 1.0 end] {
+        $w tag add wsTrail $s "$s + [lindex $::els::ws_lens2 $i] chars" ; incr i
+    }
 }
 
 # ---- main ---------------------------------------------------------------
