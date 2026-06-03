@@ -1,14 +1,15 @@
 @echo off
 rem ============================================================================
-rem  els bootstrap — provision .toolchain on a fresh checkout (NO Tcl needed yet).
+rem  els bootstrap — provision .toolchain on a fresh checkout (NO Tcl yet).
+rem
+rem  Classical Windows cmd ONLY — uses the built-in curl.exe + tar.exe that ship
+rem  in System32 on Windows 10 1803+ / Windows 11.  No PowerShell, no bash.
 rem
 rem  The normal distribution model is copy-paste of the whole folder (which
 rem  carries .toolchain).  This is for the `git clone` case, where .toolchain is
-rem  absent: it downloads a pre-built toolchain bundle with PowerShell (always on
-rem  Windows 11), unpacks it, then hands off to `x toolcheck`.
-rem
-rem  Set ELS_TOOLCHAIN_URL to a .zip of the .toolchain tree (host it as a release
-rem  asset).  Without it, this prints what to do.
+rem  absent: it downloads a pre-built toolchain bundle and unpacks it, then hands
+rem  off to `x toolcheck`.  Set ELS_TOOLCHAIN_URL to a .zip of the toolchain
+rem  tree (host it as a release asset); without it, this prints what to do.
 rem ============================================================================
 setlocal
 set "ELS_ROOT=%~dp0"
@@ -30,15 +31,13 @@ if "%ELS_TOOLCHAIN_URL%"=="" (
 )
 
 echo Downloading toolchain bundle from %ELS_TOOLCHAIN_URL% ...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference='Stop';" ^
-  "Invoke-WebRequest -Uri $env:ELS_TOOLCHAIN_URL -OutFile '%ELS_ROOT%toolchain.zip';" ^
-  "Expand-Archive -Force '%ELS_ROOT%toolchain.zip' '%ELS_ROOT%';" ^
-  "Remove-Item '%ELS_ROOT%toolchain.zip'"
-if errorlevel 1 (
-  echo Download/unpack failed.
-  exit /b 1
-)
+curl.exe -L --fail -o "%ELS_ROOT%toolchain.zip" "%ELS_TOOLCHAIN_URL%"
+if errorlevel 1 ( echo Download failed. & exit /b 1 )
+
+echo Extracting ...
+tar.exe -xf "%ELS_ROOT%toolchain.zip" -C "%ELS_ROOT%"
+if errorlevel 1 ( echo Extract failed. & exit /b 1 )
+del "%ELS_ROOT%toolchain.zip"
 
 echo Toolchain unpacked. Verifying...
 call "%ELS_ROOT%x.cmd" toolcheck --prep

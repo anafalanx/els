@@ -38,6 +38,10 @@ by fusing `els.tcl` + Tcl/Tk into a `zipfs` image on a static interpreter;
 inside the exe. `bootstrap.cmd` provisions `.toolchain/` on a fresh `git clone`
 (the copy-paste model needs no bootstrap).
 
+The project uses **only C and Tcl 9**, plus two classical-`cmd` boot scripts
+(`x.cmd`, `bootstrap.cmd`) — no bash, PowerShell, or Python. See
+[`toolchain.md`](toolchain.md) for the full setup.
+
 The toolchain (Tcl/Tk 9, gcc/C23, twapi, MinGit) lives under `.toolchain/` and is
 **relocatable** — verified by copying the folder to a different path and
 rebuilding + testing from there. `x toolcheck` reports each component; `x
