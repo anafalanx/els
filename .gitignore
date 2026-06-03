@@ -12,6 +12,9 @@
 /smoke.tcl
 /tests/_tmp/
 
+# compiled C extensions / build output (rebuilt via `x build-ext`)
+/build/
+
 # OS / editor cruft
 *~
 Thumbs.db
