@@ -28,6 +28,14 @@ The suite drives the real Tk widgets in-process (`tcltest` + Tk's
 .toolchain/tcl9/bin/tclsh90.exe tests/run.tcl
 ```
 
+The tooling is **all-Tcl** (no AutoIt). Screenshots use
+[twapi](https://github.com/apnadkarni/twapi) for window control + a Tcl/Tk
+DIB→PNG capture (`scripts/fetch-twapi.sh` vendors it):
+
+```
+.toolchain/tcl9/bin/tclsh90.exe tools/shot.tcl <wish90.exe> els.tcl out.png [file ...]
+```
+
 ## Status
 
 Early skeleton — multi-file tabs, open/save/new, menu, status bar (Ln/Col),
