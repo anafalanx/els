@@ -13,6 +13,11 @@ set "TC=%ELS_ROOT%.toolchain"
 set "PATH=%TC%\msys64\ucrt64\bin;%TC%\tcl9\bin;%PATH%"
 if exist "%TC%\git\cmd" set "PATH=%TC%\git\cmd;%PATH%"
 set "MSYSTEM=UCRT64"
+if /i "%~1"=="shell" (
+  echo els toolchain shell - PATH set to the vendored toolchain. Type exit to leave.
+  cmd /k prompt els$G
+  exit /b
+)
 if not exist "%TC%\tcl9\bin\tclsh90.exe" (
   echo [els] Tcl toolchain not found under %TC%\tcl9 - this folder is not provisioned.
   echo        Restore .toolchain\ ^(copy-paste^), or rebuild it, then run: x toolcheck
