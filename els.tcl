@@ -24,6 +24,16 @@ namespace eval els {
     variable selftest [expr {[lindex $::argv 0] eq "--selftest"}]
     variable docPath             ;# array: id -> file path ("" = untitled)
     array set docPath {}
+    # find / replace
+    variable find_q ""           ;# search text
+    variable find_r ""           ;# replacement text
+    variable find_case 0         ;# match case
+    variable find_word 0         ;# whole word
+    variable find_regex 0        ;# regular expression (Tcl ARE)
+    variable find_mode ""        ;# "" hidden | find | replace
+    variable find_matches {}     ;# list of {start end} index pairs in the active doc
+    variable find_current -1     ;# index into find_matches
+    variable find_count ""       ;# status text e.g. "3 of 12"
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -36,6 +46,8 @@ set ::els::MUTED  "#666666"
 set ::els::TABBG  "#D6D6D6"      ;# the strip behind the tabs
 set ::els::TABOFF "#E2E2E2"      ;# an inactive tab
 set ::els::TABON  "#F2F2F2"      ;# active tab merges into the page
+set ::els::FINDALL "#FCE7A6"     ;# all find matches (soft amber)
+set ::els::FINDONE "#F5B638"     ;# the current find match (stronger amber)
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
@@ -142,6 +154,9 @@ proc els::build {} {
     # the shared scrollbar
     ttk::scrollbar .vs -orient vertical -command {els::scroll}
 
+    # the find / replace bar (hidden until Ctrl+F / Ctrl+H)
+    els::build_findbar
+
     # the shared status bar
     ttk::frame .sb
     ttk::label .sb.pos  -font elsUI -anchor w -text "Ln 1, Col 1"
@@ -152,7 +167,7 @@ proc els::build {} {
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
     grid .ln   -row 1 -column 0 -sticky ns
     grid .vs   -row 1 -column 2 -sticky ns
-    grid .sb   -row 2 -column 0 -columnspan 3 -sticky ew
+    grid .sb   -row 3 -column 0 -columnspan 3 -sticky ew
     grid rowconfigure    . 1 -weight 1
     grid columnconfigure . 1 -weight 1
 
@@ -174,6 +189,8 @@ proc els::build {} {
     bind elsText <Control-Tab>          { els::cycle 1;  break }
     bind elsText <Control-Shift-Tab>    { els::cycle -1; break }
     bind elsText <Control-ISO_Left_Tab> { els::cycle -1; break }
+    bind elsText <Control-f> { els::find_show find;    break }
+    bind elsText <Control-h> { els::find_show replace; break }
 
     # the same accelerators on the toplevel, for when focus is off the text
     bind . <Control-n> { els::new;       break }
@@ -184,6 +201,8 @@ proc els::build {} {
     bind . <Control-Tab>          { els::cycle 1;  break }
     bind . <Control-Shift-Tab>    { els::cycle -1; break }
     bind . <Control-ISO_Left_Tab> { els::cycle -1; break }
+    bind . <Control-f> { els::find_show find;    break }
+    bind . <Control-h> { els::find_show replace; break }
 
     bind .ln <Button-1>   { focus [els::T]; break }
     bind .ln <MouseWheel> { els::wheel %D; break }
@@ -210,6 +229,11 @@ proc els::new_doc {{path ""}} {
         -yscrollcommand [list els::yscroll $id]
     $w tag configure currentLine -background $::els::LINE
     $w tag lower currentLine
+    $w tag configure findAll -background $::els::FINDALL
+    $w tag configure findOne -background $::els::FINDONE
+    $w tag raise findAll
+    $w tag raise findOne
+    $w tag raise sel
     # let the shared class bindings fire (run before the default Text tag)
     bindtags $w [linsert [bindtags $w] 1 elsText]
     set docPath($id) $path
@@ -250,6 +274,7 @@ proc els::switch_to {id} {
     els::refresh_tabs
     els::settitle
     els::refresh_view
+    if {$::els::find_mode ne ""} { els::find_update }
 }
 proc els::cycle {dir} {
     variable docs
@@ -521,6 +546,173 @@ proc els::quit {} {
     }
     els::save_geometry
     exit
+}
+
+# ---- find / replace -----------------------------------------------------
+proc els::build_findbar {} {
+    ttk::frame .find -padding {6 4 6 4}
+
+    ttk::frame .find.fr
+    ttk::label .find.fr.l -text "Find" -font elsUI -width 7 -anchor w
+    ttk::entry .find.fr.q -textvariable ::els::find_q -font elsUI
+    ttk::checkbutton .find.fr.case  -text "Aa" -style Toolbutton -takefocus 0 \
+        -variable ::els::find_case  -command els::find_update
+    ttk::checkbutton .find.fr.word  -text "W"  -style Toolbutton -takefocus 0 \
+        -variable ::els::find_word  -command els::find_update
+    ttk::checkbutton .find.fr.regex -text ".*" -style Toolbutton -takefocus 0 \
+        -variable ::els::find_regex -command els::find_update
+    ttk::button .find.fr.prev -text "↑" -width 2 -takefocus 0 -command {els::find_step -1}
+    ttk::button .find.fr.next -text "↓" -width 2 -takefocus 0 -command {els::find_step 1}
+    ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
+        -foreground $::els::MUTED -width 11 -anchor e
+    ttk::button .find.fr.x -text "×" -width 2 -takefocus 0 -command els::find_hide
+    grid .find.fr.l .find.fr.q .find.fr.case .find.fr.word .find.fr.regex \
+         .find.fr.prev .find.fr.next .find.fr.n .find.fr.x -row 0 -padx 1 -sticky we
+    grid columnconfigure .find.fr 1 -weight 1
+
+    ttk::frame .find.rr
+    ttk::label .find.rr.l -text "Replace" -font elsUI -width 7 -anchor w
+    ttk::entry .find.rr.r -textvariable ::els::find_r -font elsUI
+    ttk::button .find.rr.rep -text "Replace" -takefocus 0 -command els::find_replace_one
+    ttk::button .find.rr.all -text "All"     -takefocus 0 -command els::find_replace_all
+    grid .find.rr.l .find.rr.r .find.rr.rep .find.rr.all -row 0 -padx 1 -sticky we
+    grid columnconfigure .find.rr 1 -weight 1
+
+    grid .find.fr -row 0 -column 0 -sticky ew
+    grid .find.rr -row 1 -column 0 -sticky ew -pady {3 0}
+    grid columnconfigure .find 0 -weight 1
+
+    bind .find.fr.q <KeyRelease>   els::find_update
+    bind .find.fr.q <Return>       { els::find_step 1  ; break }
+    bind .find.fr.q <Shift-Return> { els::find_step -1 ; break }
+    bind .find.fr.q <Escape>       { els::find_hide    ; break }
+    bind .find.rr.r <Return>       { els::find_replace_one ; break }
+    bind .find.rr.r <Escape>       { els::find_hide    ; break }
+}
+
+# escape ARE metacharacters so a literal string searches literally
+proc els::re_escape {s} {
+    return [regsub -all {[][\\^$.|?*+(){}]} $s {\\&}]
+}
+
+proc els::find_show {mode} {
+    variable find_mode
+    set find_mode $mode
+    grid .find -row 2 -column 0 -columnspan 3 -sticky ew
+    if {$mode eq "replace"} { grid .find.rr } else { grid remove .find.rr }
+    set w [els::T]
+    if {$w ne "" && [llength [$w tag ranges sel]]} {
+        set s [$w get sel.first sel.last]
+        if {$s ne "" && [string first \n $s] < 0} { set ::els::find_q $s }
+    }
+    els::find_update
+    focus .find.fr.q
+    .find.fr.q selection range 0 end
+}
+
+proc els::find_hide {} {
+    variable find_mode
+    set find_mode ""
+    grid remove .find
+    set w [els::T]
+    if {$w ne ""} {
+        $w tag remove findAll 1.0 end
+        $w tag remove findOne 1.0 end
+        focus $w
+    }
+}
+
+# re-run the search in the active doc, tag all matches, pick the current one
+proc els::find_update {} {
+    variable find_q ; variable find_case ; variable find_word ; variable find_regex
+    variable find_matches ; variable find_count
+    set w [els::T]
+    if {$w eq ""} { return }
+    $w tag remove findAll 1.0 end
+    $w tag remove findOne 1.0 end
+    set find_matches {}
+    if {$find_q eq ""} { set find_count "" ; return }
+
+    set useRegex $find_regex
+    set pat $find_q
+    if {$find_word} {
+        set useRegex 1
+        set p [expr {$find_regex ? $find_q : [els::re_escape $find_q]}]
+        set pat "\\m$p\\M"
+    }
+    set sargs {-all}
+    if {$useRegex}   { lappend sargs -regexp }
+    if {!$find_case} { lappend sargs -nocase }
+    if {[catch {set starts [$w search {*}$sargs -count ::els::find_lens -- $pat 1.0 end]}]} {
+        set find_count "bad pattern" ; return
+    }
+    if {![llength $starts]} { set find_count "No results" ; return }
+
+    set lens $::els::find_lens
+    set i 0
+    foreach s $starts {
+        set e [$w index "$s + [lindex $lens $i] chars"]
+        $w tag add findAll $s $e
+        lappend find_matches [list $s $e]
+        incr i
+    }
+    set n [llength $find_matches]
+    set ins [$w index insert]
+    set cur 0
+    for {set j 0} {$j < $n} {incr j} {
+        if {[$w compare [lindex [lindex $find_matches $j] 0] >= $ins]} { set cur $j ; break }
+    }
+    els::find_highlight $cur
+}
+
+proc els::find_highlight {idx} {
+    variable find_matches ; variable find_current ; variable find_count
+    set w [els::T]
+    set n [llength $find_matches]
+    if {$n == 0} { return }
+    set idx [expr {($idx % $n + $n) % $n}]
+    set find_current $idx
+    $w tag remove findOne 1.0 end
+    lassign [lindex $find_matches $idx] s e
+    $w tag add findOne $s $e
+    $w mark set insert $s
+    $w see $s
+    set find_count "[expr {$idx + 1}] of $n"
+    els::update_pos
+    els::update_current_line
+}
+
+proc els::find_step {dir} {
+    variable find_matches ; variable find_current
+    if {![llength $find_matches]} { els::find_update ; return }
+    els::find_highlight [expr {$find_current + $dir}]
+}
+
+proc els::find_replace_one {} {
+    variable find_matches ; variable find_current ; variable find_r
+    set w [els::T]
+    if {$w eq ""} { return }
+    if {![llength $find_matches] || $find_current < 0} { els::find_step 1 ; return }
+    lassign [lindex $find_matches $find_current] s e
+    $w edit separator
+    $w replace $s $e $find_r
+    $w mark set insert "$s + [string length $find_r] chars"
+    els::find_update
+}
+
+proc els::find_replace_all {} {
+    variable find_matches ; variable find_r
+    set w [els::T]
+    if {$w eq "" || ![llength $find_matches]} { return }
+    set n [llength $find_matches]
+    $w edit separator
+    foreach m [lreverse $find_matches] {
+        lassign $m s e
+        $w replace $s $e $find_r
+    }
+    $w edit separator
+    els::find_update
+    set ::els::find_count "Replaced $n"
 }
 
 # ---- main ---------------------------------------------------------------

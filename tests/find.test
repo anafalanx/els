@@ -1,0 +1,78 @@
+# tests/find.test — find/replace logic, driven against the real Text widget.
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+proc find_reset {} {
+    els_reset
+    set ::els::find_q "" ; set ::els::find_r ""
+    set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
+    set ::els::find_matches {} ; set ::els::find_current -1
+}
+
+test find-1.1 {literal find is case-insensitive by default} -setup {find_reset} -body {
+    [els::T] insert end "foo bar foo baz Foo"
+    set ::els::find_q foo ; els::find_update
+    list [llength $::els::find_matches] $::els::find_count
+} -result {3 {1 of 3}}
+
+test find-1.2 {Match Case narrows the matches} -setup {find_reset} -body {
+    [els::T] insert end "foo Foo FOO foo"
+    set ::els::find_q foo ; set ::els::find_case 1 ; els::find_update
+    llength $::els::find_matches
+} -result 2
+
+test find-1.3 {Whole Word ignores substrings} -setup {find_reset} -body {
+    [els::T] insert end "foo food foofoo foo"
+    set ::els::find_q foo ; set ::els::find_word 1 ; els::find_update
+    llength $::els::find_matches
+} -result 2
+
+test find-1.4 {regex (Tcl ARE)} -setup {find_reset} -body {
+    [els::T] insert end "a1 b2 c3 dd"
+    set ::els::find_q {[a-z][0-9]} ; set ::els::find_regex 1 ; els::find_update
+    llength $::els::find_matches
+} -result 3
+
+test find-1.5 {a bad regex is reported, not thrown} -setup {find_reset} -body {
+    [els::T] insert end "hi"
+    set ::els::find_q {[unclosed} ; set ::els::find_regex 1 ; els::find_update
+    set ::els::find_count
+} -result {bad pattern}
+
+test find-1.6 {find_step cycles forward and wraps} -setup {find_reset} -body {
+    [els::T] insert end "x x x"
+    set ::els::find_q x ; els::find_update
+    set seq [list $::els::find_current]
+    els::find_step 1 ; lappend seq $::els::find_current
+    els::find_step 1 ; lappend seq $::els::find_current
+    els::find_step 1 ; lappend seq $::els::find_current
+    set seq
+} -result {0 1 2 0}
+
+test find-1.7 {findAll tags every match} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "ab ab ab"
+    set ::els::find_q ab ; els::find_update
+    expr {[llength [$w tag ranges findAll]] / 2}
+} -result 3
+
+test replace-1.1 {Replace replaces the current match} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "cat cat cat"
+    set ::els::find_q cat ; set ::els::find_r dog ; els::find_update
+    els::find_replace_one
+    $w get 1.0 "end - 1 char"
+} -result {dog cat cat}
+
+test replace-1.2 {Replace All replaces every match} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "cat cat cat"
+    set ::els::find_q cat ; set ::els::find_r dog ; els::find_update
+    els::find_replace_all
+    list [$w get 1.0 "end - 1 char"] $::els::find_count
+} -result {{dog dog dog} {Replaced 3}}
+
+test replace-1.3 {Replace All is a single undo} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a a a a" ; $w edit separator
+    set ::els::find_q a ; set ::els::find_r b ; els::find_update
+    els::find_replace_all
+    $w edit undo
+    $w get 1.0 "end - 1 char"
+} -result {a a a a}
