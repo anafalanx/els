@@ -1,6 +1,6 @@
 # els toolchain
 
-How els is built, tested, packaged, and kept portable — and the rules that keep
+How els is built, tested, packaged, and kept portable, plus the rules that keep
 it that way. els is a Tcl/Tk 9 editor with optional C23 extensions; the whole
 project, toolchain included, is **self-contained and copy-paste portable**: drop
 the folder onto any Windows 11 machine and everything works, with no installs
@@ -28,30 +28,30 @@ git ls-files            &:: only .tcl .test .c .cmd + assets/docs
 git grep -i powershell  &:: nothing
 ```
 
-## What's vendored — `.toolchain/`
+## What's vendored: `.toolchain/`
 
 Everything the project needs lives here. It is **gitignored** (large,
 machine-built), so it travels by *copy-paste of the folder*, not by `git clone`.
 
 | Path | What | Version |
 |---|---|---|
-| `.toolchain/tcl9/` | Tcl/Tk 9 **shared** build — `tclsh90.exe`, `wish90.exe`, stubs (`lib/libtclstub.a`), headers (`include/tcl.h`, `tk.h`) | 9.0.3 |
-| `.toolchain/tcl9s/` | Tcl/Tk 9 **static**, DLL-free — `tclsh90s.exe`, `wish90s.exe` (the single-exe wrapper) | 9.0.3 |
+| `.toolchain/tcl9/` | Tcl/Tk 9 **shared** build: `tclsh90.exe`, `wish90.exe`, stubs (`lib/libtclstub.a`), headers (`include/tcl.h`, `tk.h`) | 9.0.3 |
+| `.toolchain/tcl9s/` | Tcl/Tk 9 **static**, DLL-free: `tclsh90s.exe`, `wish90s.exe` (the single-exe wrapper) | 9.0.3 |
 | `.toolchain/msys64/ucrt64/` | gcc (C23), binutils, gdb (MSYS2 UCRT64) | gcc 16.1.0 |
-| `.toolchain/msys64/usr/bin/` | `curl.exe` etc. (used by the fetch tasks) | — |
-| `.toolchain/twapi-dl/` | twapi — Windows API extension for the GUI tooling | 5.2.0 |
-| `.toolchain/git/` | MinGit — git-for-windows' slim, GUI-less build | 2.54.0 |
+| `.toolchain/msys64/usr/bin/` | `curl.exe` etc. (used by the fetch tasks) | n/a |
+| `.toolchain/twapi-dl/` | twapi: Windows API extension for the GUI tooling | 5.2.0 |
+| `.toolchain/git/` | MinGit: git-for-windows' slim, GUI-less build | 2.54.0 |
 
 `x toolcheck` reports the status and version of each.
 
-### Tcl/Tk version — always 9, never msys64's 8.6
+### Tcl/Tk version: always 9, never msys64's 8.6
 
 MSYS2's `ucrt64` bundles its own **Tcl/Tk 8.6** (`tclsh.exe`, `wish.exe`,
 `tcl86.dll`, an 8.6 `include/tcl.h`, `lib/tcl8.6`).  It is left intact (MSYS2 may
 want it), but **els never uses it**.  The rule:
 
 - Tooling invokes the interpreter only through the explicit vendored paths
-  `tcl9/bin/tclsh90.exe` / `wish90.exe` (and `tcl9s` for packaging) — **never a
+  `tcl9/bin/tclsh90.exe` / `wish90.exe` (and `tcl9s` for packaging), **never a
   bare `tclsh`/`wish`**, which on PATH could resolve to the 8.6 build.
 - PATH puts `tcl9/bin` **ahead of** `msys64/ucrt64/bin`.
 - C builds pass `-I.toolchain/tcl9/include` so `tcl.h` is the 9.x header.
@@ -60,7 +60,7 @@ want it), but **els never uses it**.  The rule:
 and that a freshly compiled C extension links the 9.0 stubs and reports a 9.x
 `tcl.h`.
 
-## Ignition — `x.cmd`
+## Ignition: `x.cmd`
 
 The single entry point. It resolves the toolchain **relative to its own
 location** (`%~dp0`), so the folder is relocatable to any path, then hands off to
@@ -75,7 +75,7 @@ if exist "%TC%\git\cmd" set "PATH=%TC%\git\cmd;%PATH%"   &:: git is optional
 `x shell` is handled here (it opens an interactive `cmd` with PATH set); if the
 core Tcl is missing, `x.cmd` prints a clear message instead of a cryptic error.
 
-## Task runner — `tools/x.tcl`
+## Task runner: `tools/x.tcl`
 
 All tooling. Run `x help`:
 
@@ -95,26 +95,26 @@ x env                print the resolved toolchain paths + versions
 `x.tcl` re-asserts PATH itself (so it is robust when run directly with the
 vendored `tclsh90.exe`) and uses a **cheap per-command guard**: each task
 declares only the one or two tools it needs (`need gcc tclsh`), a microsecond
-`file exists` — *not* a full toolchain scan on every invocation. The thorough
+`file exists`, *not* a full toolchain scan on every invocation. The thorough
 scan is `x toolcheck`, on demand.
 
-## Toolchain check — `tools/toolcheck.tcl`
+## Toolchain check: `tools/toolcheck.tcl`
 
 A manifest-driven console report. Each component carries a pinned `want`
 version; status is `OK` / `UPDATE (have X, want Y)` / `MISSING`. The basic report
 already *runs* most tools to read their version (`gcc -dumpversion`, `tclsh ...
 info patchlevel`, `git --version`), so a binary that can't launch is caught.
-`x toolcheck --prep` fetches the auto-installable pieces (twapi, git) —
-re-fetching outdated ones after removing the stale copy — and prints
+`x toolcheck --prep` fetches the auto-installable pieces (twapi, git),
+re-fetching outdated ones after removing the stale copy, and prints
 instructions for the manual ones (Tcl, gcc, which are heavy/external). Adding a
 component is one manifest line.
 
-**`x toolcheck --deep`** goes further — it verifies the toolchain actually
-*works*, the check to run after a copy-paste onto a new machine: it evaluates a
+**`x toolcheck --deep`** goes further: it verifies the toolchain actually
+*works*, the check to run after a copy-paste onto a new machine. It evaluates a
 Tcl script, loads and instantiates a **Tk** widget, loads **twapi**, **compiles
 a C file with gcc and loads the resulting stubs DLL** (the whole C23↔Tcl chain),
 and runs git. Everything goes through the console `tclsh`, so any failure prints
-as text — never a GUI dialog.
+as text, never as a GUI dialog.
 
 ## C23 ↔ Tcl extensions
 
@@ -122,7 +122,7 @@ els can drop into C23 for hot paths or to bind a C library, exposed to Tcl as
 ordinary commands. Extensions are built against the Tcl **stubs** (a
 compiler-independent ABI), so the resulting `.dll`:
 
-- imports **only `KERNEL32` + the UCRT** (`api-ms-win-crt-*`) — present on every
+- imports **only `KERNEL32` + the UCRT** (`api-ms-win-crt-*`), present on every
   Windows 11; it is **not** linked against `tcl90.dll` and loads with only
   `System32` on PATH (fully self-contained);
 - is built with `-static-libgcc`, so it needs no gcc runtime DLLs.
@@ -142,15 +142,15 @@ being built, so the suite is green with or without a compiler run).
 
 Two integration modes:
 
-1. **Dynamic** — `package require elsx` during dev.
-2. **Embedded in the single-exe** — see below; the DLL rides inside `els.exe`'s
+1. **Dynamic:** `package require elsx` during dev.
+2. **Embedded in the single-exe:** see below; the DLL rides inside `els.exe`'s
    zipfs image and loads from there.
 
-## Single-file build — `x build`, `tools/package.tcl`
+## Single-file build: `x build`, `tools/package.tcl`
 
 `x build` fuses one self-contained `els.exe` (~6.7 MB, **zero non-system DLLs**).
 `package.tcl` **must run under the static `tclsh90s`**, because that interpreter
-keeps its `tcl_library` mounted at `//zipfs:/app` — the source we stage from.
+keeps its `tcl_library` mounted at `//zipfs:/app`, the source we stage from.
 The recipe reproduces the proven archive layout (everything at the archive root):
 
 ```
@@ -165,7 +165,7 @@ then `zipfs mkimg els.exe <stage> <stage> {} wish90s.exe` (STRIP=stage → files
 land at the root → `main.tcl` is auto-sourced at startup). `x build --with-ext`
 also embeds the compiled extensions, which then `load //zipfs:/app/elsx.dll`
 from inside the exe (Tcl auto-extracts the DLL to a temp file before
-`LoadLibrary`). `/els.exe` and `/build/` are gitignored — rebuild them; ship the
+`LoadLibrary`). `/els.exe` and `/build/` are gitignored. Rebuild them; ship the
 exe via releases.
 
 **The .exe file icon** (the awl, shown in Explorer/taskbar) is the binary's PE
@@ -173,7 +173,7 @@ icon resource, separate from the runtime *window* icon (which `els.tcl` sets via
 `wm iconphoto`).  `x build` stamps it via `tools/exeicon.tcl` (twapi
 `UpdateResource`, RT_GROUP_ICON + RT_ICON at 16–256 px).  **Order is critical:**
 editing PE resources rewrites the executable and DROPS anything appended after
-the PE image — i.e. the whole zipfs payload.  So the icon goes into a *copy of
+the PE image, i.e. the whole zipfs payload.  So the icon goes into a *copy of
 the wrapper FIRST*, and `mkimg` appends the zip after that (`package.tcl
 --wrapper`).  `exeicon.tcl` refuses outright to edit a packaged exe (one with
 `main.tcl` at the zip root) as a guard against that footgun.
@@ -185,32 +185,32 @@ then **verify the exe's zipfs structure matches the proven layout** (`main.tcl`,
 *before* running `els.exe --selftest` (a headless mode that writes a result file
 and exits).
 
-## Tests — `tests/`
+## Tests: `tests/`
 
 White-box and **in-process**: `tcltest` drives the real Tk widgets via Tk's
 `event generate`, with full introspection (read tag ranges, the dirty flag, the
-cursor index) — far more reliable than pixel-driving, and headless. `els.tcl`'s
+cursor index). This is far more reliable than pixel-driving, and headless. `els.tcl`'s
 `main` is guarded by `info script eq argv0`, so the suite sources the editor
 without launching its UI. Run `x test`.
 
-## Screenshots — `tools/shot.tcl` + `src/cap.c`
+## Screenshots: `tools/shot.tcl` + `src/cap.c`
 
 Robust, occlusion-proof window capture.  twapi finds the target window by PID;
 the **cap C extension** (`src/cap.c`, built by `x build-ext`) captures it with
-**`PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)`** — rendering that *one*
+**`PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)`**, rendering that *one*
 window's pixels even when it is covered or in the background, with no foreground,
 no clipboard, no Snipping-Tool, and no full-screen crop.  It returns a DIB
 (BITMAPINFOHEADER + 32-bpp pixels) that `shot.tcl` converts to PNG (→ P6 PPM →
-Tk photo).  Deterministic — no retries.  `x shot out.png [file ...]` builds the
+Tk photo).  Deterministic, no retries.  `x shot out.png [file ...]` builds the
 extension on demand.  (`PrintWindow` is reliable for normal GDI/DWM windows like
 Tk's; it can fail on hardware-accelerated apps, but we only shoot our own.)
 
 ## Distribution
 
-**Copy-paste the whole folder.** Because `.toolchain/` (gitignored, ~1 GB+ — the
-gcc toolchain dominates) travels with the folder, dropping it onto a fresh
+**Copy-paste the whole folder.** Because `.toolchain/` (gitignored, ~1 GB+, with
+the gcc toolchain dominating) travels with the folder, dropping it onto a fresh
 Windows 11 machine just works: no install, no provisioning, no network. There is
-deliberately *no* "bootstrap from nothing" script — a multi-hundred-MB gcc + Tcl
+deliberately *no* "bootstrap from nothing" script: a multi-hundred-MB gcc + Tcl
 toolchain can't be conjured without either downloading it (needs hosting) or
 building it from source (slow, and the Tcl/Tk build runs MSYS2's bash), so it
 would only add a fragile, half-working path. `x toolcheck --prep` can still fetch
@@ -221,7 +221,7 @@ the small auto-installable pieces (twapi, git) when only those are missing.
 Portable **by construction**: every path resolves relative to the invoking
 script (`%~dp0` in `x.cmd`, `[info script]` in the Tcl). **Verified** by copying
 the whole tree to a different absolute path and running `x build-ext` + `x test`
-from there — the relocated gcc compiled the C23 extension and the relocated
+from there: the relocated gcc compiled the C23 extension and the relocated
 `tclsh` ran the suite green. MSYS2 UCRT64 relocates cleanly. The only system
 requirement is the Windows UCRT, which ships with Windows 10 1903+ / all
 Windows 11.
