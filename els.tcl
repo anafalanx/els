@@ -73,6 +73,9 @@ namespace eval els {
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
     variable recent {}           ;# recently-opened file paths, newest first
     variable recent_cap 12       ;# how many recent files to keep
+    variable config_path ""      ;# resolved config.tcl path ("" until resolved)
+    variable cfg_choice ""       ;# first-run location dialog result
+    variable cfg_radio appdata   ;# first-run location dialog selection
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -137,21 +140,87 @@ proc els::load_icon {} {
     set ::els::iconLoaded 1
     wm iconphoto . -default $img
 }
-proc els::config_file {} {
-    if {[info exists ::env(APPDATA)] && $::env(APPDATA) ne ""} {
-        set base [file join $::env(APPDATA) els]
-    } elseif {[info exists ::env(XDG_CONFIG_HOME)] && $::env(XDG_CONFIG_HOME) ne ""} {
-        set base [file join $::env(XDG_CONFIG_HOME) els]
+# ---- config location ----------------------------------------------------
+# els keeps a tiny settings dict (window geometry + recent files) in one
+# config.tcl.  It is sought next to the program first (portable), then under
+# %LOCALAPPDATA%\els.  On first run (neither exists) the user picks which.
+proc els::config_candidates {} {
+    # "next to the program" = the exe's folder when packaged, the script's
+    # folder (the repo) in a dev run.
+    if {[string match "//zipfs:*" [info script]]} {
+        set progdir [file dirname [info nameofexecutable]]
     } else {
-        set base [file join [file normalize ~] .config els]
+        set progdir [file dirname [file normalize [info script]]]
     }
-    return [file join $base config.tcl]
+    if {[info exists ::env(LOCALAPPDATA)] && $::env(LOCALAPPDATA) ne ""} {
+        set la $::env(LOCALAPPDATA)
+    } else {
+        set la [file join [file normalize ~] AppData Local]
+    }
+    return [list [file join $progdir config.tcl] [file join $la els config.tcl]]
 }
-# els persists a tiny config dict (window geometry + the recent-files list).
-# Readers and writers tolerate a missing file or missing keys (forward/back compat).
+proc els::config_file {} { return $::els::config_path }
+# Point config_path at whichever location already holds a config; 1 if found,
+# 0 if this looks like a first run (neither location exists yet).
+proc els::config_resolve_existing {} {
+    lassign [els::config_candidates] near appdata
+    if {[file exists $near]}    { set ::els::config_path $near    ; return 1 }
+    if {[file exists $appdata]} { set ::els::config_path $appdata ; return 1 }
+    return 0
+}
+# First run: ask where to keep settings, then remember the choice by writing it.
+proc els::config_first_run {} {
+    lassign [els::config_candidates] near appdata
+    if {$::els::selftest} { set ::els::config_path $appdata ; return }
+    set choice [els::config_choice_dialog $near $appdata]
+    set ::els::config_path [expr {$choice eq "near" ? $near : $appdata}]
+    catch {file mkdir [file dirname $::els::config_path]}
+    els::save_geometry
+}
+proc els::config_choice_dialog {near appdata} {
+    set ::els::cfg_choice "" ; set ::els::cfg_radio appdata
+    set top .cfgask
+    catch {destroy $top}
+    toplevel $top -bg $::els::PAGE
+    wm title $top "Welcome to els"
+    wm transient $top .
+    wm resizable $top 0 0
+    wm protocol $top WM_DELETE_WINDOW {set ::els::cfg_choice appdata}
+    ttk::frame $top.f -padding 20 ; pack $top.f
+    ttk::label $top.f.h -text "Where should els keep its settings?" \
+        -font elsUIb -foreground $::els::INK
+    ttk::label $top.f.s -justify left -font elsUI -foreground $::els::MUTED \
+        -text "Your window size, recent files and preferences live in one small\nconfig file. Choose where to keep it."
+    grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
+    grid $top.f.s -row 1 -column 0 -sticky w -pady {0 16}
+    ttk::radiobutton $top.f.r1 -text "In your user profile (recommended)" \
+        -value appdata -variable ::els::cfg_radio
+    ttk::label $top.f.p1 -text [file nativename $appdata] -font elsUI -foreground $::els::MUTED
+    ttk::radiobutton $top.f.r2 -text "Next to els (portable)" \
+        -value near -variable ::els::cfg_radio
+    ttk::label $top.f.p2 -text [file nativename $near] -font elsUI -foreground $::els::MUTED
+    grid $top.f.r1 -row 2 -column 0 -sticky w
+    grid $top.f.p1 -row 3 -column 0 -sticky w -padx {24 0} -pady {0 10}
+    grid $top.f.r2 -row 4 -column 0 -sticky w
+    grid $top.f.p2 -row 5 -column 0 -sticky w -padx {24 0} -pady {0 18}
+    ttk::button $top.f.ok -text "Continue" -command {set ::els::cfg_choice $::els::cfg_radio}
+    grid $top.f.ok -row 6 -column 0 -sticky e
+    bind $top <Return> {set ::els::cfg_choice $::els::cfg_radio}
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
+    wm geometry $top +$x+$y
+    catch {grab $top}
+    vwait ::els::cfg_choice
+    catch {grab release $top}
+    destroy $top
+    return $::els::cfg_choice
+}
+# els persists a tiny config dict (geometry + recent).  Readers/writers tolerate
+# an empty/unset path, a missing file, or missing keys (forward/back compat).
 proc els::load_geometry {} {
     set f [els::config_file]
-    if {![file exists $f]} { return }
+    if {$f eq "" || ![file exists $f]} { return }
     if {[catch {
         set fh [::open $f r]
         set data [read $fh]
@@ -167,8 +236,9 @@ proc els::load_geometry {} {
 }
 proc els::save_geometry {} {
     if {$::els::selftest} { return }
+    set f [els::config_file]
+    if {$f eq ""} { return }
     if {[catch {
-        set f [els::config_file]
         file mkdir [file dirname $f]
         set fh [::open $f w]
         puts $fh [dict create geometry [wm geometry .] recent $::els::recent]
@@ -288,11 +358,12 @@ proc els::init_style {} {
 
 # ---- build the UI -------------------------------------------------------
 proc els::build {} {
-    wm title . "els"
+    wm title . "els $::els::version"
     wm geometry . 900x620
     els::init_style
     . configure -background $::els::PAGE
     els::load_icon
+    if {$::els::config_path eq ""} { els::config_resolve_existing }
     els::load_geometry
     wm minsize . 360 240
     wm protocol . WM_DELETE_WINDOW els::quit
@@ -309,7 +380,7 @@ proc els::build {} {
     .menu.file add command -label Save         -accelerator Ctrl+S -command els::save
     .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
     .menu.file add separator
-    .menu.file add command -label "Close Tab"  -accelerator Ctrl+W -command els::close_tab
+    .menu.file add command -label "Close File" -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
     menu .menu.edit
     .menu add cascade -label Edit -menu .menu.edit
@@ -462,7 +533,7 @@ proc els::new_doc {{path ""}} {
     set w [els::W $id]
     text $w -undo 1 -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
-        -insertbackground $::els::CARET -insertwidth 3 -insertofftime 0 \
+        -insertbackground $::els::CARET -insertwidth 4 -insertofftime 0 \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
         -inactiveselectbackground $::els::SELOFF \
         -borderwidth 0 -highlightthickness 0 -padx 14 -pady 6 \
@@ -638,10 +709,10 @@ proc els::refresh_tabs {} {
 # ---- title / status -----------------------------------------------------
 proc els::settitle {} {
     variable active
-    variable docPath
-    if {$active eq ""} { wm title . "els"; return }
-    set mark [expr {[els::doc_dirty $active] ? "• " : ""}]
-    wm title . "els — $mark[els::doc_name $active]"
+    # the title bar shows only the app name + version; the filename and dirty
+    # state live on the tab and in the status bar instead
+    wm title . "els $::els::version"
+    if {$active eq ""} { return }
     els::update_namelabel
     .sb.eol  configure -text [els::eol_label $::els::docEol($active)]
     .sb.enc  configure -text [els::enc_label $::els::docEnc($active) $::els::docBom($active)]
@@ -1240,7 +1311,7 @@ proc els::shortcuts {} {
                 Ctrl+O        {Open}
                 Ctrl+S        {Save}
                 Ctrl+Shift+S  {Save as}
-                Ctrl+W        {Close tab}
+                Ctrl+W        {Close file}
                 Ctrl+Q        {Exit}
             }
             Edit {
@@ -1813,6 +1884,8 @@ proc els::main {} {
         foreach f $::argv {
             if {[string index $f 0] ne "-"} { els::open $f }
         }
+        # first run (no config in either location): ask where to keep settings
+        if {$::els::config_path eq ""} { after idle els::config_first_run }
         after 1500 els::check_update
     }
 }

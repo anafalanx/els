@@ -18,6 +18,10 @@
 # the fused single-file exe (rebuilt via `x build`; ship via releases)
 /els.exe
 
+# a "portable" config chosen during a dev run lands next to els.tcl (the repo
+# root here); real builds write it next to els.exe instead
+/config.tcl
+
 # OS / editor cruft
 *~
 Thumbs.db

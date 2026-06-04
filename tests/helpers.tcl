@@ -21,12 +21,18 @@ set ::ELS_ROOT [file normalize [file join [file dirname [info script]] ..]]
 set ::ELS_TMP  [file join $::ELS_ROOT tests _tmp]
 file mkdir $::ELS_TMP
 
-# Keep tests hermetic: never read or write the user's real %APPDATA%\els.
-set ::env(APPDATA) [file join $::ELS_TMP appdata]
+# Keep tests hermetic: never read or write the user's real config locations.
+set ::env(APPDATA)      [file join $::ELS_TMP appdata]
+set ::env(LOCALAPPDATA) [file join $::ELS_TMP localappdata]
 catch {file delete -force $::env(APPDATA)}
 
 # Load the els library (UI is not launched on source).
 source [file join $::ELS_ROOT els.tcl]
+
+# Pin the config path into the temp dir, so build's resolver is skipped and the
+# first-run location dialog can never pop during a test run.
+set ::els::config_path [file join $::ELS_TMP config.tcl]
+catch {file delete -force $::els::config_path}
 
 # Replace native dialogs with stubs so a stray dialog never blocks a test run.
 proc ::tk_getOpenFile {args} { return $::els_test_openfile }
