@@ -98,6 +98,7 @@ set ::els::WSTRAIL "#E9D9F1"     ;# 2+ spaces or trailing whitespace — light m
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
 font create elsUI   -family {Segoe UI} -size 9
+font create elsUIb  -family {Segoe UI} -size 9 -weight bold   ;# section headers
 font create elsTitle -family {Segoe UI Light} -size 40   ;# the About wordmark
 # leading: ~1.34x line height (the single biggest "calm" lever), scaled from
 # the font's own line box so it tracks DPI.  Applied as -spacing1/-spacing3.
@@ -229,7 +230,7 @@ proc els::build {} {
     .menu.file add command -label "New Tab"   -accelerator Ctrl+N -command els::new
     .menu.file add command -label Open...      -accelerator Ctrl+O -command els::open
     .menu.file add command -label Save         -accelerator Ctrl+S -command els::save
-    .menu.file add command -label "Save As..."                     -command els::saveas
+    .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
     .menu.file add separator
     .menu.file add command -label "Close Tab"  -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
@@ -257,6 +258,8 @@ proc els::build {} {
     .menu.view add command -label "Reset Zoom" -accelerator Ctrl+0 -command els::zoom_reset
     menu .menu.help
     .menu add cascade -label Help -menu .menu.help
+    .menu.help add command -label "Keyboard Shortcuts" -command els::shortcuts
+    .menu.help add separator
     .menu.help add command -label "About els" -command els::about
 
     # the tab strip
@@ -316,6 +319,7 @@ proc els::build {} {
     bind elsText <Control-n> { els::new;       break }
     bind elsText <Control-o> { els::open;      break }
     bind elsText <Control-s> { els::save;      break }
+    bind elsText <Control-Shift-S> { els::saveas; break }
     bind elsText <Control-w> { els::close_tab; break }
     bind elsText <Control-q> { els::quit;      break }
     bind elsText <Control-Tab>          { els::cycle 1;  break }
@@ -336,6 +340,7 @@ proc els::build {} {
     bind . <Control-n> { els::new;       break }
     bind . <Control-o> { els::open;      break }
     bind . <Control-s> { els::save;      break }
+    bind . <Control-Shift-S> { els::saveas; break }
     bind . <Control-w> { els::close_tab; break }
     bind . <Control-q> { els::quit;      break }
     bind . <Control-Tab>          { els::cycle 1;  break }
@@ -1084,6 +1089,87 @@ proc els::about {} {
     wm geometry .about +$x+$y
     wm deiconify .about
     focus .about
+}
+# A terse, two-column keyboard-shortcut reference (Help ▸ Keyboard Shortcuts).
+# Keys in mono ink, actions in muted UI — same calm language as the regex card.
+proc els::shortcuts {} {
+    catch {destroy .keys}
+    toplevel .keys -bg $::els::PAGE
+    wm withdraw .keys        ;# build off-screen, reveal only when fully formed
+    wm title .keys "Keyboard Shortcuts"
+    wm transient .keys .
+    wm resizable .keys 0 0
+    set bg $::els::PAGE
+    frame .keys.f -bg $bg
+    pack  .keys.f -padx 28 -pady 22
+    set columns {
+        {
+            File {
+                Ctrl+N        {New tab}
+                Ctrl+O        {Open}
+                Ctrl+S        {Save}
+                Ctrl+Shift+S  {Save as}
+                Ctrl+W        {Close tab}
+                Ctrl+Q        {Exit}
+            }
+            Edit {
+                Ctrl+Z  {Undo}
+                Ctrl+Y  {Redo}
+                Ctrl+X  {Cut}
+                Ctrl+C  {Copy}
+                Ctrl+V  {Paste}
+            }
+        }
+        {
+            Search {
+                Ctrl+F       {Find}
+                Ctrl+H       {Replace}
+                Ctrl+G       {Go to line}
+                Enter        {Next match}
+                Shift+Enter  {Previous match}
+                {↑ / ↓}      {Search history}
+                Esc          {Close find bar}
+            }
+            View {
+                {Ctrl  +}    {Zoom in}
+                {Ctrl  −}    {Zoom out}
+                {Ctrl  0}    {Reset zoom}
+                {Ctrl Wheel} {Zoom}
+            }
+            Tabs {
+                Ctrl+Tab        {Next tab}
+                Ctrl+Shift+Tab  {Previous tab}
+            }
+        }
+    }
+    set col 0
+    foreach sections $columns {
+        set cf [frame .keys.f.c$col -bg $bg]
+        set padr [expr {$col == 0 ? 34 : 0}]
+        grid $cf -row 0 -column $col -sticky n -padx [list 0 $padr]
+        set r 0
+        foreach {cat rows} $sections {
+            set top [expr {$r == 0 ? 0 : 12}]
+            label $cf.h$r -text $cat -font elsUIb -fg $::els::INK -bg $bg
+            grid  $cf.h$r -row $r -column 0 -columnspan 2 -sticky w -pady [list $top 5]
+            incr r
+            foreach {k d} $rows {
+                label $cf.k$r -text $k -font elsMono -fg $::els::INK   -bg $bg
+                label $cf.d$r -text $d -font elsUI   -fg $::els::MUTED -bg $bg
+                grid  $cf.k$r -row $r -column 0 -sticky w -padx {0 22}
+                grid  $cf.d$r -row $r -column 1 -sticky w -pady 1
+                incr r
+            }
+        }
+        incr col
+    }
+    bind .keys <Escape> {destroy .keys}
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .keys]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .keys]) / 4}]
+    wm geometry .keys +$x+$y
+    wm deiconify .keys
+    focus .keys
 }
 proc els::quit {} {
     variable docs
