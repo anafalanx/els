@@ -273,6 +273,10 @@ proc els::build {} {
         -spacing1 $::els::LEAD -spacing3 $::els::LEAD \
         -takefocus 0 -cursor arrow -insertwidth 0 -state disabled
     .ln tag configure currentLine -background $::els::LINE
+    # under word wrap, these suppress a gutter row's top / bottom leading so a
+    # wrapped logical line's continuation rows don't accumulate extra height
+    .ln tag configure gNoTop -spacing1 0
+    .ln tag configure gNoBot -spacing3 0
 
     # the shared scrollbar
     ttk::scrollbar .vs -orient vertical -command {els::scroll}
@@ -649,17 +653,19 @@ proc els::update_line_numbers {} {
     set w [els::T]
     if {$w eq ""} { return }
     set lines [els::line_count]
-    set digits [string length $lines]
-    set width [expr {max(2, $digits + 1)}]
-    set numbers ""
+    set width [expr {max(2, [string length $lines] + 1)}]
+    set numbers "" ; set groups {}
     if {$::els::word_wrap} {
         # one number per logical line + a blank row for each extra display row it
-        # wraps onto, so the gutter rows align with the wrapped text
+        # wraps onto; record the multi-row groups so we can fix their leading
+        set g 1
         for {set i 1} {$i <= $lines} {incr i} {
             if {$i < $lines} { set to "[expr {$i + 1}].0" } else { set to end }
             set dl [$w count -displaylines "$i.0" $to]
             if {$dl < 1} { set dl 1 }
             append numbers [format "%*d" [expr {$width - 1}] $i] [string repeat "\n" $dl]
+            if {$dl > 1} { lappend groups $g $dl }
+            incr g $dl
         }
     } else {
         for {set i 1} {$i <= $lines} {incr i} {
@@ -667,8 +673,19 @@ proc els::update_line_numbers {} {
         }
     }
     .ln configure -state normal -width $width
+    .ln tag remove gNoTop 1.0 end ; .ln tag remove gNoBot 1.0 end
     .ln delete 1.0 end
     .ln insert end $numbers
+    # A wrapped logical line spans D gutter rows but the text gives it only
+    # LEAD above the first display row and LEAD below the last (none between).
+    # Mirror that: the number row keeps its top lead but drops its bottom lead;
+    # the final continuation row keeps the bottom lead; middle rows drop both —
+    # so the gutter group's height equals the text's (LEAD + D·linespace + LEAD).
+    foreach {first dl} $groups {
+        set last [expr {$first + $dl - 1}]
+        .ln tag add gNoBot "$first.0" "$last.0"
+        .ln tag add gNoTop "[expr {$first + 1}].0" "[expr {$last + 1}].0"
+    }
     .ln configure -state disabled
     els::sync_scroll
 }

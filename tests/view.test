@@ -104,3 +104,17 @@ test wrap-1.3 {with wrap on, the gutter gains a continuation row per wrapped lin
     # the long first line wraps, so the gutter has more rows than logical lines
     expr {[lindex [split [.ln index end] .] 0] > [els::line_count]}
 } -result 1
+
+test wrap-1.4 {a wrapped gutter group gets the leading-fix tags over the right rows} -setup {els_reset} -body {
+    set w [els::T]
+    wm geometry . 360x300 ; update      ;# narrow, to force line 1 to wrap
+    $w insert end "A [string repeat {x } 80]\nshort\n" ; update
+    set ::els::word_wrap 1 ; els::set_wrap ; update
+    # line 1 spans D gutter rows (lines 1..D); to match the text's leading the
+    # number row drops its bottom lead (gNoBot on 1..D-1) and the continuation
+    # rows drop their top lead (gNoTop on 2..D) — so the group is LEAD+D·ls+LEAD
+    set D [$w count -displaylines 1.0 2.0]
+    list [expr {$D > 1}] \
+         [expr {[.ln tag ranges gNoBot] eq [list 1.0 $D.0]}] \
+         [expr {[.ln tag ranges gNoTop] eq [list 2.0 [expr {$D + 1}].0]}]
+} -result {1 1 1}
