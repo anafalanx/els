@@ -927,12 +927,26 @@ proc els::set_eol {v} {
 }
 
 # ---- file operations ----------------------------------------------------
+# Filters for the Open / Save dialogs.  Without -filetypes the Windows dialog
+# shows an empty "Save as type" box; "All files" is first so it stays the
+# default and els never forces an extension onto a name.
+proc els::filetypes {} {
+    return {
+        {{All files}      *}
+        {{Text}           {.txt}}
+        {{Markdown}       {.md .markdown}}
+        {{Tcl}            {.tcl}}
+        {{C / C++}        {.c .h .cpp .hpp .cc}}
+        {{Web}            {.html .htm .css .js .json .xml}}
+        {{Shell / config} {.sh .ini .conf .cfg .toml .yml .yaml}}
+    }
+}
 proc els::new {} {
     els::new_doc
 }
 proc els::open {{p ""}} {
     if {$p eq ""} {
-        set p [tk_getOpenFile -parent .]
+        set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
         if {$p eq ""} { return }
     }
     variable active
@@ -1014,7 +1028,8 @@ proc els::saveas {} {
     variable active
     variable docPath
     if {$active eq ""} { return }
-    set p [tk_getSaveFile -parent .]
+    set p [tk_getSaveFile -parent . -filetypes [els::filetypes] \
+               -initialfile [els::doc_name $active]]
     if {$p eq ""} { return }
     set docPath($active) $p
     els::save
