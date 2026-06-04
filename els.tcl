@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.17"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.18"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -71,6 +71,7 @@ namespace eval els {
     variable vs_after ""         ;# pending (idle) scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
+    variable tab_tip_delay 1000  ;# tabs are crossed often; let their tips breathe
     variable recent {}           ;# recently-opened file paths, newest first
     variable recent_cap 12       ;# how many recent files to keep
     variable config_path ""      ;# resolved config.tcl path ("" until resolved)
@@ -440,21 +441,31 @@ proc els::build {} {
     frame .sb.hair -height 1 -bg $::els::HAIR
     ttk::label .sb.name -font elsUI -anchor w -text "untitled" -foreground $::els::MUTED
     ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1, Col 1" -foreground $::els::MUTED
-    ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED -cursor hand2
-    ttk::label .sb.enc  -font elsUI -anchor e -text "UTF-8" -foreground $::els::MUTED -cursor hand2
+    ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED \
+        -cursor hand2 -padding {4 1}
+    ttk::label .sb.enc  -font elsUI -anchor e -text "UTF-8" -foreground $::els::MUTED \
+        -cursor hand2 -padding {4 1}
+    frame .sb.sep_eol -width 1 -bg $::els::HAIR
+    frame .sb.sep_enc -width 1 -bg $::els::HAIR
     # a normally-empty notice; lights up red when a newer release is detected
     ttk::label .sb.update -font elsUI -anchor e -text "" -foreground $::els::CARET -cursor hand2
     pack .sb.hair -side top -fill x
     # name on the left (takes the slack, elided keeping the filename); the
     # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
     pack .sb.name -side left  -padx {12 8}  -pady 4 -fill x -expand 1
-    pack .sb.enc  -side right -padx {12 12} -pady 4
-    pack .sb.eol  -side right -padx {12 0}  -pady 4
+    pack .sb.enc     -side right -padx {8 12}  -pady 4
+    pack .sb.sep_enc -side right -padx {2 2}   -pady {7 6} -fill y
+    pack .sb.eol     -side right -padx {8 2}   -pady 4
+    pack .sb.sep_eol -side right -padx {8 2}   -pady {7 6} -fill y
     pack .sb.pos  -side right -padx {12 0}  -pady 4
     pack .sb.update -side right -padx {12 0} -pady 4
     # the EOL and encoding indicators are clickable pickers
     bind .sb.eol  <Button-1>  els::popup_eol_menu
     bind .sb.enc  <Button-1>  els::popup_enc_menu
+    bind .sb.eol  <Enter>     {els::status_link_enter .sb.eol}
+    bind .sb.enc  <Enter>     {els::status_link_enter .sb.enc}
+    bind .sb.eol  <Leave>     {els::status_link_leave .sb.eol}
+    bind .sb.enc  <Leave>     {els::status_link_leave .sb.enc}
     bind .sb.name <Configure> {els::update_namelabel}
     bind .sb.update <Button-1> {els::open_url "https://github.com/anafalanx/els/releases/latest"}
     els::tooltip_for .sb.name els::name_tip
@@ -670,22 +681,28 @@ proc els::make_tab {id} {
     label $tf.name -bg $::els::TABOFF -fg $::els::MUTED -font elsUI \
         -text [els::tab_text $id] -padx 6 -pady 3 -anchor w
     label $tf.close -bg $::els::TABOFF -fg $::els::MUTED -font elsUI \
-        -text "×" -padx 4 -pady 3
+        -text "×" -width 2 -padx 0 -pady 3 -anchor center -cursor hand2
     pack $tf.name  -side left
     pack $tf.close -side right
     pack $tf -side left -padx {0 1} -pady {2 0} -fill y
     bind $tf       <Button-1> [list els::switch_to $id]
     bind $tf.name  <Button-1> [list els::switch_to $id]
     bind $tf.close <Button-1> [list els::close_doc $id]
-    bind $tf.close <Enter>    [list $tf.close configure -fg $::els::INK]
+    bind $tf.close <Enter>    [list els::tab_close_enter $id]
     bind $tf.close <Leave>    [list els::tab_close_leave $id]
-    els::tooltip_for $tf      [list els::tab_tip $id]
-    els::tooltip_for $tf.name [list els::tab_tip $id]
+    els::tooltip_for $tf      [list els::tab_tip $id] $::els::tab_tip_delay
+    els::tooltip_for $tf.name [list els::tab_tip $id] $::els::tab_tip_delay
+}
+proc els::tab_close_enter {id} {
+    set w [els::tabW $id].close
+    if {![winfo exists $w]} { return }
+    set bg [expr {$id eq $::els::active ? $::els::TABON : $::els::TABOFF}]
+    $w configure -bg $bg -fg $::els::INK
 }
 proc els::tab_close_leave {id} {
     variable active
-    set fg [expr {$id eq $active ? $::els::INK : $::els::MUTED}]
-    catch {[els::tabW $id].close configure -fg $fg}
+    set bg [expr {$id eq $active ? $::els::TABON : $::els::TABOFF}]
+    catch {[els::tabW $id].close configure -bg $bg -fg $::els::MUTED}
 }
 proc els::update_tab {id} {
     set tf [els::tabW $id]
@@ -705,7 +722,7 @@ proc els::refresh_tabs {} {
         }
         $tf       configure -bg $bg
         $tf.name  configure -bg $bg -fg $fg
-        $tf.close configure -bg $bg -fg $fg
+        $tf.close configure -bg $bg -fg $::els::MUTED
     }
 }
 
@@ -761,6 +778,14 @@ proc els::name_tip {} {
     if {$p eq "" || [.sb.name cget -text] eq $p} { return "" }
     return [file nativename $p]
 }
+proc els::status_link_enter {w} {
+    if {![winfo exists $w]} { return }
+    $w configure -foreground $::els::INK -background $::els::TABBG
+}
+proc els::status_link_leave {w} {
+    if {![winfo exists $w]} { return }
+    $w configure -foreground $::els::MUTED -background $::els::CHROME
+}
 
 # ---- Edit-menu actions, routed to the active document -------------------
 proc els::menu_undo {}    { set w [els::T] ; if {$w ne ""} { catch {$w edit undo} } }
@@ -794,7 +819,9 @@ proc els::update_current_line {} {
     if {$w eq ""} { return }
     set line [lindex [split [$w index insert] .] 0]
     $w tag remove currentLine 1.0 end
-    $w tag add currentLine "$line.0" "$line.end + 1 char"
+    if {[$w get 1.0 "end - 1 char"] ne ""} {
+        $w tag add currentLine "$line.0" "$line.end + 1 char"
+    }
     .ln tag remove currentLine 1.0 end
     if {$::els::word_wrap} {
         # the gutter row of this logical line = display lines before it + 1
@@ -1492,14 +1519,14 @@ proc els::tip_pop {w text} {
 # A dynamic tooltip: `textcmd` is evaluated each time the tip is about to show,
 # so it tracks live state; an empty result suppresses the tip (e.g. a status
 # name that currently fits and isn't elided, or an untitled tab).
-proc els::tooltip_for {w textcmd} {
-    bind $w <Enter>       [list els::tip_schedule_cmd $w $textcmd]
+proc els::tooltip_for {w textcmd {delay 550}} {
+    bind $w <Enter>       [list els::tip_schedule_cmd $w $textcmd $delay]
     bind $w <Leave>       els::tip_cancel
     bind $w <ButtonPress> els::tip_cancel
 }
-proc els::tip_schedule_cmd {w textcmd} {
+proc els::tip_schedule_cmd {w textcmd {delay 550}} {
     els::tip_cancel
-    set ::els::tip_after [after 550 [list els::tip_pop_cmd $w $textcmd]]
+    set ::els::tip_after [after $delay [list els::tip_pop_cmd $w $textcmd]]
 }
 proc els::tip_pop_cmd {w textcmd} {
     if {![winfo exists $w]} { return }
@@ -1866,8 +1893,8 @@ proc els::version_gt {a b} {
 }
 proc els::show_update {ver} {
     if {![winfo exists .sb.update]} return
-    .sb.update configure -text "v$ver ↑"
-    els::tooltip .sb.update "els v$ver is available — click to download"
+    .sb.update configure -text $ver
+    els::tooltip .sb.update "els $ver is available — click to download"
 }
 proc els::open_url {url} {
     if {[catch {exec rundll32.exe url.dll,FileProtocolHandler $url &}]} {

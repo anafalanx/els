@@ -49,6 +49,24 @@ test ui-1.3 {status bar tracks the caret position} -setup {ui_reset} -body {
     .sb.pos cget -text
 } -result {Ln 2, Col 4}
 
+test ui-1.4 {status-bar pickers have separators and hover affordance} -setup {ui_reset} -body {
+    event generate .sb.eol <Enter> ; update
+    set hover [list [.sb.eol cget -foreground] [.sb.eol cget -background]]
+    event generate .sb.eol <Leave> ; update
+    list [winfo exists .sb.sep_eol] [winfo exists .sb.sep_enc] \
+         [.sb.eol cget -cursor] [.sb.enc cget -cursor] \
+         $hover [.sb.eol cget -foreground]
+} -result [list 1 1 hand2 hand2 [list $::els::INK $::els::TABBG] $::els::MUTED]
+
+test ui-1.5 {empty document does not paint a text current-line band} -setup {ui_reset} -body {
+    set w [els::T]
+    els::refresh_view
+    set emptyRanges [llength [$w tag ranges currentLine]]
+    $w insert end "x"
+    els::refresh_view
+    list $emptyRanges [expr {[llength [$w tag ranges currentLine]] > 0}]
+} -result {0 1}
+
 # ---- tabs (via generated events) ----------------------------------------
 test ui-2.1 {Ctrl+N opens a new tab} -setup {ui_reset} -body {
     set b [llength $::els::docs]
@@ -85,6 +103,15 @@ test ui-2.5 {the tab close button closes that document} -setup {ui_reset} -body 
     event generate [els::tabW $extra].close <Button-1> ; update
     expr {$b - [llength $::els::docs]}
 } -result 1
+
+test ui-2.6 {the tab close button is quiet until hovered} -setup {ui_reset} -body {
+    set w [els::tabW $::els::active].close
+    set normal [$w cget -fg]
+    event generate $w <Enter> ; update
+    set hover [list [$w cget -fg] [$w cget -bg]]
+    event generate $w <Leave> ; update
+    list $normal $hover [$w cget -fg]
+} -result [list $::els::MUTED [list $::els::INK $::els::TABON] $::els::MUTED]
 
 # ---- editing (generated keystrokes) -------------------------------------
 test ui-3.1 {typed keystrokes land in the buffer} -setup {ui_reset} -body {
@@ -353,8 +380,9 @@ test ui-10.2 {tab tooltip is the native full path, empty for an untitled tab} -s
     set id $::els::active
     set u [els::tab_tip $id]
     set ::els::docPath($id) "C:/x/y.txt"
-    list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq [file nativename "C:/x/y.txt"]}]
-} -result {1 1}
+    set delayed [expr {[string first " $::els::tab_tip_delay" [bind [els::tabW $id] <Enter>]] >= 0}]
+    list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq [file nativename "C:/x/y.txt"]}] $delayed
+} -result {1 1 1}
 
 test ui-10.3 {find bar sits above the text (row 1); text + gutter at row 2} -setup {ui_reset} -body {
     els::find_show find
@@ -408,23 +436,23 @@ test recent-1.5 {recent survives a config save / load round-trip} -setup {ui_res
 
 # ---- update check -------------------------------------------------------
 test update-1.1 {version_gt compares dotted versions; junk is never greater} -setup {els_reset} -body {
-    list [els::version_gt 0.17 0.16] [els::version_gt 0.15 0.15] \
+    list [els::version_gt 0.18 0.17] [els::version_gt 0.15 0.15] \
          [els::version_gt 0.14 0.15] [els::version_gt 1.0 0.9] \
          [els::version_gt junk 0.15]
 } -result {1 0 0 1 0}
 
 test update-1.2 {a newer tag lights the red indicator; same/older/garbage do not} \
         -setup {els_reset ; set ::__v $::els::version} -cleanup {set ::els::version $::__v} -body {
-    set ::els::version 0.16
+    set ::els::version 0.17
     .sb.update configure -text ""
-    els::update_parse {"x":1,"tag_name":"v0.17","y":2}
+    els::update_parse {"x":1,"tag_name":"v0.18","y":2}
     set newer [.sb.update cget -text]
     .sb.update configure -text ""
-    els::update_parse {"tag_name":"v0.16"}
+    els::update_parse {"tag_name":"v0.17"}
     set same [.sb.update cget -text]
     els::update_parse {no tag at all}
     list $newer $same [.sb.update cget -text]
-} -result {{v0.17 ↑} {} {}}
+} -result {0.18 {} {}}
 
 # ---- config location ----------------------------------------------------
 test cfg-1.1 {config_candidates yields a portable path and a LOCALAPPDATA path} -setup {els_reset} -body {
