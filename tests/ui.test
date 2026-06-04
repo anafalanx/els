@@ -364,3 +364,44 @@ test ui-10.3 {find bar sits above the text (row 1); text + gutter at row 2} -set
     els::find_hide
     list $fr $tr $gr [expr {$fr < $tr}]
 } -result {1 2 2 1}
+
+# ---- recent files -------------------------------------------------------
+test recent-1.1 {recent_add prepends newest-first and de-duplicates} -setup {ui_reset} -body {
+    set ::els::recent {}
+    els::recent_add "C:/a/one.txt"
+    els::recent_add "C:/a/two.txt"
+    els::recent_add "C:/a/one.txt"
+    list [llength $::els::recent] [lmap p $::els::recent {file tail $p}]
+} -result {2 {one.txt two.txt}}
+
+test recent-1.2 {recent_remove drops one entry; recent_clear empties the list} -setup {ui_reset} -body {
+    set ::els::recent {}
+    els::recent_add "C:/a/one.txt" ; els::recent_add "C:/a/two.txt"
+    els::recent_remove [file normalize "C:/a/two.txt"]
+    set kept [lmap p $::els::recent {file tail $p}]
+    els::recent_clear
+    list $kept [llength $::els::recent]
+} -result {one.txt 0}
+
+test recent-1.3 {the recent list is capped at recent_cap} -setup {ui_reset} -body {
+    set ::els::recent {}
+    for {set i 0} {$i < 20} {incr i} { els::recent_add "C:/d/f$i.txt" }
+    expr {[llength $::els::recent] == $::els::recent_cap}
+} -result 1
+
+test recent-1.4 {opening a file records it and fills the Open Recent menu} -setup {ui_reset} -body {
+    set ::els::recent {}
+    set p [els_tmpfile recent_hit.txt "hi\n"]
+    els::open $p
+    list [expr {[file normalize $p] in $::els::recent}] \
+         [expr {[.menu.file.recent index end] ne "none"}]
+} -result {1 1}
+
+test recent-1.5 {recent survives a config save / load round-trip} -setup {ui_reset} -body {
+    set ::els::recent {}
+    els::recent_add "C:/keep/a.txt" ; els::recent_add "C:/keep/b.txt"
+    els::save_geometry
+    set ::els::recent {}
+    els::load_geometry
+    lmap p $::els::recent {file tail $p}
+} -result {b.txt a.txt}

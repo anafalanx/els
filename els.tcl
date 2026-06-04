@@ -71,6 +71,8 @@ namespace eval els {
     variable vs_after ""         ;# pending (idle) scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
+    variable recent {}           ;# recently-opened file paths, newest first
+    variable recent_cap 12       ;# how many recent files to keep
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -145,6 +147,8 @@ proc els::config_file {} {
     }
     return [file join $base config.tcl]
 }
+# els persists a tiny config dict (window geometry + the recent-files list).
+# Readers and writers tolerate a missing file or missing keys (forward/back compat).
 proc els::load_geometry {} {
     set f [els::config_file]
     if {![file exists $f]} { return }
@@ -152,10 +156,13 @@ proc els::load_geometry {} {
         set fh [::open $f r]
         set data [read $fh]
         close $fh
-        set g [dict get $data geometry]
     }]} { return }
-    if {[regexp {^[0-9]+x[0-9]+([+-][0-9]+){0,2}$} $g]} {
+    if {![catch {dict get $data geometry} g] && \
+        [regexp {^[0-9]+x[0-9]+([+-][0-9]+){0,2}$} $g]} {
         wm geometry . $g
+    }
+    if {![catch {dict get $data recent} r]} {
+        set ::els::recent [els::recent_sanitize $r]
     }
 }
 proc els::save_geometry {} {
@@ -164,9 +171,76 @@ proc els::save_geometry {} {
         set f [els::config_file]
         file mkdir [file dirname $f]
         set fh [::open $f w]
-        puts $fh [dict create geometry [wm geometry .]]
+        puts $fh [dict create geometry [wm geometry .] recent $::els::recent]
         close $fh
     }]} { return }
+}
+
+# ---- recent files -------------------------------------------------------
+# A small MRU list under File ▸ Open Recent, persisted with the config; entries
+# can be removed one at a time or cleared all at once.
+proc els::recent_sanitize {list} {
+    set out {}
+    foreach p $list {
+        if {$p eq "" || $p in $out} { continue }
+        lappend out $p
+        if {[llength $out] >= $::els::recent_cap} { break }
+    }
+    return $out
+}
+proc els::recent_add {p} {
+    if {$p eq ""} { return }
+    set p [file normalize $p]
+    set rest [lsearch -all -inline -not -exact $::els::recent $p]
+    set ::els::recent [els::recent_sanitize [linsert $rest 0 $p]]
+    els::recent_rebuild
+    els::save_geometry
+}
+proc els::recent_remove {p} {
+    set ::els::recent [lsearch -all -inline -not -exact $::els::recent $p]
+    els::recent_rebuild
+    els::save_geometry
+}
+proc els::recent_clear {} {
+    set ::els::recent {}
+    els::recent_rebuild
+    els::save_geometry
+}
+proc els::recent_open {p} {
+    if {![file exists $p]} {
+        set ans [tk_messageBox -parent . -icon question -type yesno -title els \
+            -message "This file no longer exists:\n[file nativename $p]\n\nRemove it from the list?"]
+        if {$ans eq "yes"} { els::recent_remove $p }
+        return
+    }
+    els::open $p
+}
+# A compact menu label: the native path, trimmed from the middle when very long.
+proc els::recent_label {p} {
+    set n [file nativename $p]
+    if {[string length $n] <= 64} { return $n }
+    return "[string range $n 0 30]…[string range $n end-30 end]"
+}
+proc els::recent_rebuild {} {
+    set m .menu.file.recent
+    if {![winfo exists $m]} { return }
+    $m delete 0 end
+    if {![llength $::els::recent]} {
+        $m add command -label "(empty)" -state disabled
+        return
+    }
+    foreach p $::els::recent {
+        $m add command -label [els::recent_label $p] -command [list els::recent_open $p]
+    }
+    $m add separator
+    set rm $m.remove
+    if {![winfo exists $rm]} { menu $rm -tearoff 0 }
+    $rm delete 0 end
+    foreach p $::els::recent {
+        $rm add command -label [els::recent_label $p] -command [list els::recent_remove $p]
+    }
+    $m add cascade -label "Remove from List" -menu $rm
+    $m add command -label "Clear List" -command els::recent_clear
 }
 
 # ---- flat chrome styling ------------------------------------------------
@@ -229,6 +303,9 @@ proc els::build {} {
     .menu add cascade -label File -menu .menu.file
     .menu.file add command -label "New Tab"   -accelerator Ctrl+N -command els::new
     .menu.file add command -label Open...      -accelerator Ctrl+O -command els::open
+    menu .menu.file.recent
+    .menu.file add cascade -label "Open Recent" -menu .menu.file.recent
+    els::recent_rebuild
     .menu.file add command -label Save         -accelerator Ctrl+S -command els::save
     .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
     .menu.file add separator
@@ -1040,6 +1117,7 @@ proc els::open {{p ""}} {
     els::update_tab $id
     els::settitle
     els::refresh_view
+    els::recent_add $p
 }
 proc els::save {} {
     variable active
@@ -1087,6 +1165,7 @@ proc els::saveas {} {
     set docPath($active) $p
     els::save
     els::update_tab $active
+    els::recent_add $p
 }
 # bind an event on a widget and every descendant, so a click anywhere inside a
 # composite window is caught — not just on its background
