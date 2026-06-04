@@ -447,9 +447,14 @@ test cfg-1.2 {resolve_existing finds the LOCALAPPDATA config when present} -setu
     list $found $picked
 } -result {1 1}
 
-test cfg-1.3 {the first-run dialog returns the user's chosen location} -setup {els_reset} -body {
+test cfg-1.3 {the first-run dialog applies the chosen location and closes} -setup {els_reset} -body {
     lassign [els::config_candidates] near appdata
-    after 50 { catch {.cfgask.f.r2 invoke ; .cfgask.f.ok invoke} }
-    set r [els::config_choice_dialog $near $appdata]
-    list $r [winfo exists .cfgask]
-} -result {near 0}
+    set ::els::config_path ""
+    els::config_choice_dialog $near $appdata     ;# non-blocking; no vwait
+    .cfgask.f.ok invoke                          ;# default selection -> appdata
+    set chosen $::els::config_path
+    set gone [expr {![winfo exists .cfgask]}]
+    catch {file delete -force [file dirname $appdata]}
+    set ::els::config_path [file join $::ELS_TMP config.tcl]   ;# restore hermetic default
+    list [string equal $chosen $appdata] $gone
+} -result {1 1}

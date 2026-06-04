@@ -74,7 +74,6 @@ namespace eval els {
     variable recent {}           ;# recently-opened file paths, newest first
     variable recent_cap 12       ;# how many recent files to keep
     variable config_path ""      ;# resolved config.tcl path ("" until resolved)
-    variable cfg_choice ""       ;# first-run location dialog result
     variable cfg_radio appdata   ;# first-run location dialog selection
 }
 
@@ -168,24 +167,32 @@ proc els::config_resolve_existing {} {
     if {[file exists $appdata]} { set ::els::config_path $appdata ; return 1 }
     return 0
 }
-# First run: ask where to keep settings, then remember the choice by writing it.
+# First run: ask where to keep settings.  The dialog is callback-driven (NOT a
+# modal vwait): a vwait entered from this startup `after` deadlocks the packaged
+# single-exe before its main window is ever mapped.  config_apply_choice does
+# the work when the user clicks Continue.
 proc els::config_first_run {} {
     lassign [els::config_candidates] near appdata
     if {$::els::selftest} { set ::els::config_path $appdata ; return }
-    set choice [els::config_choice_dialog $near $appdata]
-    set ::els::config_path [expr {$choice eq "near" ? $near : $appdata}]
+    els::config_choice_dialog $near $appdata
+}
+proc els::config_apply_choice {near appdata} {
+    set ::els::config_path [expr {$::els::cfg_radio eq "near" ? $near : $appdata}]
     catch {file mkdir [file dirname $::els::config_path]}
     els::save_geometry
+    catch {grab release .cfgask}
+    catch {destroy .cfgask}
 }
 proc els::config_choice_dialog {near appdata} {
-    set ::els::cfg_choice "" ; set ::els::cfg_radio appdata
+    set ::els::cfg_radio appdata
     set top .cfgask
     catch {destroy $top}
     toplevel $top -bg $::els::PAGE
     wm title $top "Welcome to els"
     wm transient $top .
     wm resizable $top 0 0
-    wm protocol $top WM_DELETE_WINDOW {set ::els::cfg_choice appdata}
+    set apply [list els::config_apply_choice $near $appdata]
+    wm protocol $top WM_DELETE_WINDOW $apply
     ttk::frame $top.f -padding 20 ; pack $top.f
     ttk::label $top.f.h -text "Where should els keep its settings?" \
         -font elsUIb -foreground $::els::INK
@@ -203,18 +210,14 @@ proc els::config_choice_dialog {near appdata} {
     grid $top.f.p1 -row 3 -column 0 -sticky w -padx {24 0} -pady {0 10}
     grid $top.f.r2 -row 4 -column 0 -sticky w
     grid $top.f.p2 -row 5 -column 0 -sticky w -padx {24 0} -pady {0 18}
-    ttk::button $top.f.ok -text "Continue" -command {set ::els::cfg_choice $::els::cfg_radio}
+    ttk::button $top.f.ok -text "Continue" -command $apply
     grid $top.f.ok -row 6 -column 0 -sticky e
-    bind $top <Return> {set ::els::cfg_choice $::els::cfg_radio}
+    bind $top <Return> $apply
     update idletasks
     set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
     set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
     wm geometry $top +$x+$y
     catch {grab $top}
-    vwait ::els::cfg_choice
-    catch {grab release $top}
-    destroy $top
-    return $::els::cfg_choice
 }
 # els persists a tiny config dict (geometry + recent).  Readers/writers tolerate
 # an empty/unset path, a missing file, or missing keys (forward/back compat).
@@ -1884,8 +1887,9 @@ proc els::main {} {
         foreach f $::argv {
             if {[string index $f 0] ne "-"} { els::open $f }
         }
-        # first run (no config in either location): ask where to keep settings
-        if {$::els::config_path eq ""} { after idle els::config_first_run }
+        # first run (no config in either location): ask where to keep settings,
+        # a moment after the main window is up (never a startup-time modal vwait)
+        if {$::els::config_path eq ""} { after 250 els::config_first_run }
         after 1500 els::check_update
     }
 }
