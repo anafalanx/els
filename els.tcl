@@ -295,8 +295,8 @@ proc els::build {} {
     pack .sb.eol  -side right -padx {12 0}  -pady 4
     pack .sb.pos  -side right -padx {12 0}  -pady 4
     # the EOL and encoding indicators are clickable pickers
-    bind .sb.eol  <Button-1>  {els::popup_eol_menu %X %Y}
-    bind .sb.enc  <Button-1>  {els::popup_enc_menu %X %Y}
+    bind .sb.eol  <Button-1>  els::popup_eol_menu
+    bind .sb.enc  <Button-1>  els::popup_enc_menu
     bind .sb.name <Configure> {els::update_namelabel}
     els::tooltip_for .sb.name els::name_tip
 
@@ -877,13 +877,25 @@ proc els::build_enc_popup {} {
     .encpop add cascade -label "Reopen with Encoding" -menu [els::enc_menu .encpop.re reopen]
     .encpop add cascade -label "Save with Encoding"   -menu [els::enc_menu .encpop.sv save]
 }
-proc els::popup_enc_menu {x y} {
+# Post a status-bar picker UPWARD from its indicator, kept inside the main
+# window — a downward menu spills below the window's bottom sill (off-screen).
+proc els::popup_up {menu widget} {
+    update idletasks
+    set mw [winfo reqwidth $menu] ; set mh [winfo reqheight $menu]
+    set nx [winfo rootx $widget]  ; set ny [expr {[winfo rooty $widget] - $mh}]
+    set winl [winfo rootx .] ; set winr [expr {$winl + [winfo width .]}]
+    if {$nx + $mw > $winr} { set nx [expr {$winr - $mw}] }
+    if {$nx < $winl}             { set nx $winl }
+    if {$ny < [winfo rooty .]}   { set ny [winfo rooty .] }
+    tk_popup $menu $nx $ny
+}
+proc els::popup_enc_menu {} {
     if {$::els::active eq ""} return
     if {![winfo exists .encpop]} { els::build_enc_popup }
     set canReopen [expr {$::els::docPath($::els::active) ne ""}]
     .encpop entryconfigure "Reopen with Encoding" \
         -state [expr {$canReopen ? "normal" : "disabled"}]
-    tk_popup .encpop $x $y
+    els::popup_up .encpop .sb.enc
 }
 proc els::apply_enc {action enc bom} {
     if {$::els::active eq ""} return
@@ -935,10 +947,10 @@ proc els::build_eol_popup {} {
         .eolpop add command -label $lbl -command [list els::set_eol $v]
     }
 }
-proc els::popup_eol_menu {x y} {
+proc els::popup_eol_menu {} {
     if {$::els::active eq ""} return
     if {![winfo exists .eolpop]} { els::build_eol_popup }
-    tk_popup .eolpop $x $y
+    els::popup_up .eolpop .sb.eol
 }
 proc els::set_eol {v} {
     set id $::els::active
