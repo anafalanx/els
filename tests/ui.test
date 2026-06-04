@@ -355,3 +355,12 @@ test ui-10.2 {tab tooltip is the native full path, empty for an untitled tab} -s
     set ::els::docPath($id) "C:/x/y.txt"
     list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq [file nativename "C:/x/y.txt"]}]
 } -result {1 1}
+
+test ui-10.3 {find bar sits above the text (row 1); text + gutter at row 2} -setup {ui_reset} -body {
+    els::find_show find
+    set fr [dict get [grid info .find]   -row]
+    set tr [dict get [grid info [els::T]] -row]
+    set gr [dict get [grid info .ln]      -row]
+    els::find_hide
+    list $fr $tr $gr [expr {$fr < $tr}]
+} -result {1 2 2 1}

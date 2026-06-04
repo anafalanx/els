@@ -300,11 +300,12 @@ proc els::build {} {
     bind .sb.name <Configure> {els::update_namelabel}
     els::tooltip_for .sb.name els::name_tip
 
+    # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter · 3 status
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
-    grid .ln   -row 1 -column 0 -sticky ns
-    grid .vs   -row 1 -column 2 -sticky ns
+    grid .ln   -row 2 -column 0 -sticky ns
+    grid .vs   -row 2 -column 2 -sticky ns
     grid .sb   -row 3 -column 0 -columnspan 3 -sticky ew
-    grid rowconfigure    . 1 -weight 1
+    grid rowconfigure    . 2 -weight 1
     grid columnconfigure . 1 -weight 1
 
     # class bindings shared by every document Text widget.  The elsText tag
@@ -438,7 +439,7 @@ proc els::switch_to {id} {
     }
     set active $id
     set w [els::W $id]
-    grid $w -row 1 -column 1 -sticky nsew
+    grid $w -row 2 -column 1 -sticky nsew
     focus $w
     els::refresh_tabs
     els::settitle
@@ -1221,7 +1222,7 @@ proc els::quit {} {
 
 # ---- find / replace -----------------------------------------------------
 proc els::build_findbar {} {
-    ttk::frame .find -padding {8 0 8 6}
+    ttk::frame .find -padding {8 6 8 0}
 
     ttk::frame .find.fr
     ttk::label .find.fr.l -text "Find" -font elsUI -width 7 -anchor w
@@ -1259,10 +1260,12 @@ proc els::build_findbar {} {
     grid columnconfigure .find.rr 1 -weight 1
     els::tooltip .find.rr.adapt "Adapt case — make each replacement follow the case of the match"
 
-    frame .find.top -height 1 -bg $::els::HAIR
-    grid .find.top -row 0 -column 0 -sticky ew -pady {0 6}
-    grid .find.fr -row 1 -column 0 -sticky ew
-    grid .find.rr -row 2 -column 0 -sticky ew -pady {4 0}
+    # find bar now lives at the TOP (below the tabs), so the hairline rule sits
+    # at its BOTTOM, separating it from the text below
+    grid .find.fr -row 0 -column 0 -sticky ew
+    grid .find.rr -row 1 -column 0 -sticky ew -pady {4 0}
+    frame .find.sep -height 1 -bg $::els::HAIR
+    grid .find.sep -row 2 -column 0 -sticky ew -pady {6 0}
     grid columnconfigure .find 0 -weight 1
 
     bind .find.fr.q <KeyRelease> {
@@ -1408,7 +1411,7 @@ proc els::re_escape {s} {
 proc els::find_show {mode} {
     variable find_mode
     set find_mode $mode
-    grid .find -row 2 -column 0 -columnspan 3 -sticky ew
+    grid .find -row 1 -column 0 -columnspan 3 -sticky ew
     if {$mode eq "replace"} { grid .find.rr } else { grid remove .find.rr }
     set w [els::T]
     if {$w ne "" && [llength [$w tag ranges sel]]} {
