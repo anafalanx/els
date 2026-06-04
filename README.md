@@ -65,7 +65,7 @@ x shell         # a shell with the vendored toolchain on PATH
 x env           # show the resolved toolchain
 ```
 
-`x build` produces one self-contained `els.exe` (~6.7 MB, zero non-system DLLs)
+`x build` produces one self-contained `els.exe` (~5.7 MB, zero non-system DLLs)
 by fusing `els.tcl` + Tcl/Tk into a `zipfs` image on a static interpreter;
 `x build --with-ext` also embeds any compiled C extension so it loads from
 inside the exe. Distribution is copy-paste of the whole folder (it carries the
@@ -99,7 +99,7 @@ basis of els's encoding auto-detection.
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.16**: a working editor, evolving.
+it, or build it yourself. Currently **v0.17**: a working editor, evolving.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).

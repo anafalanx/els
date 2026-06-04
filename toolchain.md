@@ -67,8 +67,10 @@ location** (`%~dp0`), so the folder is relocatable to any path, then hands off t
 the Tcl task runner:
 
 ```cmd
-set "PATH=%TC%\msys64\ucrt64\bin;%TC%\tcl9\bin;%PATH%"
+set "PATH=%TC%\tcl9\bin;%TC%\msys64\ucrt64\bin;%PATH%"
 if exist "%TC%\git\cmd" set "PATH=%TC%\git\cmd;%PATH%"   &:: git is optional
+if exist "%TC%\appfull\tcl_library\init.tcl" set "TCL_LIBRARY=%TC%\appfull\tcl_library"
+if exist "%TC%\appfull\tk_library\tk.tcl" set "TK_LIBRARY=%TC%\appfull\tk_library"
 "%TC%\tcl9\bin\tclsh90.exe" "%ELS_ROOT%tools\x.tcl" %*
 ```
 
@@ -148,21 +150,21 @@ Two integration modes:
 
 ## Single-file build: `x build`, `tools/package.tcl`
 
-`x build` fuses one self-contained `els.exe` (~6.7 MB, **zero non-system DLLs**).
-`package.tcl` **must run under the static `tclsh90s`**, because that interpreter
-keeps its `tcl_library` mounted at `//zipfs:/app`, the source we stage from.
-The recipe reproduces the proven archive layout (everything at the archive root):
+`x build` fuses one self-contained `els.exe` (~5.7 MB, **zero non-system DLLs**).
+`package.tcl` runs under the static `tclsh90s` so zipfs can append the staged
+payload to the Tk-capable wrapper.  The recipe reproduces the proven archive
+layout (everything at the archive root):
 
 ```
 main.tcl        <- els.tcl
 resources/      <- resources/
-tcl_library/    <- copied from //zipfs:/app  (the static interp's library)
-tk_library/     <- copied from `zipfs mount wish90s.exe`  (its appended zip holds ONLY tk_library)
+tcl_library/    <- copied from //zipfs:/app when mounted, otherwise .toolchain/appfull
+tk_library/     <- copied from `zipfs mount wish90s.exe`, otherwise .toolchain/appfull
 [elsx.dll …]    <- with --with-ext: build/*.dll + pkgIndex.tcl
 ```
 
-then `zipfs mkimg els.exe <stage> <stage> {} wish90s.exe` (STRIP=stage → files
-land at the root → `main.tcl` is auto-sourced at startup). `x build --with-ext`
+then `zipfs lmkimg els.exe <explicit staged-file list> {} wish90s.exe`, so files
+land at the root and `main.tcl` is auto-sourced at startup. `x build --with-ext`
 also embeds the compiled extensions, which then `load //zipfs:/app/elsx.dll`
 from inside the exe (Tcl auto-extracts the DLL to a temp file before
 `LoadLibrary`). `/els.exe` and `/build/` are gitignored. Rebuild them; ship the
@@ -182,8 +184,8 @@ the wrapper FIRST*, and `mkimg` appends the zip after that (`package.tcl
 Tk-capable `tclsh`), so a startup failure pops a modal dialog. Therefore: build,
 then **verify the exe's zipfs structure matches the proven layout** (`main.tcl`,
 `tcl_library/init.tcl`, `tk_library/tk.tcl`, `resources/icon.png` all present)
-*before* running `els.exe --selftest` (a headless mode that writes a result file
-and exits).
+*before* running `els.exe --selftest [file] [report.txt]` (a headless mode that
+writes a result file and exits).
 
 ## Tests: `tests/`
 

@@ -8,9 +8,39 @@
 # every invocation); they only fast-check the one or two tools they need and, if
 # something is missing, point here.  This is the thorough, on-demand check.
 
-set ROOT [file normalize [file join [file dirname [info script]] ..]]
+proc script_root {} {
+    set s [info script]
+    if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
+    return [file dirname [file dirname $s]]
+}
+set ROOT [script_root]
 set TC   [file join $ROOT .toolchain]
 proc TCp {args} { return [file join $::TC {*}$args] }
+
+foreach {var rel marker} {
+    TCL_LIBRARY {appfull tcl_library} init.tcl
+    TK_LIBRARY  {appfull tk_library}  tk.tcl
+} {
+    set p [TCp {*}$rel]
+    if {[file exists [file join $p $marker]]} { set ::env($var) [file nativename $p] }
+}
+set pkgpaths {}
+foreach p [list [file join $ROOT tools tclpkg] \
+                [TCp twapi-dl twapi-5.2.0] \
+                [TCp twapi-dl]] {
+    if {[file isdirectory $p]} { lappend pkgpaths $p }
+}
+foreach p [glob -nocomplain [TCp tcl9 lib *]] {
+    if {[file isdirectory $p]} { lappend pkgpaths $p }
+}
+if {[llength $pkgpaths]} {
+    if {[info exists ::env(TCLLIBPATH)] && $::env(TCLLIBPATH) ne ""} {
+        set ::env(TCLLIBPATH) [concat $pkgpaths $::env(TCLLIBPATH)]
+    } else {
+        set ::env(TCLLIBPATH) $pkgpaths
+    }
+    set auto_path [concat $pkgpaths $auto_path]
+}
 
 # Component manifest.  kind: core (build/test/run) | opt (extra).  want: the
 # pinned version (empty = don't compare).  prep: {auto <x-task>} | {manual "…"}.
@@ -28,8 +58,12 @@ proc present {comp} { return [file exists [TCp {*}[dict get $comp probe]]] }
 proc version_of {key} {
     set v ""
     switch $key {
-        tcl   { catch {exec [TCp tcl9 bin tclsh90.exe]    << {puts [info patchlevel]}} v }
-        tcls  { catch {exec [TCp tcl9s bin tclsh90s.exe]  << {puts [info patchlevel]}} v }
+        tcl   { if {[catch {exec [TCp tcl9 bin tclsh90.exe]    << {puts [info patchlevel]}} v]} {
+                    return "ERROR: [string map [list \n { }] [string trim $v]]"
+                } }
+        tcls  { if {[catch {exec [TCp tcl9s bin tclsh90s.exe]  << {puts [info patchlevel]}} v]} {
+                    return "ERROR: [string map [list \n { }] [string trim $v]]"
+                } }
         gcc   { catch {exec [TCp msys64 ucrt64 bin gcc.exe] -dumpversion} v }
         git   { catch {exec [TCp git cmd git.exe] --version} v
                 set v [string trim [string map {{git version} {}} $v]] }
@@ -40,10 +74,11 @@ proc version_of {key} {
     return $v
 }
 
-# {state version}  — state in {ok outdated missing}
+# {state version}  — state in {ok outdated missing broken}
 proc status_of {comp} {
     if {![present $comp]} { return [list missing ""] }
     set v [version_of [dict get $comp key]]
+    if {[string match {ERROR:*} $v]} { return [list broken $v] }
     set want [dict get $comp want]
     if {$want ne "" && $v ne $want} { return [list outdated $v] }
     return [list ok $v]
@@ -62,6 +97,8 @@ proc report {} {
         lassign [dict get $c prep] ptype parg
         switch $state {
             ok       { set status "OK"       ; set note $v }
+            broken   { set status "BROKEN"   ; set note $v
+                       if {$kind eq "core"} { incr issues } }
             outdated { set status "UPDATE"   ; set note "have $v, want [dict get $c want]"
                        if {$kind eq "core"} { incr issues } }
             missing  { set status [expr {$kind eq "core" ? "MISSING" : "(absent)"}]

@@ -13,7 +13,9 @@ wm withdraw .
 set S [expr {[lindex $argv 0] ne "" ? [lindex $argv 0] : 256}]
 set out [lindex $argv 1]
 if {$out eq ""} {
-    set out [file normalize [file join [file dirname [info script]] .. resources icon.png]]
+    set s [info script]
+    if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
+    set out [file join [file dirname [file dirname $s]] resources icon.png]
 }
 set k [expr {$S/256.0}]
 

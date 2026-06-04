@@ -18,11 +18,13 @@ rem use).  Our tooling calls tclsh90.exe/wish90.exe explicitly anyway.
 set "PATH=%TC%\tcl9\bin;%TC%\msys64\ucrt64\bin;%PATH%"
 if exist "%TC%\git\cmd" set "PATH=%TC%\git\cmd;%PATH%"
 set "MSYSTEM=UCRT64"
+if exist "%TC%\appfull\tcl_library\init.tcl" set "TCL_LIBRARY=%TC%\appfull\tcl_library"
+if exist "%TC%\appfull\tk_library\tk.tcl" set "TK_LIBRARY=%TC%\appfull\tk_library"
 
-rem Open a shell when double-clicked (Explorer runs `cmd /c "...x.cmd"`, so the
-rem script name appears in %cmdcmdline%) or when asked explicitly via `x shell`.
+rem Open a shell when double-clicked (no arguments) or when asked explicitly via
+rem `x shell`.  Normal commands like `x help` must dispatch to tools\x.tcl.
 set "ELS_SHELL="
-echo %cmdcmdline% | find /i "%~nx0" >nul 2>&1 && set "ELS_SHELL=1"
+if "%~1"=="" set "ELS_SHELL=1"
 if /i "%~1"=="shell" set "ELS_SHELL=1"
 
 if defined ELS_SHELL (

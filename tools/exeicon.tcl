@@ -9,7 +9,12 @@
 # Renders the awl at several sizes with icon.tcl and writes RT_GROUP_ICON +
 # RT_ICON resources via twapi's UpdateResource.  Skips cleanly if twapi is
 # unavailable, so a build still succeeds without it.
-set ROOT [file normalize [file join [file dirname [info script]] ..]]
+proc script_root {} {
+    set s [info script]
+    if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
+    return [file dirname [file dirname $s]]
+}
+set ROOT [script_root]
 set TC   [file join $ROOT .toolchain]
 lappend auto_path [file join $TC twapi-dl]
 

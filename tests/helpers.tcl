@@ -17,7 +17,9 @@ package require tcltest
 catch {wm attributes . -alpha 0.0}
 wm geometry . 900x620+100+100
 
-set ::ELS_ROOT [file normalize [file join [file dirname [info script]] ..]]
+set ::ELS_SCRIPT [info script]
+if {[file pathtype $::ELS_SCRIPT] ne "absolute"} { set ::ELS_SCRIPT [file join [pwd] $::ELS_SCRIPT] }
+set ::ELS_ROOT [file dirname [file dirname $::ELS_SCRIPT]]
 set ::ELS_TMP  [file join $::ELS_ROOT tests _tmp]
 file mkdir $::ELS_TMP
 

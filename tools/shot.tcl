@@ -15,7 +15,12 @@
 package require Tk
 wm withdraw .
 
-set ::SHOT_ROOT [file normalize [file join [file dirname [info script]] ..]]
+proc script_root {} {
+    set s [info script]
+    if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
+    return [file dirname [file dirname $s]]
+}
+set ::SHOT_ROOT [script_root]
 if {[info exists ::env(ELS_TWAPI_DIR)] && $::env(ELS_TWAPI_DIR) ne ""} {
     lappend auto_path $::env(ELS_TWAPI_DIR)
 } else {

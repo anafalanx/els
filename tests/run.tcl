@@ -2,7 +2,10 @@
 #   .toolchain/tcl9/bin/tclsh90.exe tests/run.tcl
 # Exits non-zero if any test fails.
 
-set here [file dirname [file normalize [info script]]]
+set script [info script]
+if {[file pathtype $script] ne "absolute"} { set script [file join [pwd] $script] }
+set here [file dirname $script]
+cd [file dirname $here]
 source [file join $here helpers.tcl]
 
 foreach f [lsort [glob -nocomplain [file join $here *.test]]] {

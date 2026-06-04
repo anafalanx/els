@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.16"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.17"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -1880,7 +1880,7 @@ proc els::main {} {
     els::build
     set a0 [lindex $::argv 0]
     if {$a0 eq "--selftest"} {
-        els::selftest [lindex $::argv 1]
+        els::selftest [lindex $::argv 1] [lindex $::argv 2]
     } else {
         # open every file argument, each in its own tab (the first reuses the
         # initial empty document)
@@ -1895,7 +1895,21 @@ proc els::main {} {
 }
 
 # headless smoke test: open a file, exercise a second tab, write a report file
-proc els::selftest {tf} {
+proc els::selftest_report_path {{requested ""}} {
+    if {$requested ne ""} { return $requested }
+    set dirs {}
+    set exe [info nameofexecutable]
+    if {$exe ne ""} { lappend dirs [file dirname $exe] }
+    if {![string match {//zipfs:*} [info script]]} {
+        lappend dirs [file dirname [info script]]
+    }
+    if {[info exists ::env(TEMP)] && $::env(TEMP) ne ""} { lappend dirs $::env(TEMP) }
+    foreach d $dirs {
+        if {$d ne ""} { return [file join $d els-selftest.txt] }
+    }
+    return els-selftest.txt
+}
+proc els::selftest {tf {report ""}} {
     set openok "skipped"
     if {$tf ne ""} {
         if {[catch {els::open $tf} err]} {
@@ -1914,7 +1928,9 @@ proc els::selftest {tf} {
     els::cycle -1
     update idletasks; update
     set w [els::T]
-    set out [::open {C:/Users/anafa/dev/els/.toolchain/els-selftest.txt} w]
+    set report [els::selftest_report_path $report]
+    catch {file mkdir [file dirname $report]}
+    set out [::open $report w]
     puts $out "ok version=$::els::version tk=[info patchlevel]"
     puts $out "mapped=[winfo ismapped .] title=[wm title .]"
     puts $out "caret=[$w cget -insertbackground] page=[$w cget -bg] font=[$w cget -font]"
