@@ -405,3 +405,23 @@ test recent-1.5 {recent survives a config save / load round-trip} -setup {ui_res
     els::load_geometry
     lmap p $::els::recent {file tail $p}
 } -result {b.txt a.txt}
+
+# ---- update check -------------------------------------------------------
+test update-1.1 {version_gt compares dotted versions; junk is never greater} -setup {els_reset} -body {
+    list [els::version_gt 0.16 0.15] [els::version_gt 0.15 0.15] \
+         [els::version_gt 0.14 0.15] [els::version_gt 1.0 0.9] \
+         [els::version_gt junk 0.15]
+} -result {1 0 0 1 0}
+
+test update-1.2 {a newer tag lights the red indicator; same/older/garbage do not} \
+        -setup {els_reset ; set ::__v $::els::version} -cleanup {set ::els::version $::__v} -body {
+    set ::els::version 0.15
+    .sb.update configure -text ""
+    els::update_parse {"x":1,"tag_name":"v0.16","y":2}
+    set newer [.sb.update cget -text]
+    .sb.update configure -text ""
+    els::update_parse {"tag_name":"v0.15"}
+    set same [.sb.update cget -text]
+    els::update_parse {no tag at all}
+    list $newer $same [.sb.update cget -text]
+} -result {{v0.16 ↑} {} {}}

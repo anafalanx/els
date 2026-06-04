@@ -368,6 +368,8 @@ proc els::build {} {
     ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1, Col 1" -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED -cursor hand2
     ttk::label .sb.enc  -font elsUI -anchor e -text "UTF-8" -foreground $::els::MUTED -cursor hand2
+    # a normally-empty notice; lights up red when a newer release is detected
+    ttk::label .sb.update -font elsUI -anchor e -text "" -foreground $::els::CARET -cursor hand2
     pack .sb.hair -side top -fill x
     # name on the left (takes the slack, elided keeping the filename); the
     # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
@@ -375,10 +377,12 @@ proc els::build {} {
     pack .sb.enc  -side right -padx {12 12} -pady 4
     pack .sb.eol  -side right -padx {12 0}  -pady 4
     pack .sb.pos  -side right -padx {12 0}  -pady 4
+    pack .sb.update -side right -padx {12 0} -pady 4
     # the EOL and encoding indicators are clickable pickers
     bind .sb.eol  <Button-1>  els::popup_eol_menu
     bind .sb.enc  <Button-1>  els::popup_enc_menu
     bind .sb.name <Configure> {els::update_namelabel}
+    bind .sb.update <Button-1> {els::open_url "https://github.com/anafalanx/els/releases/latest"}
     els::tooltip_for .sb.name els::name_tip
 
     # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter · 3 status
@@ -1749,6 +1753,54 @@ proc els::set_font_size {size} {
 proc els::zoom {d}      { els::set_font_size [expr {$::els::font_size + $d}] }
 proc els::zoom_reset {} { els::set_font_size 11 }
 
+# ---- update check -------------------------------------------------------
+# Best-effort, fire-and-forget check of the GitHub Releases API — a public,
+# unauthenticated GET (one request at startup, far within the 60/hr limit, so
+# it stays within GitHub's terms).  This runtime has no TLS, so we lean on
+# Windows' bundled curl.exe; stdout is piped back and stderr is sent to NUL so
+# no console window flashes.  Any failure (offline, no curl, odd JSON) is
+# swallowed silently — the editor never blocks or complains.
+proc els::check_update {} {
+    if {$::els::selftest} return
+    set url "https://api.github.com/repos/anafalanx/els/releases/latest"
+    if {[catch {
+        set ch [::open [list | curl.exe -s -m 6 \
+            -H "User-Agent: els-editor" \
+            -H "Accept: application/vnd.github+json" $url 2> NUL] r]
+    }]} { return }
+    set ::els::update_buf ""
+    fconfigure $ch -blocking 0 -translation binary
+    fileevent $ch readable [list els::update_read $ch]
+}
+proc els::update_read {ch} {
+    if {[catch {read $ch} chunk]} { catch {close $ch} ; return }
+    append ::els::update_buf $chunk
+    if {[eof $ch]} {
+        fileevent $ch readable {}
+        catch {close $ch}
+        els::update_parse $::els::update_buf
+    }
+}
+proc els::update_parse {data} {
+    if {![regexp {"tag_name"\s*:\s*"([^"]+)"} $data -> tag]} { return }
+    set latest [string trimleft $tag vV]
+    if {[els::version_gt $latest $::els::version]} { els::show_update $latest }
+}
+# a > b for dotted versions, via Tcl's own package comparator (junk -> false)
+proc els::version_gt {a b} {
+    return [expr {![catch {package vcompare $a $b} c] && $c > 0}]
+}
+proc els::show_update {ver} {
+    if {![winfo exists .sb.update]} return
+    .sb.update configure -text "v$ver ↑"
+    els::tooltip .sb.update "els v$ver is available — click to download"
+}
+proc els::open_url {url} {
+    if {[catch {exec rundll32.exe url.dll,FileProtocolHandler $url &}]} {
+        catch {exec cmd.exe /c start "" $url &}
+    }
+}
+
 # ---- main ---------------------------------------------------------------
 proc els::main {} {
     els::build
@@ -1761,6 +1813,7 @@ proc els::main {} {
         foreach f $::argv {
             if {[string index $f 0] ne "-"} { els::open $f }
         }
+        after 1500 els::check_update
     }
 }
 
