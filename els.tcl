@@ -298,6 +298,7 @@ proc els::build {} {
     bind .sb.eol  <Button-1>  {els::popup_eol_menu %X %Y}
     bind .sb.enc  <Button-1>  {els::popup_enc_menu %X %Y}
     bind .sb.name <Configure> {els::update_namelabel}
+    els::tooltip_for .sb.name els::name_tip
 
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
     grid .ln   -row 1 -column 0 -sticky ns
@@ -497,6 +498,12 @@ proc els::tab_text {id} {
     set mark [expr {[els::doc_dirty $id] ? "• " : ""}]
     return "$mark[els::doc_name $id]"
 }
+# Tooltip text for a tab: the document's full native path (empty for untitled).
+proc els::tab_tip {id} {
+    if {![info exists ::els::docPath($id)]} { return "" }
+    set p $::els::docPath($id)
+    return [expr {$p eq "" ? "" : [file nativename $p]}]
+}
 proc els::make_tab {id} {
     set tf [els::tabW $id]
     frame $tf -bg $::els::TABOFF
@@ -512,6 +519,8 @@ proc els::make_tab {id} {
     bind $tf.close <Button-1> [list els::close_doc $id]
     bind $tf.close <Enter>    [list $tf.close configure -fg $::els::INK]
     bind $tf.close <Leave>    [list els::tab_close_leave $id]
+    els::tooltip_for $tf      [list els::tab_tip $id]
+    els::tooltip_for $tf.name [list els::tab_tip $id]
 }
 proc els::tab_close_leave {id} {
     variable active
@@ -582,6 +591,15 @@ proc els::elide_path {p avail} {
         set s [string range $s 1 end]
     }
     return "…$s"
+}
+# Tooltip text for the status-bar name: the full path, but only while the label
+# is actually eliding it (when the whole path fits, the tip would be redundant).
+proc els::name_tip {} {
+    variable active
+    if {$active eq "" || ![info exists ::els::docPath($active)]} { return "" }
+    set p $::els::docPath($active)
+    if {$p eq "" || [.sb.name cget -text] eq $p} { return "" }
+    return [file nativename $p]
 }
 
 # ---- Edit-menu actions, routed to the active document -------------------
@@ -1264,16 +1282,39 @@ proc els::tip_cancel {} {
 }
 proc els::tip_pop {w text} {
     catch {destroy .tip}
-    if {![winfo exists $w]} { return }
+    if {![winfo exists $w] || $text eq ""} { return }
     toplevel .tip -bd 0
     wm overrideredirect .tip 1
     catch {wm attributes .tip -topmost 1}
     label .tip.l -text $text -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
     pack .tip.l
     update idletasks
-    set x [expr {[winfo rootx $w] + [winfo width $w]/2 - [winfo reqwidth .tip]/2}]
-    set y [expr {[winfo rooty $w] + [winfo height $w] + 5}]
+    set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
+    set x [expr {[winfo rootx $w] + [winfo width $w] / 2 - $tw / 2}]
+    set below [expr {[winfo rooty $w] + [winfo height $w] + 5}]
+    # prefer below the widget; flip above when that would fall off the screen
+    # bottom (e.g. a status-bar item), and clamp within the screen horizontally
+    set y [expr {$below + $th <= [winfo screenheight $w]
+                 ? $below : [winfo rooty $w] - $th - 5}]
+    set sw [winfo screenwidth $w]
+    if {$x < 2} { set x 2 } elseif {$x + $tw > $sw - 2} { set x [expr {$sw - 2 - $tw}] }
     wm geometry .tip +$x+$y
+}
+# A dynamic tooltip: `textcmd` is evaluated each time the tip is about to show,
+# so it tracks live state; an empty result suppresses the tip (e.g. a status
+# name that currently fits and isn't elided, or an untitled tab).
+proc els::tooltip_for {w textcmd} {
+    bind $w <Enter>       [list els::tip_schedule_cmd $w $textcmd]
+    bind $w <Leave>       els::tip_cancel
+    bind $w <ButtonPress> els::tip_cancel
+}
+proc els::tip_schedule_cmd {w textcmd} {
+    els::tip_cancel
+    set ::els::tip_after [after 550 [list els::tip_pop_cmd $w $textcmd]]
+}
+proc els::tip_pop_cmd {w textcmd} {
+    if {![winfo exists $w]} { return }
+    els::tip_pop $w [uplevel #0 $textcmd]
 }
 
 # a compact, scannable Tcl ARE cheat-sheet (opened from the greyed-until-on "?")

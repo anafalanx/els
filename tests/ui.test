@@ -339,3 +339,19 @@ test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup
 test ui-9.3 {Help exposes Keyboard Shortcuts; Save As is bound to Ctrl+Shift+S} -setup {ui_reset} -body {
     list [.menu.help entrycget 0 -label] [expr {[bind . <Control-Shift-S>] ne ""}]
 } -result {{Keyboard Shortcuts} 1}
+
+test ui-10.1 {status name tooltip: native path only while the label is eliding} -setup {ui_reset} -body {
+    set ::els::docPath($::els::active) "C:/some/dir/notes.txt"
+    .sb.name configure -text "C:/some/dir/notes.txt"   ;# whole path fits — no tip
+    set a [els::name_tip]
+    .sb.name configure -text "…/notes.txt"             ;# elided — show full path
+    set b [els::name_tip]
+    list [expr {$a eq ""}] [expr {$b eq [file nativename "C:/some/dir/notes.txt"]}]
+} -result {1 1}
+
+test ui-10.2 {tab tooltip is the native full path, empty for an untitled tab} -setup {ui_reset} -body {
+    set id $::els::active
+    set u [els::tab_tip $id]
+    set ::els::docPath($id) "C:/x/y.txt"
+    list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq [file nativename "C:/x/y.txt"]}]
+} -result {1 1}
