@@ -145,6 +145,6 @@ after 220 readme_stage
 }]
 write_file [file join $TMP readme_scene.tcl] $wrapper
 
-capture editor editor.png
-capture find whitespace.png
-capture about about.png "About els"
+capture editor editor-0.20.png
+capture find find-whitespace-0.20.png
+capture about about-0.20.png "About els"
