@@ -2,7 +2,7 @@
 
 A tiny, programmable text editor for Windows: calm, opinionated, no-frills.
 
-![els editor with two open tabs](docs/img/editor-0.20.png)
+![els editing a whimsical plain text note](docs/img/editor-whimsy-0.20.png)
 
 els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset

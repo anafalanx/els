@@ -54,29 +54,28 @@ proc capture {scene out {title ""}} {
 file delete -force $TMP
 file mkdir $TMP $OUT
 
-write_file [file join $TMP hello.tcl] {# hello.tcl
+write_file [file join $TMP notes.txt] {Notes before the rain
 
-namespace eval elsdemo {
-    variable palette {page chrome ink muted}
+The little blue notebook is missing again.
+Try the windowsill, the coat pocket, or the shelf with the teacups.
+
+Keep:
+  fresh pencils
+  spare stamps
+  the good idea from Tuesday
 }
 
-proc greet {name} {
-    if {$name eq ""} {
-        set name "friend"
-    }
-    return "Hello, $name."
-}
+write_file [file join $TMP errands.txt] {A Small List for Thursday
 
-puts [greet "els"]
-}
+Buy apples with opinions.
+Return the library book about clouds.
+Sharpen three pencils.
+Write down the sentence before it wanders off.
 
-write_file [file join $TMP notes.md] {# README notes
-
-els keeps the page quiet and puts the work first.
-
-- tabs remember each document
-- encodings are detected and preserved
-- small dialogs stay minimal
+Later:
+  make soup
+  sort the drawer marked "almost"
+  leave room on the page
 }
 
 write_file [file join $TMP spacing.txt] "Two  spaces  between  words.\n    four-space indent here\n\t tab-indented line\nline with trailing spaces    \njust normal single spaces ok\n"
@@ -98,10 +97,10 @@ proc readme_file {name} {
 
 proc readme_stage_editor {} {
     wm geometry . 960x640+80+80
-    els::open [readme_file notes.md]
-    els::open [readme_file hello.tcl]
+    els::open [readme_file notes.txt]
+    els::open [readme_file errands.txt]
     set w [els::T]
-    $w mark set insert 8.8
+    $w mark set insert 5.34
     $w see 1.0
     focus $w
     els::refresh_view
@@ -145,6 +144,6 @@ after 220 readme_stage
 }]
 write_file [file join $TMP readme_scene.tcl] $wrapper
 
-capture editor editor-0.20.png
+capture editor editor-whimsy-0.20.png
 capture find find-whitespace-0.20.png
 capture about about-0.20.png "About els"
