@@ -104,6 +104,8 @@ proc task_help {args} {
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
   shot <out> [file]  screenshot the editor to <out> (twapi)
   build [--with-ext] fuse the single-file els.exe (--with-ext embeds build/*.dll)
+  probe-exe [exe]    launch the fused exe in a temp config home and verify
+                     first-run prompt + session restore startup
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
   fetch-twapi        vendor the twapi extension into .toolchain/
   fetch-git          vendor MinGit into .toolchain/git/
@@ -161,6 +163,13 @@ proc task_build {args} {
     }
     stream $tclshs [P tools package.tcl] $out {*}$wargs {*}$rest
     catch {file delete -force $tmpwrap}
+}
+
+proc task_probe-exe {args} {
+    need tclsh
+    set exe [lindex $args 0]
+    if {$exe eq ""} { set exe [P els.exe] }
+    stream [tclsh] [P tools probe_exe.tcl] $exe
 }
 
 proc task_test {args} {

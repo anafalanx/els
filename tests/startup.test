@@ -1,0 +1,112 @@
+# tests/startup.test -- process-level startup/config/session checks.
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+proc startup_wish {} {
+    return [file join $::ELS_ROOT .toolchain tcl9 bin wish90.exe]
+}
+proc startup_appdir {name} {
+    set d [file join $::ELS_TMP startup_$name]
+    catch {file delete -force $d}
+    file mkdir $d
+    file copy -force [file join $::ELS_ROOT els.tcl] [file join $d els.tcl]
+    return $d
+}
+proc startup_write {path bytes} {
+    set f [open $path w]
+    fconfigure $f -translation binary
+    puts -nonewline $f $bytes
+    close $f
+    return $path
+}
+proc startup_wait_report {report pid} {
+    set deadline [expr {[clock milliseconds] + 5000}]
+    while {[clock milliseconds] < $deadline} {
+        if {[file exists $report]} {
+            set f [open $report r]
+            set data [read $f]
+            close $f
+            return $data
+        }
+        after 50
+    }
+    catch {exec taskkill /PID [lindex $pid 0] /T /F}
+    error "startup probe did not finish"
+}
+proc startup_probe {appdir args} {
+    set report [file join $appdir report.txt]
+    catch {file delete -force $report}
+
+    set hadAppData [info exists ::env(APPDATA)]
+    set hadLocal   [info exists ::env(LOCALAPPDATA)]
+    set hadProbe   [info exists ::env(ELS_STARTUP_PROBE)]
+    if {$hadAppData} { set oldAppData $::env(APPDATA) }
+    if {$hadLocal}   { set oldLocal   $::env(LOCALAPPDATA) }
+    if {$hadProbe}   { set oldProbe   $::env(ELS_STARTUP_PROBE) }
+    set ::env(APPDATA) [file join $appdir appdata]
+    set ::env(LOCALAPPDATA) [file join $appdir localappdata]
+    set ::env(ELS_STARTUP_PROBE) $report
+    set pid [exec [startup_wish] [file join $appdir els.tcl] {*}$args &]
+    if {$hadAppData} { set ::env(APPDATA) $oldAppData } else { unset ::env(APPDATA) }
+    if {$hadLocal}   { set ::env(LOCALAPPDATA) $oldLocal } else { unset ::env(LOCALAPPDATA) }
+    if {$hadProbe}   { set ::env(ELS_STARTUP_PROBE) $oldProbe } else { unset ::env(ELS_STARTUP_PROBE) }
+
+    return [startup_wait_report $report $pid]
+}
+
+test startup-1.1 {first launch without config maps and asks where to keep els.conf} -setup {
+    set app [startup_appdir first]
+} -body {
+    set r [startup_probe $app]
+    list [dict get $r mapped] [dict get $r cfgask] [dict get $r cfgask_mapped] [dict get $r config] \
+         [file exists [file join $app els.conf]] \
+         [file exists [file join $app localappdata els els.conf]]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {1 1 1 {} 0 0}
+
+test startup-1.2 {existing config suppresses first-run location prompt} -setup {
+    set app [startup_appdir configured]
+} -body {
+    set conf [file join $app els.conf]
+    startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
+        restore_session 1 session_files {} session_active ""]
+    set r [startup_probe $app]
+    list [dict get $r mapped] [dict get $r cfgask] \
+         [file tail [dict get $r config]] [dict get $r docs]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {1 0 els.conf 1}
+
+test startup-1.3 {startup restore reopens saved files and active tab} -setup {
+    set app [startup_appdir restore]
+} -body {
+    set p1 [startup_write [file join $app one.txt] "one\n"]
+    set p2 [startup_write [file join $app two.txt] "two\n"]
+    set miss [file join $app missing.txt]
+    set conf [file join $app els.conf]
+    startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
+        restore_session 1 session_files [list $p1 $miss $p2] session_active $p2]
+    set r [startup_probe $app]
+    list [dict get $r cfgask] [dict get $r docs] \
+         [lmap p [dict get $r paths] {file tail $p}] \
+         [file tail [dict get $r active_path]]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {0 2 {one.txt two.txt} two.txt}
+
+test startup-1.4 {explicit launch file takes precedence over saved session} -setup {
+    set app [startup_appdir explicit]
+} -body {
+    set p1 [startup_write [file join $app previous.txt] "previous\n"]
+    set p2 [startup_write [file join $app explicit.txt] "explicit\n"]
+    set conf [file join $app els.conf]
+    startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
+        restore_session 1 session_files [list $p1] session_active $p1]
+    set r [startup_probe $app $p2]
+    list [dict get $r cfgask] [dict get $r docs] \
+         [lmap p [dict get $r paths] {file tail $p}] \
+         [file tail [dict get $r active_path]]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {0 1 explicit.txt explicit.txt}

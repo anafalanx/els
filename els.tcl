@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.19"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.20"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -2228,6 +2228,33 @@ proc els::open_url {url} {
     }
 }
 
+proc els::startup_probe {report} {
+    update idletasks
+    set paths {}
+    foreach id $::els::docs {
+        if {[info exists ::els::docPath($id)]} { lappend paths $::els::docPath($id) }
+    }
+    set data [dict create \
+        mapped [winfo ismapped .] \
+        cfgask [winfo exists .cfgask] \
+        cfgask_mapped [expr {[winfo exists .cfgask] ? [winfo ismapped .cfgask] : 0}] \
+        config $::els::config_path \
+        docs [llength $::els::docs] \
+        paths $paths \
+        active_path [els::session_current_active] \
+        title [wm title .] \
+        argv $::argv \
+        argv0 $::argv0]
+    if {$report ne ""} {
+        catch {file mkdir [file dirname $report]}
+        if {![catch {set fh [::open $report w]}]} {
+            puts $fh $data
+            close $fh
+        }
+    }
+    exit
+}
+
 # ---- main ---------------------------------------------------------------
 proc els::main {} {
     els::build
@@ -2235,22 +2262,31 @@ proc els::main {} {
     if {$a0 eq "--selftest"} {
         els::selftest [lindex $::argv 1] [lindex $::argv 2]
     } else {
+        set envProbe [expr {[info exists ::env(ELS_STARTUP_PROBE)] && $::env(ELS_STARTUP_PROBE) ne ""}]
+        set startupProbe [expr {$envProbe || $a0 eq "--startup-probe"}]
+        set startupReport [expr {$envProbe ? $::env(ELS_STARTUP_PROBE) : \
+                                 ($startupProbe ? [lindex $::argv 1] : "")}]
+        set fileArgs [expr {!$envProbe && $startupProbe ? [lrange $::argv 2 end] : $::argv}]
         # open every file argument, each in its own tab (the first reuses the
         # initial empty document).  Explicit launch files take precedence over
         # the saved session, which is only for a plain app start.
         set openedArgs 0
-        foreach f $::argv {
+        foreach f $fileArgs {
             if {[string index $f 0] ne "-"} {
                 els::open $f
                 set openedArgs 1
             }
         }
-        if {!$openedArgs} {
-            els::session_restore
-        }
         # first run (no config in either location): ask where to keep settings,
         # a moment after the main window is up (never a startup-time modal vwait)
         if {$::els::config_path eq ""} { after 250 els::config_first_run }
+        if {!$openedArgs && $::els::config_path ne ""} {
+            after 80 els::session_restore
+        }
+        if {$startupProbe} {
+            after 900 [list els::startup_probe $startupReport]
+            return
+        }
         after 1500 els::check_update
     }
 }
