@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.21"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.22"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -57,7 +57,7 @@ namespace eval els {
     variable find_r ""           ;# replacement text
     variable find_case 0         ;# match case
     variable find_word 0         ;# whole word
-    variable find_regex 0        ;# regular expression (Tcl ARE)
+    variable find_regex 0        ;# regular expression mode
     variable find_mode ""        ;# "" hidden | find | replace
     variable find_matches {}     ;# list of {start end} index pairs in the active doc
     variable find_current -1     ;# index into find_matches
@@ -106,6 +106,7 @@ set ::els::WSTAB   "#D3E1F5"     ;# tabs — light blue
 set ::els::WSTRAIL "#E9D9F1"     ;# 2+ spaces or trailing whitespace — light mauve
 option add *tearOff 0
 font create elsMono -family Consolas   -size 11
+font create elsMonoHelp -family Consolas -size 10
 font create elsUI   -family {Segoe UI} -size 9
 font create elsUIb  -family {Segoe UI} -size 9 -weight bold   ;# section headers
 font create elsTitle -family {Segoe UI Light} -size 40   ;# the About wordmark
@@ -279,6 +280,12 @@ proc els::load_geometry {} {
             catch {els::set_wrap 0}
         }
     }
+    if {![catch {dict get $data show_whitespace} ws]} {
+        set ::els::show_ws [expr {$ws ? 1 : 0}]
+        if {[info exists ::els::docs] && [llength $::els::docs]} {
+            catch {els::ws_refresh}
+        }
+    }
     if {![catch {dict get $data restore_session} rs]} {
         set ::els::restore_session [expr {$rs ? 1 : 0}]
     }
@@ -298,6 +305,7 @@ proc els::save_geometry {} {
         set fh [::open $f w]
         puts $fh [dict create geometry [wm geometry .] \
                       recent $::els::recent word_wrap $::els::word_wrap \
+                      show_whitespace $::els::show_ws \
                       restore_session $::els::restore_session \
                       session_files [els::session_current_files] \
                       session_active [els::session_current_active]]
@@ -642,7 +650,7 @@ proc els::build {} {
     .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \
         -command els::set_wrap
     .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
-        -command els::ws_refresh
+        -command els::set_show_ws
     .menu.view add separator
     .menu.view add command -label "Zoom In"    -accelerator Ctrl++ -command {els::zoom 1}
     .menu.view add command -label "Zoom Out"   -accelerator Ctrl+- -command {els::zoom -1}
@@ -1733,7 +1741,8 @@ proc els::build_findbar {} {
         -variable ::els::find_word  -command els::find_update
     ttk::checkbutton .find.fr.regex -text ".*" -style Find.Toolbutton -takefocus 0 \
         -variable ::els::find_regex -command els::find_update
-    ttk::button .find.fr.help -text "?" -style Find.TButton -width 2 -takefocus 0 -command els::regex_help
+    ttk::button .find.fr.help -text "?" -style Find.TButton -width 2 -takefocus 0 \
+        -state normal -command els::regex_help
     ttk::button .find.fr.prev -text "↑" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step -1}
     ttk::button .find.fr.next -text "↓" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step 1}
     ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
@@ -1748,8 +1757,8 @@ proc els::build_findbar {} {
          -side right -padx {2 0}
     els::tooltip .find.fr.case  "Match case"
     els::tooltip .find.fr.word  "Whole word"
-    els::tooltip .find.fr.regex "Regular expression (Tcl ARE)"
-    els::tooltip .find.fr.help  "Regex reference"
+    els::tooltip .find.fr.regex "Regular expression"
+    els::tooltip .find.fr.help  "Regex quickref"
     els::tooltip .find.fr.prev  "Previous  (Shift+Enter)"
     els::tooltip .find.fr.next  "Next  (Enter)"
 
@@ -1863,18 +1872,23 @@ proc els::tip_pop_cmd {w textcmd} {
     els::tip_pop $w [uplevel #0 $textcmd]
 }
 
-# a compact, scannable Tcl ARE cheat-sheet (opened from the greyed-until-on "?")
+# a compact, scannable regex quick reference, opened from the Find/Replace "?"
 proc els::regex_help {} {
     catch {destroy .rehelp}
     toplevel .rehelp
-    wm title .rehelp "Regular expressions — Tcl ARE"
+    wm title .rehelp "Regular Expressions Quickref"
     wm transient .rehelp .
+    wm resizable .rehelp 0 0
     catch {wm attributes .rehelp -topmost 1}
     ttk::frame .rehelp.f -padding 14
     pack .rehelp.f -fill both -expand 1
-    ttk::label .rehelp.f.h -text "Tcl ARE — the syntax els searches with" \
+    ttk::label .rehelp.f.h -text "Regular Expressions Quickref" \
         -font elsUI -foreground $::els::MUTED
-    grid .rehelp.f.h -row 0 -column 0 -columnspan 2 -sticky w -pady {0 8}
+    grid .rehelp.f.h -row 0 -column 0 -columnspan 2 -sticky w -pady {0 4}
+    ttk::label .rehelp.f.note -text \
+        "These patterns are used when Regex is on. With Regex off, els searches for the text literally." \
+        -font elsUI -foreground $::els::MUTED -wraplength 380 -justify left
+    grid .rehelp.f.note -row 1 -column 0 -columnspan 2 -sticky w -pady {0 8}
     set rows {
         {.}           {any character}
         {[abc]}       {any one of these characters}
@@ -1890,9 +1904,9 @@ proc els::regex_help {} {
         {a|b}         {a or b}
         {\\}          {a literal backslash}
     }
-    set r 1
+    set r 2
     foreach {tok desc} $rows {
-        ttk::label .rehelp.f.t$r -text $tok  -font elsMono -foreground $::els::INK
+        ttk::label .rehelp.f.t$r -text $tok  -font elsMonoHelp -foreground $::els::INK
         ttk::label .rehelp.f.d$r -text $desc -font elsUI   -foreground $::els::MUTED
         grid .rehelp.f.t$r -row $r -column 0 -sticky w -padx {0 22} -pady 1
         grid .rehelp.f.d$r -row $r -column 1 -sticky w -pady 1
@@ -1901,9 +1915,14 @@ proc els::regex_help {} {
     bind .rehelp <Escape> {destroy .rehelp}
     focus .rehelp
     update idletasks
-    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .rehelp]) / 2}]
-    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .rehelp]) / 3}]
-    wm geometry .rehelp +$x+$y
+    set rw [winfo reqwidth .rehelp]
+    set rh [winfo reqheight .rehelp]
+    wm minsize .rehelp $rw $rh
+    wm maxsize .rehelp $rw $rh
+    wm resizable .rehelp 0 0
+    set x [expr {[winfo rootx .] + ([winfo width .]  - $rw) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - $rh) / 3}]
+    wm geometry .rehelp ${rw}x${rh}+$x+$y
 }
 
 proc els::find_history_push {term} {
@@ -1944,6 +1963,8 @@ proc els::find_show {mode} {
     set find_mode $mode
     grid .find -row 1 -column 0 -columnspan 3 -sticky ew
     if {$mode eq "replace"} { grid .find.rr } else { grid remove .find.rr }
+    catch {.find.fr.help configure -state normal}
+    catch {.find.fr.help state !disabled}
     set w [els::T]
     if {$w ne "" && [llength [$w tag ranges sel]]} {
         set s [$w get sel.first sel.last]
@@ -1972,8 +1993,8 @@ proc els::find_update {} {
     variable find_matches ; variable find_count
     set w [els::T]
     if {$w eq ""} { return }
-    # the regex reference is reachable only while Regex is on
-    catch {.find.fr.help configure -state [expr {$find_regex ? "normal" : "disabled"}]}
+    catch {.find.fr.help configure -state normal}
+    catch {.find.fr.help state !disabled}
     $w tag remove findAll 1.0 end
     $w tag remove findOne 1.0 end
     set find_matches {}
@@ -2149,6 +2170,11 @@ proc els::ws_refresh {} {
             $w tag add $tag $s "$s + [lindex [set ::els::$var] $i] chars" ; incr i
         }
     }
+}
+
+proc els::set_show_ws {{persist 1}} {
+    els::ws_refresh
+    if {$persist} { els::save_geometry }
 }
 
 # Word wrap: soft-wrap long lines in every document.  The line-number gutter is

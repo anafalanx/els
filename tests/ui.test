@@ -175,7 +175,7 @@ test ui-4.4 {Match Case toggle narrows the matches} -setup {ui_reset} -body {
     list $before [llength $::els::find_matches]
 } -result {4 2}
 
-test ui-4.5 {Regex toggle enables a pattern search; help button enables} -setup {ui_reset} -body {
+test ui-4.5 {Regex toggle enables a pattern search; help button stays available} -setup {ui_reset} -body {
     [els::T] insert end "a1 b2 cc d3"
     event generate [els::T] <Control-f> ; update
     .find.fr.regex invoke
@@ -203,14 +203,40 @@ test ui-4.7 {Adapt-case toggle drives case-aware replacement} -setup {ui_reset} 
     [els::T] get 1.0 "end - 1 char"
 } -result {dog DOG Dog}
 
-test ui-4.8 {the regex reference opens and closes} -setup {ui_reset} -body {
+test ui-4.8 {the regex reference opens without enabling regex} -setup {ui_reset} -body {
     event generate [els::T] <Control-f> ; update
-    .find.fr.regex invoke
-    .find.fr.help invoke ; update
+    .find.fr.help state disabled
+    els::find_show find ; update
+    set enabled [expr {![.find.fr.help instate disabled]}]
+    set x [expr {[winfo width .find.fr.help] / 2}]
+    set y [expr {[winfo height .find.fr.help] / 2}]
+    event generate .find.fr.help <Enter> -x $x -y $y
+    event generate .find.fr.help <ButtonPress-1> -x $x -y $y
+    event generate .find.fr.help <ButtonRelease-1> -x $x -y $y
+    update
     set opened [winfo exists .rehelp]
+    set title [wm title .rehelp]
+    set fixed [wm resizable .rehelp]
+    set locked [expr {[wm minsize .rehelp] eq [wm maxsize .rehelp] && \
+        [wm minsize .rehelp] eq [list [winfo reqwidth .rehelp] [winfo reqheight .rehelp]]}]
+    set tokenSize [font actual [.rehelp.f.t2 cget -font] -size]
+    set texts {}
+    set stack [list .rehelp]
+    while {[llength $stack]} {
+        set w [lindex $stack 0]
+        set stack [lrange $stack 1 end]
+        if {![catch {$w cget -text} t]} { lappend texts $t }
+        foreach c [winfo children $w] { lappend stack $c }
+    }
+    set blob [join $texts \n]
     event generate .rehelp <Escape> ; update
-    list $opened [winfo exists .rehelp]
-} -result {1 0}
+    list $::els::find_regex $enabled $opened [winfo exists .rehelp] $title $fixed $locked $tokenSize \
+        [expr {[string first "Regex is on" $blob] >= 0}] \
+        [expr {[string first "Regular Expressions Quickref" $blob] >= 0}] \
+        [expr {[string first "Tcl" "$title\n$blob"] < 0}] \
+        [expr {[string first "\\m" $blob] >= 0}] \
+        [expr {[string first "\\1" $blob] >= 0}]
+} -result {0 1 1 0 {Regular Expressions Quickref} {0 0} 1 10 1 1 1 1 1}
 
 test ui-4.9 {search history records on Enter and recalls with Up} -setup {ui_reset} -body {
     [els::T] insert end "alpha beta gamma"
@@ -527,6 +553,20 @@ test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_res
     els::load_geometry
     list $::els::word_wrap [[els::T] cget -wrap]
 } -result {1 word}
+
+test cfg-0.1a {show whitespace survives a config save / load round-trip} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "a b   "
+    set ::els::show_ws 1
+    els::set_show_ws
+    set persisted [dict get [raw_read $::els::config_path] show_whitespace]
+    set ::els::show_ws 0
+    $w tag remove wsSpace 1.0 end
+    $w tag remove wsTrail 1.0 end
+    els::load_geometry
+    list $persisted $::els::show_ws \
+        [expr {[llength [$w tag ranges wsSpace]] > 0 || [llength [$w tag ranges wsTrail]] > 0}]
+} -result {1 1 1}
 
 test cfg-0.2 {restore previous session defaults on and is exposed as a setting} -setup {ui_reset} -body {
     set labels {}
