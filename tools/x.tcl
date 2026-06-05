@@ -103,6 +103,7 @@ proc task_help {args} {
   colors [name ...]  browse Tk's named colors (swatches + hex)
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
   shot <out> [file]  screenshot the editor to <out> (twapi)
+  readme-shots       regenerate docs/img screenshots used by README.md
   build [--with-ext] fuse the single-file els.exe (--with-ext embeds build/*.dll)
   probe-exe [exe]    launch the fused exe in a temp config home and verify
                      first-run prompt + session restore startup
@@ -206,6 +207,12 @@ proc task_shot {args} {
     if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
     set out [lindex $args 0]
     stream [tclsh] [P tools shot.tcl] [wish] [P els.tcl] $out {*}[lrange $args 1 end]
+}
+
+proc task_readme-shots {args} {
+    need tclsh wish twapi
+    if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
+    stream [tclsh] [P tools readme_shots.tcl]
 }
 
 # Compile every src/*.c into build/<name>.dll against the Tcl stubs, and emit a

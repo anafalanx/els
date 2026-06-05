@@ -1,18 +1,20 @@
 # els
 
-A tiny, scriptable text editor for Windows: calm, opinionated, no-frills.
+A tiny, programmable text editor for Windows: calm, opinionated, no-frills.
 
-![els](docs/img/editor.png)
+![els editor with two open tabs](docs/img/editor.png)
 
 els is a clean editor for everyday text files: multi-file tabs, find & replace
-with real regex, word wrap, and charset auto-detection across 95 encodings. The
-look is deliberately quiet: a calm grey page with one red caret. It ships as a
-single self-contained **`els.exe`** (~5.7 MB, zero non-system dependencies),
-built on Tcl/Tk 9 with a C23 extension or two for the parts that need them.
+with real regex, word wrap, recent files, session restore, and charset
+auto-detection across 95 encodings. The look is deliberately quiet: a calm grey
+page, flat chrome, and a single precise caret. It ships as a self-contained
+**`els.exe`** (~5.8 MB, zero non-system dependencies), built on Tcl/Tk 9 with a
+C23 extension or two for the parts that need them.
 
-The design is opinionated to the point of having few knobs: the absence of
-settings is the point. The full rationale (palette, typography, the
-find/replace design, explicit non-goals) is in
+The design is opinionated to the point of having few knobs: settings exist only
+where they protect flow, such as wrap, recents, session restore, and where to
+keep `els.conf`. The full rationale (palette, typography, the find/replace
+design, explicit non-goals) is in
 [`docs/DESIGN.md`](docs/DESIGN.md), drawn from a study of EditPad Pro, Sublime
 Text, Zed and iA Writer.
 
@@ -37,12 +39,14 @@ first launch: choose **More info → Run anyway**.
   lines; current-line highlight.
 - **Show Whitespace**: spaces, tabs and trailing whitespace in distinct subdued
   tints.
+- **Recent files & session restore**: a compact recent-files manager plus
+  reopen-on-start, on by default.
 - **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel (the font
   family is fixed: no picker, by design).
-- **Go to line**, window-geometry persistence, the els look and the red awl
-  icon.
+- **Go to line**, window-geometry persistence, portable/profile `els.conf`, the
+  els look and the awl icon.
 
-![Find & replace, Show Whitespace](docs/img/whitespace.png)
+![Find and replace with visible whitespace](docs/img/whitespace.png)
 
 ## Toolchain & tasks
 
@@ -58,6 +62,8 @@ x help          # list tasks
 x run [file...] # launch the editor
 x test          # in-process test suite (tcltest + Tk event generate)
 x shot out.png  # screenshot the editor (twapi, all-Tcl, no AutoIt)
+x readme-shots  # regenerate the README screenshots
+x probe-exe     # process-level startup checks for the fused exe
 x build         # fuse the single-file els.exe (--with-ext embeds build/*.dll)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
 x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
@@ -65,11 +71,11 @@ x shell         # a shell with the vendored toolchain on PATH
 x env           # show the resolved toolchain
 ```
 
-`x build` produces one self-contained `els.exe` (~5.7 MB, zero non-system DLLs)
+`x build` produces one self-contained `els.exe` (~5.8 MB, zero non-system DLLs)
 by fusing `els.tcl` + Tcl/Tk into a `zipfs` image on a static interpreter;
 `x build --with-ext` also embeds any compiled C extension so it loads from
-inside the exe. Distribution is copy-paste of the whole folder (it carries the
-vendored `.toolchain/`), with no installer and no provisioning.
+inside the exe. Users only need the resulting `els.exe`; developers can move the
+whole repo folder around because the vendored `.toolchain/` is relocatable.
 
 The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
 (`x.cmd`): no bash, PowerShell, or Python. See

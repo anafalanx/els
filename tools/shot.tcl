@@ -10,6 +10,8 @@
 #   tclsh90.exe tools/shot.tcl <els.exe> - <out.png> [file ...]   # single-exe
 #   tclsh90.exe tools/shot.tcl --selftest        ;# headless converter checks
 #
+# Set ELS_SHOT_TITLE to capture a specific toplevel/dialog by title.
+#
 # Requires build/cap.dll (`x build-ext`).
 
 package require Tk
@@ -82,12 +84,15 @@ proc ::shot_tmpdir {} {
 }
 
 # ---- live capture -------------------------------------------------------
-proc els_window_for_pid {pid timeoutMs} {
+proc els_window_for_pid {pid timeoutMs {title ""}} {
     set deadline [expr {[clock milliseconds] + $timeoutMs}]
     while {[clock milliseconds] < $deadline} {
         foreach hwin [twapi::find_windows -toplevel 1 -visible 1] {
             if {[catch {twapi::get_window_process $hwin} wp]} { continue }
-            if {$wp == $pid} { return $hwin }
+            if {$wp != $pid} { continue }
+            if {$title eq ""} { return $hwin }
+            if {[catch {twapi::get_window_text $hwin} wt]} { continue }
+            if {$wt eq $title || [string match $title $wt]} { return $hwin }
         }
         after 120
     }
@@ -119,7 +124,8 @@ proc main {argv} {
     } else {
         set pid [exec $app $script {*}$files &]    ;# wish + els.tcl
     }
-    set hwin [els_window_for_pid $pid 12000]
+    set title [expr {[info exists ::env(ELS_SHOT_TITLE)] ? $::env(ELS_SHOT_TITLE) : ""}]
+    set hwin [els_window_for_pid $pid 12000 $title]
     if {$hwin eq ""} {
         catch {twapi::end_process $pid -force}
         puts stderr "window for pid $pid never appeared"
