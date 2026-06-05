@@ -264,9 +264,18 @@ test ui-4.13 {find and replace rows align on the right} -setup {ui_reset} -body 
     update
     set findRight [expr {[winfo rootx .find.fr.x] + [winfo width .find.fr.x]}]
     set replRight [expr {[winfo rootx .find.rr.all] + [winfo width .find.rr.all]}]
+    set findEntryRight [expr {[winfo rootx .find.fr.q] + [winfo width .find.fr.q]}]
+    set replEntryRight [expr {[winfo rootx .find.rr.r] + [winfo width .find.rr.r]}]
+    set controlsVisible [expr {[winfo height .find.fr.x] > 12 && [winfo height .find.rr.all] > 12}]
     list [expr {abs($findRight - $replRight) <= 2}] \
-         [.find.rr.rep cget -style] [.find.rr.all cget -style]
-} -result {1 FindAction.TButton FindAction.TButton}
+         [expr {abs($findEntryRight - $replEntryRight) <= 2}] \
+         $controlsVisible \
+         [.find.rr.rep cget -style] [.find.rr.all cget -style] \
+         [ttk::style configure Find.Toolbutton -font] \
+         [ttk::style configure Find.TButton -font] \
+         [ttk::style configure FindAction.Toolbutton -font] \
+         [ttk::style configure FindAction.TButton -font]
+} -result {1 1 1 FindAction.TButton FindAction.TButton elsUI elsUI elsUI elsUI}
 
 # ---- go to line (modal, generated events) -------------------------------
 test ui-5.1 {Ctrl+G then Go jumps the caret to the line} -setup {ui_reset} -body {

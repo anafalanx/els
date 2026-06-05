@@ -2,7 +2,7 @@
 
 A tiny, programmable text editor for Windows: calm, opinionated, no-frills.
 
-![els editing a whimsical plain text note](docs/img/editor-whimsy-0.20.png)
+![els editing a whimsical plain text note](docs/img/editor-whimsy-0.21.png)
 
 els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset
@@ -46,7 +46,7 @@ first launch: choose **More info → Run anyway**.
 - **Go to line**, window-geometry persistence, portable/profile `els.conf`, the
   els look and the awl icon.
 
-![Find and replace with visible whitespace](docs/img/find-whitespace-0.20.png)
+![Find and replace with visible whitespace](docs/img/find-whitespace-0.21.png)
 
 ## Toolchain & tasks
 
@@ -101,11 +101,11 @@ basis of els's encoding auto-detection.
 
 ## About
 
-<img src="docs/img/about-0.20.png" width="270" align="right" alt="About els">
+<img src="docs/img/about-0.21.png" width="270" align="right" alt="About els">
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.20**: a working editor, evolving.
+it, or build it yourself. Currently **v0.21**: a working editor, evolving.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).

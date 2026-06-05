@@ -11,52 +11,59 @@ This is the ongoing planning doc for what to build next in els.
 
 ## Selected Roadmap Items
 
+Latest expanded feature poll selection:
+
+`I1 I6 C1 C2 C3 C8 F1 F3 F4 F5 F10 F11 F12 F13 E2 E5 E6 E7 E13 S1 S2 V1 V6 N4 N5 N6 N8 N9 N10 L5 L6 H1`
+
+Install / Distribution:
+- `I1` Portable single exe remains first-class
+- `I6` File association setup
+
 Core / CUA:
 - `C1` Select All, `Ctrl+A`
 - `C2` Find Next / Previous, `F3` / `Shift+F3`
-- `C3` F1 opens Keyboard Shortcuts / Help
-- `C4` Delete selection menu item, `Del`
-- `C5` Right-click context menu: Undo, Cut, Copy, Paste, Select All
+- `C3` F1 opens Help / Keyboard Shortcuts
+- `C8` Command availability states
 
-File:
+File / Session / Safety:
 - `F1` Save All
-- `F2` Close All Tabs
 - `F3` Close Other Tabs
 - `F4` Reload / Revert from Disk
 - `F5` Save Copy As
-- `F7` Restore previous session on launch
+- `F10` Warn on external modification
+- `F11` Read-only mode
+- `F12` Open containing folder
+- `F13` Copy file path commands
 
-Edit:
-- `E2` Duplicate Line
+Editing:
+- `E2` Duplicate Line / Selection
 - `E5` Trim Trailing Whitespace
-- `E6` Convert Case: upper, lower, title
+- `E6` Convert Case
 - `E7` Indent / Unindent selection
+- `E13` Wrap / Reflow Paragraph
 
 Search:
 - `S1` Ctrl+F pre-fills selected text
 - `S2` Count Matches
-- `S3` Select All Matches
-- `S4` Find in Files
 
 View:
 - `V1` Toggle line numbers
 - `V6` Column guide / ruler
 
-Encoding / EOL:
-- `N3` Default new-file encoding preference
+Encoding / EOL / Metadata:
 - `N4` File Properties: path, size, encoding, EOL, modified state
-- Add a professional encoding preference for ambiguous opened files: keep UTF-8
-  as the default, but allow choosing a different default for files whose bytes
-  do not prove an encoding. Consider showing whether the displayed encoding was
-  certain, detected, or a fallback guess.
+- `N5` Ambiguous-file fallback encoding preference
+- `N6` Encoding confidence indicator
+- `N8` Mixed line-ending warning
+- `N9` BOM add/remove command
+- `N10` Binary file warning
 
-Tabs / Window:
-- `T2` Move Tab Left / Right
-- `T3` Duplicate Tab
+Language / Text Help:
+- `L5` Word count / character count
+- `L6` URL detection
 
 Help / Settings:
 - `H1` Preferences dialog
-- `H4` Improve Keyboard Shortcuts window with grouped sections
 
 ## Removed From The Poll Selection
 
@@ -65,41 +72,46 @@ Help / Settings:
 
 ## Suggested Build Order
 
-Phase 1: low-risk CUA polish
+Phase 1: low-risk CUA and search polish
 - `C1` Select All
 - `C2` Find Next / Previous
 - `C3` F1 Help
-- `C4` Delete menu item
-- `C5` Right-click context menu
 - `S1` Ctrl+F pre-fills selected text
 - `S2` Count Matches
-- `H4` Improve Keyboard Shortcuts window
 
-Phase 2: file and tab operations
+Phase 2: file convenience commands
 - `F1` Save All
-- `F2` Close All Tabs
 - `F3` Close Other Tabs
-- `F4` Reload / Revert from Disk
 - `F5` Save Copy As
-- `T2` Move Tab Left / Right
-- `T3` Duplicate Tab
+- `F12` Open containing folder
+- `F13` Copy file path commands
 
 Phase 3: editing commands
-- `E2` Duplicate Line
+- `E2` Duplicate Line / Selection
 - `E5` Trim Trailing Whitespace
 - `E6` Convert Case
 - `E7` Indent / Unindent selection
+- `E13` Wrap / Reflow Paragraph
 
-Phase 4: view and file metadata
+Phase 4: view and writing metadata
 - `V1` Toggle line numbers
 - `V6` Column guide / ruler
-- `N3` Default new-file encoding preference
+- `L5` Word count / character count
+- `L6` URL detection
 - `N4` File Properties
-- Default encoding preference for ambiguous opened files, plus encoding
-  certainty/guess indication.
 
-Phase 5: larger features
-- `F7` Restore previous session on launch
-- `S3` Select All Matches
-- `S4` Find in Files
+Phase 5: file safety and encoding correctness
+- `F4` Reload / Revert from Disk
+- `F10` Warn on external modification
+- `F11` Read-only mode
+- `N5` Ambiguous-file fallback encoding preference
+- `N6` Encoding confidence indicator
+- `N8` Mixed line-ending warning
+- `N9` BOM add/remove command
+- `N10` Binary file warning
+
+Phase 6: preferences and installation
 - `H1` Preferences dialog
+- `C8` Command availability states
+- `I1` Portable single exe remains first-class
+- `I6` File association setup

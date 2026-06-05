@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.20"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.21"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -558,22 +558,21 @@ proc els::init_style {} {
         -borderwidth 0 -relief flat -padding {8 4} -anchor center
     $s map Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
         -foreground [list selected $ink active $ink]
-    # find/replace controls: still quiet, but a little more legible than chrome
-    # buttons because they are compact and icon-like.
+    # find/replace controls stay regular-weight; outlines carry affordance.
     $s configure Find.Toolbutton -background $bg -foreground $::els::MUTED \
-        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUIb
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUI
     $s map Find.Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
         -foreground [list selected $ink active $ink]
     $s configure Find.TButton -background $bg -foreground $::els::MUTED \
-        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUIb
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUI
     $s map Find.TButton -background [list pressed $hair active $::els::TABBG] \
         -foreground [list active $ink]
     $s configure FindAction.TButton -background $bg -foreground $ink \
-        -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUIb \
+        -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUI \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
     $s map FindAction.TButton -background [list pressed $hair active $::els::TABBG]
     $s configure FindAction.Toolbutton -background $bg -foreground $ink \
-        -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUIb \
+        -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUI \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
     $s map FindAction.Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
         -foreground [list selected $ink active $ink]
@@ -1727,6 +1726,7 @@ proc els::build_findbar {} {
     ttk::frame .find.fr
     ttk::label .find.fr.l -text "Find" -font elsUI -width 7 -anchor w
     ttk::entry .find.fr.q -textvariable ::els::find_q -font elsUI
+    ttk::frame .find.fr.ctrl
     ttk::checkbutton .find.fr.case  -text "Aa" -style Find.Toolbutton -takefocus 0 \
         -variable ::els::find_case  -command els::find_update
     ttk::checkbutton .find.fr.word  -text "W"  -style Find.Toolbutton -takefocus 0 \
@@ -1739,17 +1739,13 @@ proc els::build_findbar {} {
     ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
         -foreground $::els::MUTED -width 11 -anchor e
     ttk::button .find.fr.x -text "×" -style Find.TButton -width 2 -takefocus 0 -command els::find_hide
-    grid .find.fr.l     -row 0 -column 0 -padx 1 -sticky we
-    grid .find.fr.q     -row 0 -column 1 -padx 1 -sticky we
-    grid .find.fr.case  -row 0 -column 2 -padx 1 -sticky we
-    grid .find.fr.word  -row 0 -column 3 -padx 1 -sticky we
-    grid .find.fr.regex -row 0 -column 4 -padx 1 -sticky we
-    grid .find.fr.help  -row 0 -column 5 -padx 1 -sticky we
-    grid .find.fr.prev  -row 0 -column 6 -padx 1 -sticky we
-    grid .find.fr.next  -row 0 -column 7 -padx 1 -sticky we
-    grid .find.fr.n     -row 0 -column 8 -padx 1 -sticky we
-    grid .find.fr.x     -row 0 -column 9 -padx 1 -sticky we
+    grid .find.fr.l    -row 0 -column 0 -padx 1 -sticky we
+    grid .find.fr.q    -row 0 -column 1 -padx 1 -sticky we
+    grid .find.fr.ctrl -row 0 -column 2 -padx 1 -sticky e
     grid columnconfigure .find.fr 1 -weight 1
+    pack .find.fr.x .find.fr.n .find.fr.next .find.fr.prev .find.fr.help \
+         .find.fr.regex .find.fr.word .find.fr.case -in .find.fr.ctrl \
+         -side right -padx {2 0}
     els::tooltip .find.fr.case  "Match case"
     els::tooltip .find.fr.word  "Whole word"
     els::tooltip .find.fr.regex "Regular expression (Tcl ARE)"
@@ -1760,17 +1756,26 @@ proc els::build_findbar {} {
     ttk::frame .find.rr
     ttk::label .find.rr.l -text "Replace" -font elsUI -width 7 -anchor w
     ttk::entry .find.rr.r -textvariable ::els::find_r -font elsUI
+    ttk::frame .find.rr.ctrl
     ttk::checkbutton .find.rr.adapt -text "Adapt case" -style FindAction.Toolbutton -takefocus 0 \
         -variable ::els::find_adapt
     ttk::button .find.rr.rep -text "Replace" -style FindAction.TButton -takefocus 0 -command els::find_replace_one
     ttk::button .find.rr.all -text "All"     -style FindAction.TButton -takefocus 0 -command els::find_replace_all
-    grid .find.rr.l     -row 0 -column 0 -padx 1 -sticky we
-    grid .find.rr.r     -row 0 -column 1 -columnspan 6 -padx 1 -sticky we
-    grid .find.rr.adapt -row 0 -column 7 -padx 1 -sticky we
-    grid .find.rr.rep   -row 0 -column 8 -padx 1 -sticky we
-    grid .find.rr.all   -row 0 -column 9 -padx 1 -sticky we
+    grid .find.rr.l    -row 0 -column 0 -padx 1 -sticky we
+    grid .find.rr.r    -row 0 -column 1 -padx 1 -sticky we
+    grid .find.rr.ctrl -row 0 -column 2 -padx 1 -sticky e
     grid columnconfigure .find.rr 1 -weight 1
+    pack .find.rr.all .find.rr.rep .find.rr.adapt -in .find.rr.ctrl \
+         -side right -padx {2 0}
     els::tooltip .find.rr.adapt "Adapt case — make each replacement follow the case of the match"
+
+    update idletasks
+    set cw [expr {max([winfo reqwidth .find.fr.ctrl], [winfo reqwidth .find.rr.ctrl])}]
+    set ch [expr {max([winfo reqheight .find.fr.ctrl], [winfo reqheight .find.rr.ctrl])}]
+    foreach c {.find.fr.ctrl .find.rr.ctrl} {
+        $c configure -width $cw -height $ch
+        pack propagate $c 0
+    }
 
     # find bar now lives at the TOP (below the tabs), so the hairline rule sits
     # at its BOTTOM, separating it from the text below
