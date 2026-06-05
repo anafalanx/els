@@ -14,11 +14,12 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.18"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.19"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
     variable iconImage ""
+    variable iconImages {}
     variable iconPath ""
     variable iconLoaded 0
     variable selftest [expr {[lindex $::argv 0] eq "--selftest"}]
@@ -74,7 +75,10 @@ namespace eval els {
     variable tab_tip_delay 1000  ;# tabs are crossed often; let their tips breathe
     variable recent {}           ;# recently-opened file paths, newest first
     variable recent_cap 12       ;# how many recent files to keep
-    variable config_path ""      ;# resolved config.tcl path ("" until resolved)
+    variable restore_session 1   ;# reopen file-backed tabs from the previous run
+    variable session_files {}     ;# file-backed tabs saved from the previous run
+    variable session_active ""    ;# active file path saved from the previous run
+    variable config_path ""      ;# resolved els.conf path ("" until resolved)
     variable cfg_radio appdata   ;# first-run location dialog selection
 }
 
@@ -132,19 +136,32 @@ proc els::find_resource {args} {
     return ""
 }
 proc els::load_icon {} {
-    set p [els::find_resource resources icon.png]
-    if {$p eq ""} { return }
-    if {[catch {image create photo elsIcon -file $p} img]} { return }
-    set ::els::iconImage $img
-    set ::els::iconPath $p
+    set imgs {}
+    foreach {name file} {
+        elsIcon16 icon16.png
+        elsIcon32 icon32.png
+        elsIcon   icon.png
+    } {
+        set p [els::find_resource resources $file]
+        if {$p eq ""} { continue }
+        catch {image delete $name}
+        if {[catch {image create photo $name -file $p} img]} { continue }
+        lappend imgs $img
+        if {$file eq "icon.png"} {
+            set ::els::iconImage $img
+            set ::els::iconPath $p
+        }
+    }
+    if {![llength $imgs]} { return }
+    set ::els::iconImages $imgs
     set ::els::iconLoaded 1
-    wm iconphoto . -default $img
+    wm iconphoto . -default {*}$imgs
 }
 # ---- config location ----------------------------------------------------
 # els keeps a tiny settings dict (window geometry + recent files) in one
-# config.tcl.  It is sought next to the program first (portable), then under
+# els.conf.  It is sought next to the program first (portable), then under
 # %LOCALAPPDATA%\els.  On first run (neither exists) the user picks which.
-proc els::config_candidates {} {
+proc els::config_roots {} {
     # "next to the program" = the exe's folder when packaged, the script's
     # folder (the repo) in a dev run.
     if {[string match "//zipfs:*" [info script]]} {
@@ -157,7 +174,14 @@ proc els::config_candidates {} {
     } else {
         set la [file join [file normalize ~] AppData Local]
     }
-    return [list [file join $progdir config.tcl] [file join $la els config.tcl]]
+    return [list $progdir [file join $la els]]
+}
+proc els::config_candidates {{name els.conf}} {
+    lassign [els::config_roots] near appdata
+    return [list [file join $near $name] [file join $appdata $name]]
+}
+proc els::config_legacy_candidates {} {
+    return [els::config_candidates config.tcl]
 }
 proc els::config_file {} { return $::els::config_path }
 # Point config_path at whichever location already holds a config; 1 if found,
@@ -166,6 +190,18 @@ proc els::config_resolve_existing {} {
     lassign [els::config_candidates] near appdata
     if {[file exists $near]}    { set ::els::config_path $near    ; return 1 }
     if {[file exists $appdata]} { set ::els::config_path $appdata ; return 1 }
+    lassign [els::config_legacy_candidates] oldNear oldAppdata
+    foreach {old new} [list $oldNear $near $oldAppdata $appdata] {
+        if {![file exists $old]} { continue }
+        set ::els::config_path $new
+        if {![file exists $new]} {
+            catch {
+                file mkdir [file dirname $new]
+                file copy -force $old $new
+            }
+        }
+        return 1
+    }
     return 0
 }
 # First run: ask where to keep settings.  The dialog is callback-driven (NOT a
@@ -237,6 +273,21 @@ proc els::load_geometry {} {
     if {![catch {dict get $data recent} r]} {
         set ::els::recent [els::recent_sanitize $r]
     }
+    if {![catch {dict get $data word_wrap} w]} {
+        set ::els::word_wrap [expr {$w ? 1 : 0}]
+        if {[info exists ::els::docs] && [llength $::els::docs]} {
+            catch {els::set_wrap 0}
+        }
+    }
+    if {![catch {dict get $data restore_session} rs]} {
+        set ::els::restore_session [expr {$rs ? 1 : 0}]
+    }
+    if {![catch {dict get $data session_files} sf]} {
+        set ::els::session_files [els::session_sanitize $sf]
+    }
+    if {![catch {dict get $data session_active} sa]} {
+        set ::els::session_active [els::session_path $sa]
+    }
 }
 proc els::save_geometry {} {
     if {$::els::selftest} { return }
@@ -245,14 +296,53 @@ proc els::save_geometry {} {
     if {[catch {
         file mkdir [file dirname $f]
         set fh [::open $f w]
-        puts $fh [dict create geometry [wm geometry .] recent $::els::recent]
+        puts $fh [dict create geometry [wm geometry .] \
+                      recent $::els::recent word_wrap $::els::word_wrap \
+                      restore_session $::els::restore_session \
+                      session_files [els::session_current_files] \
+                      session_active [els::session_current_active]]
         close $fh
     }]} { return }
 }
 
+proc els::session_path {p} {
+    if {$p eq ""} { return "" }
+    if {[catch {file normalize $p} n]} { return "" }
+    return $n
+}
+proc els::session_sanitize {list} {
+    set out {}
+    foreach p $list {
+        set n [els::session_path $p]
+        if {$n eq "" || $n in $out} { continue }
+        lappend out $n
+    }
+    return $out
+}
+proc els::session_current_files {} {
+    set out {}
+    foreach id $::els::docs {
+        if {![info exists ::els::docPath($id)]} { continue }
+        set p [els::session_path $::els::docPath($id)]
+        if {$p eq "" || $p in $out} { continue }
+        lappend out $p
+    }
+    return $out
+}
+proc els::session_current_active {} {
+    if {$::els::active eq "" || ![info exists ::els::docPath($::els::active)]} {
+        return ""
+    }
+    return [els::session_path $::els::docPath($::els::active)]
+}
+proc els::session_set_restore {} {
+    els::save_geometry
+}
+
 # ---- recent files -------------------------------------------------------
-# A small MRU list under File ▸ Open Recent, persisted with the config; entries
-# can be removed one at a time or cleared all at once.
+# A small MRU list under File ▸ Open Recent, persisted with the config.  The
+# menu opens files quickly; a separate manager handles cleanup so the menu stays
+# light instead of growing a removal submenu.
 proc els::recent_sanitize {list} {
     set out {}
     foreach p $list {
@@ -274,11 +364,13 @@ proc els::recent_remove {p} {
     set ::els::recent [lsearch -all -inline -not -exact $::els::recent $p]
     els::recent_rebuild
     els::save_geometry
+    els::recent_manage_refresh
 }
 proc els::recent_clear {} {
     set ::els::recent {}
     els::recent_rebuild
     els::save_geometry
+    els::recent_manage_refresh
 }
 proc els::recent_open {p} {
     if {![file exists $p]} {
@@ -301,20 +393,139 @@ proc els::recent_rebuild {} {
     $m delete 0 end
     if {![llength $::els::recent]} {
         $m add command -label "(empty)" -state disabled
-        return
-    }
-    foreach p $::els::recent {
-        $m add command -label [els::recent_label $p] -command [list els::recent_open $p]
+    } else {
+        foreach p $::els::recent {
+            $m add command -label [els::recent_label $p] -command [list els::recent_open $p]
+        }
     }
     $m add separator
-    set rm $m.remove
-    if {![winfo exists $rm]} { menu $rm -tearoff 0 }
-    $rm delete 0 end
-    foreach p $::els::recent {
-        $rm add command -label [els::recent_label $p] -command [list els::recent_remove $p]
+    $m add command -label "Maintain List..." -command els::recent_manage
+}
+proc els::recent_manage {} {
+    catch {destroy .recent}
+    toplevel .recent -bg $::els::PAGE
+    wm withdraw .recent
+    wm title .recent "Recent Files"
+    wm transient .recent .
+    set bg $::els::PAGE
+    ttk::frame .recent.f -padding 18
+    pack .recent.f -fill both -expand 1
+    ttk::label .recent.f.h -text "Recent Files" -font elsUIb -foreground $::els::INK
+    ttk::label .recent.f.s -text "Open, remove, or clean up missing entries." \
+        -font elsUI -foreground $::els::MUTED
+    grid .recent.f.h -row 0 -column 0 -columnspan 3 -sticky w
+    grid .recent.f.s -row 1 -column 0 -columnspan 3 -sticky w -pady {2 12}
+
+    listbox .recent.f.list -font elsUI -height 10 -activestyle none \
+        -borderwidth 0 -highlightthickness 1 -highlightbackground $::els::HAIR \
+        -selectbackground $::els::SEL -selectforeground $::els::INK \
+        -bg $bg -fg $::els::INK -yscrollcommand {.recent.f.vs set}
+    ttk::scrollbar .recent.f.vs -orient vertical -command {.recent.f.list yview}
+    grid .recent.f.list -row 2 -column 0 -columnspan 2 -sticky nsew
+    grid .recent.f.vs   -row 2 -column 2 -sticky ns
+
+    ttk::label .recent.f.path -text "" -font elsUI -foreground $::els::MUTED -anchor w
+    grid .recent.f.path -row 3 -column 0 -columnspan 3 -sticky ew -pady {8 14}
+
+    ttk::frame .recent.f.buttons
+    grid .recent.f.buttons -row 4 -column 0 -columnspan 3 -sticky ew
+    ttk::button .recent.f.buttons.open -text Open -style Dialog.TButton -command els::recent_manage_open
+    ttk::button .recent.f.buttons.remove -text Remove -style Dialog.TButton -command els::recent_manage_remove
+    ttk::button .recent.f.buttons.missing -text "Remove Missing" -style Dialog.TButton -command els::recent_manage_remove_missing
+    ttk::button .recent.f.buttons.clear -text Clear -style Dialog.TButton -command els::recent_manage_clear
+    ttk::button .recent.f.buttons.close -text Close -style Dialog.TButton -command {destroy .recent}
+    pack .recent.f.buttons.close .recent.f.buttons.clear .recent.f.buttons.missing \
+         .recent.f.buttons.remove .recent.f.buttons.open -side right -padx {6 0}
+
+    grid columnconfigure .recent.f 0 -weight 1
+    grid rowconfigure .recent.f 2 -weight 1
+    bind .recent.f.list <<ListboxSelect>> els::recent_manage_select
+    bind .recent.f.list <Double-Button-1> els::recent_manage_open
+    bind .recent <Escape> {destroy .recent}
+    bind .recent <Delete> els::recent_manage_remove
+    els::recent_manage_refresh
+    update idletasks
+    set w [winfo reqwidth .recent] ; set h [winfo reqheight .recent]
+    wm minsize .recent $w $h
+    set x [expr {[winfo rootx .] + ([winfo width .]  - $w) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - $h) / 3}]
+    wm geometry .recent +$x+$y
+    wm deiconify .recent
+    focus .recent.f.list
+}
+proc els::recent_manage_refresh {} {
+    if {![winfo exists .recent.f.list]} { return }
+    set lb .recent.f.list
+    set old [lindex [$lb curselection] 0]
+    $lb delete 0 end
+    foreach p $::els::recent { $lb insert end [file nativename $p] }
+    if {[llength $::els::recent]} {
+        if {$old eq "" || $old >= [llength $::els::recent]} {
+            set old 0
+        }
+        $lb selection set $old
+        $lb activate $old
+        $lb see $old
     }
-    $m add cascade -label "Remove from List" -menu $rm
-    $m add command -label "Clear List" -command els::recent_clear
+    els::recent_manage_select
+}
+proc els::recent_manage_index {} {
+    if {![winfo exists .recent.f.list]} { return -1 }
+    set sel [.recent.f.list curselection]
+    if {![llength $sel]} { return -1 }
+    return [lindex $sel 0]
+}
+proc els::recent_manage_path {} {
+    set i [els::recent_manage_index]
+    if {$i < 0 || $i >= [llength $::els::recent]} { return "" }
+    return [lindex $::els::recent $i]
+}
+proc els::recent_manage_select {} {
+    if {![winfo exists .recent.f.path]} { return }
+    set p [els::recent_manage_path]
+    set has [expr {$p ne ""}]
+    set hasMissing 0
+    foreach r $::els::recent {
+        if {![file exists $r]} { set hasMissing 1 ; break }
+    }
+    .recent.f.path configure -text [expr {$has ? [file nativename $p] : "No recent files"}]
+    foreach b {.recent.f.buttons.open .recent.f.buttons.remove} {
+        $b configure -state [expr {$has ? "normal" : "disabled"}]
+    }
+    .recent.f.buttons.missing configure -state [expr {$hasMissing ? "normal" : "disabled"}]
+    .recent.f.buttons.clear configure -state [expr {[llength $::els::recent] ? "normal" : "disabled"}]
+}
+proc els::recent_manage_open {} {
+    set p [els::recent_manage_path]
+    if {$p eq ""} { return }
+    set exists [file exists $p]
+    els::recent_open $p
+    if {$exists} {
+        catch {destroy .recent}
+    } else {
+        els::recent_manage_refresh
+    }
+}
+proc els::recent_manage_remove {} {
+    set p [els::recent_manage_path]
+    if {$p eq ""} { return }
+    els::recent_remove $p
+}
+proc els::recent_manage_remove_missing {} {
+    set kept {}
+    foreach p $::els::recent {
+        if {[file exists $p]} { lappend kept $p }
+    }
+    set ::els::recent $kept
+    els::recent_rebuild
+    els::save_geometry
+    els::recent_manage_refresh
+}
+proc els::recent_manage_clear {} {
+    if {![llength $::els::recent]} { return }
+    set ans [tk_messageBox -parent .recent -icon question -type yesno -title els \
+        -message "Clear the recent files list?"]
+    if {$ans eq "yes"} { els::recent_clear }
 }
 
 # ---- flat chrome styling ------------------------------------------------
@@ -347,6 +558,32 @@ proc els::init_style {} {
         -borderwidth 0 -relief flat -padding {8 4} -anchor center
     $s map Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
         -foreground [list selected $ink active $ink]
+    # find/replace controls: still quiet, but a little more legible than chrome
+    # buttons because they are compact and icon-like.
+    $s configure Find.Toolbutton -background $bg -foreground $::els::MUTED \
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUIb
+    $s map Find.Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
+        -foreground [list selected $ink active $ink]
+    $s configure Find.TButton -background $bg -foreground $::els::MUTED \
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUIb
+    $s map Find.TButton -background [list pressed $hair active $::els::TABBG] \
+        -foreground [list active $ink]
+    $s configure FindAction.TButton -background $bg -foreground $ink \
+        -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUIb \
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair
+    $s map FindAction.TButton -background [list pressed $hair active $::els::TABBG]
+    $s configure FindAction.Toolbutton -background $bg -foreground $ink \
+        -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUIb \
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair
+    $s map FindAction.Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
+        -foreground [list selected $ink active $ink]
+    # Dialog buttons should read as buttons even before hover, unlike the main
+    # chrome where flatness matters more than affordance.
+    $s configure Dialog.TButton -background $bg -foreground $ink \
+        -borderwidth 1 -relief solid -padding {10 5} -anchor center \
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair
+    $s map Dialog.TButton -background [list pressed $hair active $::els::TABBG] \
+        -foreground [list disabled $::els::MUTED]
     # a slim, arrow-less vertical scrollbar (thumb only)
     $s layout Vertical.TScrollbar {
         Vertical.Scrollbar.trough -sticky ns -children {
@@ -381,6 +618,9 @@ proc els::build {} {
     menu .menu.file.recent
     .menu.file add cascade -label "Open Recent" -menu .menu.file.recent
     els::recent_rebuild
+    .menu.file add checkbutton -label "Restore Previous Session" \
+        -variable ::els::restore_session -command els::session_set_restore
+    .menu.file add separator
     .menu.file add command -label Save         -accelerator Ctrl+S -command els::save
     .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
     .menu.file add separator
@@ -440,7 +680,7 @@ proc els::build {} {
     ttk::frame .sb
     frame .sb.hair -height 1 -bg $::els::HAIR
     ttk::label .sb.name -font elsUI -anchor w -text "untitled" -foreground $::els::MUTED
-    ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1, Col 1" -foreground $::els::MUTED
+    ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1 Col 1" -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED \
         -cursor hand2 -padding {4 1}
     ttk::label .sb.enc  -font elsUI -anchor e -text "UTF-8" -foreground $::els::MUTED \
@@ -805,7 +1045,7 @@ proc els::update_pos {} {
     set w [els::T]
     if {$w eq ""} { return }
     lassign [split [$w index insert] .] line col
-    .sb.pos configure -text "Ln $line, Col [expr {$col + 1}]"
+    .sb.pos configure -text "Ln $line Col [expr {$col + 1}]"
 }
 proc els::line_count {} {
     set w [els::T]
@@ -995,6 +1235,14 @@ proc els::detect_wide {raw sample} {
     return utf-16le
 }
 
+proc els::bytes_ascii_only {raw} {
+    foreach ch [split $raw ""] {
+        scan $ch %c c
+        if {$c > 127} { return 0 }
+    }
+    return 1
+}
+
 proc els::detect_encoding {raw} {
     # -> {encoding bom}.  bom=1 if a byte-order mark was present (stripped on decode).
     set n [string length $raw]
@@ -1013,9 +1261,13 @@ proc els::detect_encoding {raw} {
         set enc [els::detect_wide $raw $sample]
         if {$enc ne ""} { return [list $enc 0] }
     }
-    # 3. valid UTF-8 without BOM — definitive and free.
-    if {![catch {encoding convertfrom -profile strict utf-8 $raw}]} { return {utf-8 0} }
+    # 3. ASCII-only bytes are shared by UTF-8 and most legacy encodings; there is
+    #    no honest way to distinguish them, so els uses UTF-8 as the default.
+    if {[els::bytes_ascii_only $raw]} { return {utf-8 0} }
     # 4. ICU charset detection (chardet quality) for legacy 8-bit / CJK text.
+    #    This runs before the UTF-8 validity fallback so valid byte sequences do
+    #    not automatically mask a stronger legacy/CJK detector answer.
+    set utf8_ok [expr {![catch {encoding convertfrom -profile strict utf-8 $raw}]}]
     if {$::els::have_detect} {
         set d [::elsdet::detect $raw]
         if {[llength $d] == 2} {
@@ -1024,7 +1276,9 @@ proc els::detect_encoding {raw} {
             if {$enc ne "" && $conf >= $::els::DETECT_MIN} { return [list $enc 0] }
         }
     }
-    # 5. fallback: Windows Western — a superset of ASCII/Latin-1; never errors.
+    # 5. UTF-8 fallback when the bytes are strictly valid and ICU had no better
+    #    answer.  Otherwise use Windows Western — a safe 8-bit fallback.
+    if {$utf8_ok} { return {utf-8 0} }
     return {cp1252 0}
 }
 proc els::decode {raw enc bom} {
@@ -1075,7 +1329,7 @@ proc els::enc_menu {path action} {
 proc els::build_enc_popup {} {
     menu .encpop -tearoff 0
     .encpop add cascade -label "Reopen with Encoding" -menu [els::enc_menu .encpop.re reopen]
-    .encpop add cascade -label "Save with Encoding"   -menu [els::enc_menu .encpop.sv save]
+    .encpop add cascade -label "Set Save Encoding"    -menu [els::enc_menu .encpop.sv save]
 }
 # Post a status-bar picker UPWARD from its indicator, kept inside the main
 # window — a downward menu spills below the window's bottom sill (off-screen).
@@ -1136,10 +1390,13 @@ proc els::reopen_with {enc bom} {
 }
 proc els::save_with {enc bom} {
     set id $::els::active
+    if {$id eq ""} { return }
+    if {$::els::docEnc($id) eq $enc && $::els::docBom($id) == $bom} { return }
     set ::els::docEnc($id) $enc
     set ::els::docBom($id) $bom
+    [els::W $id] edit modified 1
+    els::update_tab $id
     els::settitle
-    els::save
 }
 proc els::build_eol_popup {} {
     menu .eolpop -tearoff 0
@@ -1179,7 +1436,7 @@ proc els::filetypes {} {
 proc els::new {} {
     els::new_doc
 }
-proc els::open {{p ""}} {
+proc els::open {{p ""} {quiet 0}} {
     if {$p eq ""} {
         set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
         if {$p eq ""} { return }
@@ -1198,9 +1455,11 @@ proc els::open {{p ""}} {
         set raw [read $fh]
         close $fh
     } err]} {
-        tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
+        if {!$quiet} {
+            tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
+        }
         if {[els::pristine $id] && [llength $::els::docs] > 1} { els::close_doc $id }
-        return
+        return ""
     }
     # detect encoding + EOL, decode, normalise the buffer to LF internally
     lassign [els::detect_encoding $raw] enc bom
@@ -1223,6 +1482,7 @@ proc els::open {{p ""}} {
     els::settitle
     els::refresh_view
     els::recent_add $p
+    return $id
 }
 proc els::save {} {
     variable active
@@ -1272,6 +1532,26 @@ proc els::saveas {} {
     els::update_tab $active
     els::recent_add $p
 }
+proc els::session_restore {} {
+    if {!$::els::restore_session} { return 0 }
+    set restored {}
+    foreach p [els::session_sanitize $::els::session_files] {
+        if {![file exists $p]} { continue }
+        set id [els::open $p 1]
+        if {$id ne ""} { lappend restored [list $p $id] }
+    }
+    if {![llength $restored]} { return 0 }
+    set target ""
+    foreach item $restored {
+        lassign $item p id
+        if {$p eq $::els::session_active} {
+            set target $id
+            break
+        }
+    }
+    if {$target ne ""} { els::switch_to $target }
+    return [llength $restored]
+}
 # bind an event on a widget and every descendant, so a click anywhere inside a
 # composite window is caught — not just on its background
 proc els::bindtree {w seq script} {
@@ -1286,32 +1566,36 @@ proc els::about {} {
     wm transient .about .
     wm resizable .about 0 0
     set bg $::els::PAGE
-    # icon on the left, text on the right — a calm landscape card
-    frame .about.row -bg $bg
-    pack  .about.row -padx 34 -pady 30
+    frame .about.card -bg $bg
+    pack  .about.card -padx 34 -pady 28
+    frame .about.top -bg $bg
+    pack  .about.top -in .about.card -anchor center
+    set iconSize 0
     if {$::els::iconLoaded} {
         catch {image delete elsAboutIcon}
         image create photo elsAboutIcon
         elsAboutIcon copy elsIcon -subsample 2 -subsample 2   ;# 256px -> 128px
-        label .about.row.icon -image elsAboutIcon -bg $bg -bd 0
-        pack  .about.row.icon -side left -padx {0 28}
+        set iconSize [image height elsAboutIcon]
+        label .about.top.icon -image elsAboutIcon -bg $bg -bd 0
+        grid .about.top.icon -row 0 -column 0 -sticky ns -padx {0 20}
     }
-    frame .about.row.txt -bg $bg
-    pack  .about.row.txt -side left
-    label .about.row.txt.name -text "els" -font elsTitle -fg $::els::INK -bg $bg
-    pack  .about.row.txt.name -anchor w
-    label .about.row.txt.tag -text "a programmable text editor" \
-        -font elsUI -fg $::els::MUTED -bg $bg
-    pack  .about.row.txt.tag -anchor w -pady {4 16}
-    label .about.row.txt.ver -text "version $::els::version" \
-        -font elsUI -fg $::els::MUTED -bg $bg
-    pack  .about.row.txt.ver -anchor w
-    label .about.row.txt.copy -text "© 2026 Vincent Vercauteren" \
-        -font elsUI -fg $::els::MUTED -bg $bg
-    pack  .about.row.txt.copy -anchor w -pady {16 0}
-    label .about.row.txt.lic -text "MIT License" \
-        -font elsUI -fg $::els::MUTED -bg $bg
-    pack  .about.row.txt.lic -anchor w -pady {2 0}
+    label .about.top.name -text "els" -font elsTitle -fg $::els::INK -bg $bg -anchor center
+    grid .about.top.name -row 0 -column 1 -sticky ns
+    if {$iconSize > 0} { grid rowconfigure .about.top 0 -minsize $iconSize }
+    frame .about.body -bg $bg
+    pack  .about.body -in .about.card -anchor center -pady {14 0}
+    label .about.body.tag -text "a programmable text editor" \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor center
+    pack  .about.body.tag -anchor center -pady {0 12}
+    label .about.body.copy -text "© 2026 Vincent Vercauteren" \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor center
+    pack  .about.body.copy -anchor center -pady {0 10}
+    label .about.body.ver -text "version $::els::version" \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor center
+    pack  .about.body.ver -anchor center -pady {0 2}
+    label .about.body.lic -text "MIT License" \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor center
+    pack  .about.body.lic -anchor center
     # a click anywhere, or Escape, dismisses it
     bind .about <Escape> {destroy .about}
     els::bindtree .about <Button-1> {destroy .about}
@@ -1334,6 +1618,10 @@ proc els::shortcuts {} {
     set bg $::els::PAGE
     frame .keys.f -bg $bg
     pack  .keys.f -padx 28 -pady 22
+    label .keys.f.title -text "Keyboard Shortcuts" -font elsUIb -fg $::els::INK -bg $bg
+    label .keys.f.sub -text "Common actions in els" -font elsUI -fg $::els::MUTED -bg $bg
+    grid .keys.f.title -row 0 -column 0 -columnspan 3 -sticky w
+    grid .keys.f.sub   -row 1 -column 0 -columnspan 3 -sticky w -pady {2 14}
     set columns {
         {
             File {
@@ -1377,24 +1665,35 @@ proc els::shortcuts {} {
     set col 0
     foreach sections $columns {
         set cf [frame .keys.f.c$col -bg $bg]
-        set padr [expr {$col == 0 ? 34 : 0}]
-        grid $cf -row 0 -column $col -sticky n -padx [list 0 $padr]
+        if {$col < 2} {
+            set padx [list 0 18]
+        } else {
+            set padx [list 0 0]
+        }
+        grid $cf -row 2 -column $col -sticky n -padx $padx
         set r 0
         foreach {cat rows} $sections {
-            set top [expr {$r == 0 ? 0 : 12}]
-            label $cf.h$r -text $cat -font elsUIb -fg $::els::INK -bg $bg
-            grid  $cf.h$r -row $r -column 0 -columnspan 2 -sticky w -pady [list $top 5]
-            incr r
+            set sec [frame $cf.s$r -bg $bg -highlightthickness 1 \
+                         -highlightbackground $::els::HAIR]
+            grid $sec -row $r -column 0 -sticky new -pady [list 0 10]
+            label $sec.h -text $cat -font elsUIb -fg $::els::INK -bg $bg
+            grid  $sec.h -row 0 -column 0 -columnspan 2 -sticky w -padx 10 -pady {8 5}
+            set sr 1
             foreach {k d} $rows {
-                label $cf.k$r -text $k -font elsMono -fg $::els::INK   -bg $bg
-                label $cf.d$r -text $d -font elsUI   -fg $::els::MUTED -bg $bg
-                grid  $cf.k$r -row $r -column 0 -sticky w -padx {0 22}
-                grid  $cf.d$r -row $r -column 1 -sticky w -pady 1
-                incr r
+                label $sec.k$sr -text $k -font elsMono -fg $::els::INK   -bg $bg -anchor w
+                label $sec.d$sr -text $d -font elsUI   -fg $::els::MUTED -bg $bg -anchor w
+                grid  $sec.k$sr -row $sr -column 0 -sticky w -padx {10 18} -pady {1 1}
+                grid  $sec.d$sr -row $sr -column 1 -sticky w -padx {0 12}  -pady {1 1}
+                incr sr
             }
+            grid rowconfigure $sec $sr -minsize 8
+            grid columnconfigure $sec 1 -weight 1
+            incr r
         }
+        grid columnconfigure $cf 0 -weight 1
         incr col
     }
+    grid columnconfigure .keys.f {0 1 2} -weight 1
     bind .keys <Escape> {destroy .keys}
     update idletasks
     set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .keys]) / 2}]
@@ -1428,20 +1727,28 @@ proc els::build_findbar {} {
     ttk::frame .find.fr
     ttk::label .find.fr.l -text "Find" -font elsUI -width 7 -anchor w
     ttk::entry .find.fr.q -textvariable ::els::find_q -font elsUI
-    ttk::checkbutton .find.fr.case  -text "Aa" -style Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.fr.case  -text "Aa" -style Find.Toolbutton -takefocus 0 \
         -variable ::els::find_case  -command els::find_update
-    ttk::checkbutton .find.fr.word  -text "W"  -style Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.fr.word  -text "W"  -style Find.Toolbutton -takefocus 0 \
         -variable ::els::find_word  -command els::find_update
-    ttk::checkbutton .find.fr.regex -text ".*" -style Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.fr.regex -text ".*" -style Find.Toolbutton -takefocus 0 \
         -variable ::els::find_regex -command els::find_update
-    ttk::button .find.fr.help -text "?" -width 2 -takefocus 0 -command els::regex_help
-    ttk::button .find.fr.prev -text "↑" -width 2 -takefocus 0 -command {els::find_step -1}
-    ttk::button .find.fr.next -text "↓" -width 2 -takefocus 0 -command {els::find_step 1}
+    ttk::button .find.fr.help -text "?" -style Find.TButton -width 2 -takefocus 0 -command els::regex_help
+    ttk::button .find.fr.prev -text "↑" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step -1}
+    ttk::button .find.fr.next -text "↓" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step 1}
     ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
         -foreground $::els::MUTED -width 11 -anchor e
-    ttk::button .find.fr.x -text "×" -width 2 -takefocus 0 -command els::find_hide
-    grid .find.fr.l .find.fr.q .find.fr.case .find.fr.word .find.fr.regex .find.fr.help \
-         .find.fr.prev .find.fr.next .find.fr.n .find.fr.x -row 0 -padx 1 -sticky we
+    ttk::button .find.fr.x -text "×" -style Find.TButton -width 2 -takefocus 0 -command els::find_hide
+    grid .find.fr.l     -row 0 -column 0 -padx 1 -sticky we
+    grid .find.fr.q     -row 0 -column 1 -padx 1 -sticky we
+    grid .find.fr.case  -row 0 -column 2 -padx 1 -sticky we
+    grid .find.fr.word  -row 0 -column 3 -padx 1 -sticky we
+    grid .find.fr.regex -row 0 -column 4 -padx 1 -sticky we
+    grid .find.fr.help  -row 0 -column 5 -padx 1 -sticky we
+    grid .find.fr.prev  -row 0 -column 6 -padx 1 -sticky we
+    grid .find.fr.next  -row 0 -column 7 -padx 1 -sticky we
+    grid .find.fr.n     -row 0 -column 8 -padx 1 -sticky we
+    grid .find.fr.x     -row 0 -column 9 -padx 1 -sticky we
     grid columnconfigure .find.fr 1 -weight 1
     els::tooltip .find.fr.case  "Match case"
     els::tooltip .find.fr.word  "Whole word"
@@ -1453,11 +1760,15 @@ proc els::build_findbar {} {
     ttk::frame .find.rr
     ttk::label .find.rr.l -text "Replace" -font elsUI -width 7 -anchor w
     ttk::entry .find.rr.r -textvariable ::els::find_r -font elsUI
-    ttk::checkbutton .find.rr.adapt -text "Adapt case" -style Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.rr.adapt -text "Adapt case" -style FindAction.Toolbutton -takefocus 0 \
         -variable ::els::find_adapt
-    ttk::button .find.rr.rep -text "Replace" -takefocus 0 -command els::find_replace_one
-    ttk::button .find.rr.all -text "All"     -takefocus 0 -command els::find_replace_all
-    grid .find.rr.l .find.rr.r .find.rr.adapt .find.rr.rep .find.rr.all -row 0 -padx 1 -sticky we
+    ttk::button .find.rr.rep -text "Replace" -style FindAction.TButton -takefocus 0 -command els::find_replace_one
+    ttk::button .find.rr.all -text "All"     -style FindAction.TButton -takefocus 0 -command els::find_replace_all
+    grid .find.rr.l     -row 0 -column 0 -padx 1 -sticky we
+    grid .find.rr.r     -row 0 -column 1 -columnspan 6 -padx 1 -sticky we
+    grid .find.rr.adapt -row 0 -column 7 -padx 1 -sticky we
+    grid .find.rr.rep   -row 0 -column 8 -padx 1 -sticky we
+    grid .find.rr.all   -row 0 -column 9 -padx 1 -sticky we
     grid columnconfigure .find.rr 1 -weight 1
     els::tooltip .find.rr.adapt "Adapt case — make each replacement follow the case of the match"
 
@@ -1508,12 +1819,26 @@ proc els::tip_pop {w text} {
     set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
     set x [expr {[winfo rootx $w] + [winfo width $w] / 2 - $tw / 2}]
     set below [expr {[winfo rooty $w] + [winfo height $w] + 5}]
-    # prefer below the widget; flip above when that would fall off the screen
-    # bottom (e.g. a status-bar item), and clamp within the screen horizontally
-    set y [expr {$below + $th <= [winfo screenheight $w]
-                 ? $below : [winfo rooty $w] - $th - 5}]
-    set sw [winfo screenwidth $w]
-    if {$x < 2} { set x 2 } elseif {$x + $tw > $sw - 2} { set x [expr {$sw - 2 - $tw}] }
+    # Prefer below the widget; flip above when needed, then clamp into the main
+    # window.  Tooltips are context for els, not little screen-global balloons.
+    set margin 4
+    set winl [winfo rootx .]
+    set wint [winfo rooty .]
+    set winr [expr {$winl + [winfo width .]}]
+    set winb [expr {$wint + [winfo height .]}]
+    set above [expr {[winfo rooty $w] - $th - 5}]
+    if {$below + $th <= $winb - $margin} {
+        set y $below
+    } elseif {$above >= $wint + $margin} {
+        set y $above
+    } else {
+        set y [expr {min(max($below, $wint + $margin), $winb - $th - $margin)}]
+    }
+    if {$x < $winl + $margin} {
+        set x [expr {$winl + $margin}]
+    } elseif {$x + $tw > $winr - $margin} {
+        set x [expr {max($winl + $margin, $winr - $margin - $tw)}]
+    }
     wm geometry .tip +$x+$y
 }
 # A dynamic tooltip: `textcmd` is evaluated each time the tip is about to show,
@@ -1825,7 +2150,7 @@ proc els::ws_refresh {} {
 # a separate -wrap none widget synced by fraction, so when wrap is on we give it
 # a blank continuation row for each extra display row a logical line occupies
 # (see update_line_numbers / update_current_line) so the numbers stay aligned.
-proc els::set_wrap {} {
+proc els::set_wrap {{persist 1}} {
     variable docs
     set mode [expr {$::els::word_wrap ? "word" : "none"}]
     foreach id $docs {
@@ -1833,6 +2158,7 @@ proc els::set_wrap {} {
     }
     els::update_line_numbers
     els::refresh_view
+    if {$persist} { els::save_geometry }
 }
 
 # Text size (the font FAMILY is fixed; users can only zoom).  elsMono is a named
@@ -1910,9 +2236,17 @@ proc els::main {} {
         els::selftest [lindex $::argv 1] [lindex $::argv 2]
     } else {
         # open every file argument, each in its own tab (the first reuses the
-        # initial empty document)
+        # initial empty document).  Explicit launch files take precedence over
+        # the saved session, which is only for a plain app start.
+        set openedArgs 0
         foreach f $::argv {
-            if {[string index $f 0] ne "-"} { els::open $f }
+            if {[string index $f 0] ne "-"} {
+                els::open $f
+                set openedArgs 1
+            }
+        }
+        if {!$openedArgs} {
+            els::session_restore
         }
         # first run (no config in either location): ask where to keep settings,
         # a moment after the main window is up (never a startup-time modal vwait)

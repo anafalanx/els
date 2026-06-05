@@ -7,7 +7,7 @@
 #   2. REOPEN it under 7 encodings (≥4 deliberately wrong) via the encoding
 #      picker, producing intentional mojibake;
 #   3. SAVE the text into 5 deterministically-"random" other encodings via the
-#      picker (Save with Encoding), then re-open each garbled result and let
+#      picker (Set Save Encoding), then re-open each garbled result and let
 #      detection chew on the garbage.
 # Every operation is timed; the goal is to prove els stays responsive and never
 # hangs or crashes on garbled / mismatched data, and to report how it performs.

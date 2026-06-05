@@ -112,14 +112,40 @@ test enc-3.3 {reopen re-decodes the same raw bytes under a new encoding} -setup 
     list [edoc Enc] $a $b
 } -result "iso8859-1 џ ÿ"
 
-test enc-3.4 {save with a chosen encoding emits those bytes} -setup {els_reset} -body {
+test enc-3.4 {set save encoding marks dirty but does not save pending edits immediately} -setup {els_reset} -body {
     set p [write_raw s4.txt "x\n"]
     els::open $p
     [els::T] delete 1.0 end
     [els::T] insert end "ÿ"    ;# ÿ
     els::save_with iso8859-1 0
-    read_raw $p
-} -result "\xFF"
+    set beforeSave [read_raw $p]
+    set dirty [els::doc_dirty $::els::active]
+    els::save
+    list $beforeSave $dirty [read_raw $p]
+} -result [list "x\n" 1 "\xFF"]
+
+test enc-3.4a {ASCII-only files are ambiguous and default to UTF-8} -setup {els_reset} -body {
+    set p [write_raw sticky_ascii.txt "plain ascii\n"]
+    els::open $p
+    list [edoc Enc] [edoc Bom]
+} -result {utf-8 0}
+
+test enc-3.4b {chosen save encoding is not stored in config} \
+        -setup {
+            els_reset
+            set ::els_test_selftest $::els::selftest
+            set ::els::selftest 0
+        } -body {
+    set p [write_raw no_encoding_pref.txt "plain ascii\n"]
+    els::open $p
+    els::save_with iso8859-1 0
+    els::save_geometry
+    set conf [read_raw $::els::config_path]
+    expr {[string first file_encodings $conf] < 0}
+} -cleanup {
+    set ::els::selftest $::els_test_selftest
+    unset -nocomplain ::els_test_selftest
+} -result 1
 
 test enc-3.5 {EOL override marks the doc saveable and rewrites line endings} -setup {els_reset} -body {
     set p [write_raw e5.txt "a\nb\n"]
@@ -136,8 +162,8 @@ test enc-4.1 {encoding & EOL picker menus build, "Other" lists every encoding} -
     list [winfo exists .encpop.re.other] [winfo exists .encpop.sv.other] \
          [winfo exists .eolpop] \
          [expr {[.encpop.re.other index end] + 1 == [llength [encoding names]]}] \
-         [.encpop entrycget 0 -label]
-} -result {1 1 1 1 {Reopen with Encoding}}
+         [.encpop entrycget 0 -label] [.encpop entrycget 1 -label]
+} -result {1 1 1 1 {Reopen with Encoding} {Set Save Encoding}}
 
 test enc-4.2 {UI-driven: click the encoding indicator, reopen-with then save-with} -setup {els_reset} -body {
     set p [write_raw uidrv.txt [encoding convertto cp1251 "Текст для проверки\n"]]
@@ -152,7 +178,7 @@ test enc-4.2 {UI-driven: click the encoding indicator, reopen-with then save-wit
     .encpop.re.other invoke [.encpop.re.other index utf-16be]
     update
     set afterReopen $::els::docEnc($::els::active)
-    # Save As (to a temp path) then Save with Encoding via the picker
+    # Save As (to a temp path) then Set Save Encoding via the picker
     set ::els_test_savefile [file join $::ELS_TMP uidrv_out.txt]
     .menu.file invoke "Save As..."
     event generate .sb.enc <ButtonPress-1> -x 5 -y 5

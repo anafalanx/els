@@ -33,7 +33,7 @@ source [file join $::ELS_ROOT els.tcl]
 
 # Pin the config path into the temp dir, so build's resolver is skipped and the
 # first-run location dialog can never pop during a test run.
-set ::els::config_path [file join $::ELS_TMP config.tcl]
+set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
 
 # Replace native dialogs with stubs so a stray dialog never blocks a test run.
@@ -61,9 +61,15 @@ proc els_reset {} {
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    array unset ::els::docPath
-    array set ::els::docPath {}
+    foreach a {docPath docEnc docBom docEol docRaw} {
+        array unset ::els::$a
+        array set ::els::$a {}
+    }
     set ::els::show_ws 0 ; set ::els::word_wrap 0
+    set ::els::restore_session 1
+    set ::els::session_files {}
+    set ::els::session_active ""
+    catch {file delete -force $::els::config_path}
     catch {font configure elsMono -size 11}
     set ::els::font_size 11
     catch {set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]}

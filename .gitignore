@@ -20,6 +20,7 @@
 
 # a "portable" config chosen during a dev run lands next to els.tcl (the repo
 # root here); real builds write it next to els.exe instead
+/els.conf
 /config.tcl
 
 # OS / editor cruft

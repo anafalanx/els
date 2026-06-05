@@ -31,6 +31,10 @@ proc raw_write {name bytes} {
     set f [open $p w] ; fconfigure $f -translation binary
     puts -nonewline $f $bytes ; close $f ; return $p
 }
+proc raw_read {p} {
+    set f [open $p r] ; fconfigure $f -translation binary
+    set data [read $f] ; close $f ; return $data
+}
 
 # ---- chrome / startup ---------------------------------------------------
 test ui-1.1 {core widgets exist after build} -setup {ui_reset} -body {
@@ -47,7 +51,7 @@ test ui-1.3 {status bar tracks the caret position} -setup {ui_reset} -body {
     [els::T] insert end "hello\nworld"
     [els::T] mark set insert 2.3 ; els::refresh_view   ;# char index 3 -> Col 4 (1-based)
     .sb.pos cget -text
-} -result {Ln 2, Col 4}
+} -result {Ln 2 Col 4}
 
 test ui-1.4 {status-bar pickers have separators and hover affordance} -setup {ui_reset} -body {
     event generate .sb.eol <Enter> ; update
@@ -134,7 +138,7 @@ test ui-3.3 {arrow keys move the caret and update the status bar} -setup {ui_res
     event generate $w <Down> ; event generate $w <Right> ; update
     els::refresh_view
     .sb.pos cget -text
-} -result {Ln 2, Col 2}
+} -result {Ln 2 Col 2}
 
 # ---- find / replace (the hard part) -------------------------------------
 test ui-4.1 {Ctrl+F shows the find bar and focuses the field} -setup {ui_reset} -body {
@@ -255,6 +259,15 @@ test ui-4.12 {STRESS: rapid incremental search on a big buffer never hangs} \
     expr {$ms < 4000 && [llength $::els::find_matches] > 0 ? "ok" : "SLOW:$ms"}
 } -result ok
 
+test ui-4.13 {find and replace rows align on the right} -setup {ui_reset} -body {
+    els::find_show replace
+    update
+    set findRight [expr {[winfo rootx .find.fr.x] + [winfo width .find.fr.x]}]
+    set replRight [expr {[winfo rootx .find.rr.all] + [winfo width .find.rr.all]}]
+    list [expr {abs($findRight - $replRight) <= 2}] \
+         [.find.rr.rep cget -style] [.find.rr.all cget -style]
+} -result {1 FindAction.TButton FindAction.TButton}
+
 # ---- go to line (modal, generated events) -------------------------------
 test ui-5.1 {Ctrl+G then Go jumps the caret to the line} -setup {ui_reset} -body {
     [els::T] insert end "L1\nL2\nL3\nL4\nL5\nL6"
@@ -329,8 +342,18 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     els::about
     catch {wm withdraw .about}
     set isWin   [winfo exists .about]
-    set name    [.about.row.txt.name cget -text]
-    set hasicon [expr {[winfo exists .about.row.icon] || !$::els::iconLoaded}]
+    set name    [.about.top.name cget -text]
+    set hasicon [expr {[winfo exists .about.top.icon] || !$::els::iconLoaded}]
+    set iconBig [expr {!$::els::iconLoaded
+                       || [image height [.about.top.icon cget -image]] >= 120}]
+    set aligned [expr {!$::els::iconLoaded
+                       || abs(([winfo y .about.top.icon] + [winfo height .about.top.icon] / 2)
+                              - ([winfo y .about.top.name] + [winfo height .about.top.name] / 2)) <= 2}]
+    set centered [expr {[.about.body.tag cget -anchor] eq "center"
+                        && [.about.body.copy cget -anchor] eq "center"
+                        && [.about.body.ver cget -anchor] eq "center"
+                        && [.about.body.lic cget -anchor] eq "center"}]
+    set bodyOrder [winfo children .about.body]
     # gather every label's text in the window, recursively
     set texts {} ; set stack [list .about]
     while {[llength $stack]} {
@@ -344,8 +367,11 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     set hascopy [string match -nocase *Vercauteren* $blob]
     set haslic  [string match -nocase *MIT* $blob]
     destroy .about ; focus [els::T]
-    list $isWin $name $hasicon $tech $hasprog $hascopy $haslic
-} -result {1 els 1 0 1 1 1}
+    list $isWin $name $hasicon $iconBig $aligned $centered \
+         [expr {[lindex $bodyOrder end-1] eq ".about.body.ver"}] \
+         [expr {[lindex $bodyOrder end] eq ".about.body.lic"}] \
+         $tech $hasprog $hascopy $haslic
+} -result {1 els 1 1 1 1 1 1 0 1 1 1}
 
 test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup {ui_reset} -body {
     els::shortcuts
@@ -434,6 +460,110 @@ test recent-1.5 {recent survives a config save / load round-trip} -setup {ui_res
     lmap p $::els::recent {file tail $p}
 } -result {b.txt a.txt}
 
+test recent-1.6 {Open Recent menu exposes a maintain-list window, not a removal submenu} -setup {ui_reset} -body {
+    set ::els::recent {}
+    els::recent_add "C:/keep/a.txt"
+    set labels {}
+    for {set i 0} {$i <= [.menu.file.recent index end]} {incr i} {
+        if {[.menu.file.recent type $i] ne "separator"} {
+            lappend labels [.menu.file.recent entrycget $i -label]
+        }
+    }
+    .menu.file.recent invoke "Maintain List..."
+    set exists [winfo exists .recent]
+    set min [wm minsize .recent]
+    set buttonStyle [.recent.f.buttons.open cget -style]
+    set req [winfo reqwidth .recent]
+    catch {destroy .recent}
+    list [expr {"Maintain List..." in $labels}] \
+         [expr {"Remove from List" ni $labels}] $exists \
+         [expr {[lindex $min 0] >= $req}] $buttonStyle
+} -result {1 1 1 1 Dialog.TButton}
+
+test recent-1.7 {recent manager removes selected and missing entries} -setup {ui_reset} -body {
+    set ::els::recent {}
+    set keep [els_tmpfile recent_keep.txt "keep\n"]
+    set miss [file join $::ELS_TMP recent_missing.txt]
+    catch {file delete -force $miss}
+    els::recent_add $keep
+    els::recent_add $miss
+    els::recent_manage
+    catch {wm withdraw .recent}
+    .recent.f.list selection clear 0 end
+    .recent.f.list selection set 0
+    els::recent_manage_remove
+    set afterRemove [lmap p $::els::recent {file tail $p}]
+    els::recent_manage_remove_missing
+    set afterMissing [lmap p $::els::recent {file tail $p}]
+    catch {destroy .recent}
+    list $afterRemove $afterMissing
+} -result {recent_keep.txt recent_keep.txt}
+
+test recent-1.8 {recent manager clear asks once and empties the list} -setup {ui_reset} -body {
+    set ::els::recent {}
+    els::recent_add "C:/keep/a.txt"
+    els::recent_manage
+    catch {wm withdraw .recent}
+    els::recent_manage_clear
+    set n [llength $::els::recent]
+    catch {destroy .recent}
+    set n
+} -result 0
+
+test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
+    set ::els::word_wrap 1
+    els::set_wrap
+    set ::els::word_wrap 0
+    [els::T] configure -wrap none
+    els::load_geometry
+    list $::els::word_wrap [[els::T] cget -wrap]
+} -result {1 word}
+
+test cfg-0.2 {restore previous session defaults on and is exposed as a setting} -setup {ui_reset} -body {
+    set labels {}
+    for {set i 0} {$i <= [.menu.file index end]} {incr i} {
+        if {[.menu.file type $i] ne "separator"} {
+            lappend labels [.menu.file entrycget $i -label]
+        }
+    }
+    list $::els::restore_session [expr {"Restore Previous Session" in $labels}]
+} -result {1 1}
+
+test cfg-0.3 {session files and active file survive a config save / load round-trip} -setup {ui_reset} -body {
+    set p1 [els_tmpfile session_one.txt "one\n"]
+    set p2 [els_tmpfile session_two.txt "two\n"]
+    set id1 [els::open $p1]
+    set id2 [els::open $p2]
+    els::switch_to $id1
+    els::save_geometry
+    set ::els::session_files {}
+    set ::els::session_active ""
+    set ::els::restore_session 0
+    els::load_geometry
+    list $::els::restore_session \
+         [lmap p $::els::session_files {file tail $p}] \
+         [file tail $::els::session_active] \
+         [expr {$id2 ne ""}]
+} -result {1 {session_one.txt session_two.txt} session_one.txt 1}
+
+test cfg-0.4 {session restore reopens existing files and restores the active tab} -setup {ui_reset} -body {
+    set p1 [els_tmpfile restore_one.txt "one\n"]
+    set p2 [els_tmpfile restore_two.txt "two\n"]
+    set miss [file join $::ELS_TMP restore_missing.txt]
+    catch {file delete -force $miss}
+    set ::els::session_files [list $p1 $miss $p2]
+    set ::els::session_active [file normalize $p2]
+    set restored [els::session_restore]
+    set tails [lmap id $::els::docs {file tail $::els::docPath($id)}]
+    list $restored $tails [file tail $::els::docPath($::els::active)]
+} -result {2 {restore_one.txt restore_two.txt} restore_two.txt}
+
+test cfg-0.5 {turning restore previous session off persists the setting} -setup {ui_reset} -body {
+    .menu.file invoke "Restore Previous Session"
+    set conf [raw_read $::els::config_path]
+    list $::els::restore_session [dict get $conf restore_session]
+} -result {0 0}
+
 # ---- update check -------------------------------------------------------
 test update-1.1 {version_gt compares dotted versions; junk is never greater} -setup {els_reset} -body {
     list [els::version_gt 0.18 0.17] [els::version_gt 0.15 0.15] \
@@ -459,7 +589,7 @@ test cfg-1.1 {config_candidates yields a portable path and a LOCALAPPDATA path} 
     lassign [els::config_candidates] near appdata
     list [file tail $near] [file tail $appdata] \
          [string match "*els*" $appdata] [expr {$near ne $appdata}]
-} -result {config.tcl config.tcl 1 1}
+} -result {els.conf els.conf 1 1}
 
 test cfg-1.2 {resolve_existing finds the LOCALAPPDATA config when present} -setup {els_reset} -body {
     lassign [els::config_candidates] near appdata
@@ -471,7 +601,7 @@ test cfg-1.2 {resolve_existing finds the LOCALAPPDATA config when present} -setu
     set found  [els::config_resolve_existing]
     set picked [string equal $::els::config_path $appdata]
     catch {file delete -force [file dirname $appdata]}
-    set ::els::config_path [file join $::ELS_TMP config.tcl]   ;# restore hermetic default
+    set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
     list $found $picked
 } -result {1 1}
 
@@ -483,6 +613,21 @@ test cfg-1.3 {the first-run dialog applies the chosen location and closes} -setu
     set chosen $::els::config_path
     set gone [expr {![winfo exists .cfgask]}]
     catch {file delete -force [file dirname $appdata]}
-    set ::els::config_path [file join $::ELS_TMP config.tcl]   ;# restore hermetic default
+    set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
     list [string equal $chosen $appdata] $gone
 } -result {1 1}
+
+test cfg-1.4 {legacy config.tcl is migrated to els.conf} -setup {els_reset} -body {
+    lassign [els::config_candidates] near appdata
+    lassign [els::config_legacy_candidates] oldNear oldAppdata
+    catch {file delete -force $near $appdata $oldNear $oldAppdata [file dirname $appdata]}
+    file mkdir [file dirname $oldAppdata]
+    set fh [open $oldAppdata w] ; puts $fh [dict create geometry 810x610 word_wrap 1] ; close $fh
+    set ::els::config_path ""
+    set found [els::config_resolve_existing]
+    set migrated [file exists $appdata]
+    set picked [string equal $::els::config_path $appdata]
+    catch {file delete -force [file dirname $appdata]}
+    set ::els::config_path [file join $::ELS_TMP els.conf]
+    list $found $migrated $picked
+} -result {1 1 1}
