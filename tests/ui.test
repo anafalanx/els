@@ -786,3 +786,55 @@ test cfg-1.4 {legacy config.tcl is migrated to els.conf} -setup {els_reset} -bod
     set ::els::config_path [file join $::ELS_TMP els.conf]
     list $found $migrated $picked
 } -result {1 1 1}
+
+# ---- regression: bug-hunt fixes (data loss / corruption) ----------------
+test reg-1.1 {Reopen-with-Encoding keeps edits saved since open (docRaw refreshed on save)} -setup {ui_reset} -body {
+    set p [els_tmpfile reg11.txt "original line\n"]
+    els::open $p
+    set w [els::T]
+    $w insert end "EDITED ADDITION\n"
+    els::save
+    els::reopen_with utf-8 0
+    string match *EDITED* [$w get 1.0 "end - 1 char"]
+} -result 1
+
+test reg-1.2 {Reopen-with-Encoding on a Save-As'd new document keeps its content} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "BRAND NEW CONTENT\n"
+    set ::els_test_savefile [file join $::ELS_TMP reg12.txt]
+    els::saveas
+    els::reopen_with utf-8 0
+    expr {[$w get 1.0 "end - 1 char"] ne ""}
+} -result 1
+
+test reg-2.1 {Replace uses the floating findOne tag, not a stale index, after a manual edit} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "cat cat cat"
+    set ::els::find_q cat
+    els::find_update
+    $w insert 1.0 "XYZ- "
+    set ::els::find_r dog
+    els::find_replace_one
+    set t [$w get 1.0 "end - 1 char"]
+    list [string match *XYZ-* $t] [regexp -all dog $t]
+} -result {1 1}
+
+test reg-3.1 {zero-width regex yields no matches and Replace All does not corrupt} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "abc"
+    set ::els::find_regex 1 ; set ::els::find_q {x*}
+    els::find_update
+    set m [llength $::els::find_matches]
+    set ::els::find_r Q
+    els::find_replace_all
+    list $m [$w get 1.0 "end - 1 char"]
+} -result {0 abc}
+
+test reg-4.1 {Ctrl+H in the find field switches to replace without eating a character} -setup {ui_reset} -body {
+    els::find_show find
+    set e .find.fr.q
+    focus -force $e
+    $e delete 0 end ; $e insert 0 foobar ; $e icursor end ; update
+    event generate $e <Control-h> ; update
+    list [$e get] $::els::find_mode
+} -result {foobar replace}

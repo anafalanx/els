@@ -1625,6 +1625,11 @@ proc els::save {} {
         return
     }
     $w edit modified 0
+    # keep the cached raw bytes in sync with what is now on disk, so a later
+    # "Reopen with Encoding" re-decodes the SAVED content rather than reverting
+    # to the bytes loaded at open time (which silently discarded saved edits, and
+    # blanked a Save-As'd new document whose docRaw was still empty)
+    set ::els::docRaw($active) $bytes
     els::update_tab $active
     els::settitle
 }
@@ -1907,6 +1912,11 @@ proc els::build_findbar {} {
     bind .find.fr.q <Escape>       { els::find_hide    ; break }
     bind .find.rr.r <Return>       { els::find_replace_one ; break }
     bind .find.rr.r <Escape>       { els::find_hide    ; break }
+    # Ctrl+H is the Replace accelerator; without this, the ttk::entry TEntry class
+    # binding (Control-h -> Backspace) fires first and eats a character from the
+    # search/replacement text.  A widget-level binding with break pre-empts it.
+    bind .find.fr.q <Control-h>    { els::find_show replace ; break }
+    bind .find.rr.r <Control-h>    { els::find_show replace ; break }
 }
 
 # ---- find-bar polish: tooltips, flash, regex help, history --------------
@@ -2120,11 +2130,17 @@ proc els::find_update {} {
     set lens $::els::find_lens
     set i 0
     foreach s $starts {
-        set e [$w index "$s + [lindex $lens $i] chars"]
+        set L [lindex $lens $i]
+        incr i
+        # skip zero-width matches (x*, ^, \d* on non-digits, …): they are
+        # invisible, navigate to nothing, and Replace All would turn each into an
+        # insert between every character, corrupting the buffer
+        if {$L <= 0} { continue }
+        set e [$w index "$s + $L chars"]
         $w tag add findAll $s $e
         lappend find_matches [list $s $e]
-        incr i
     }
+    if {![llength $find_matches]} { set find_count "No results" ; return }
     set n [llength $find_matches]
     set ins [$w index insert]
     set cur 0
@@ -2180,11 +2196,15 @@ proc els::repl_for {w s e} {
 }
 
 proc els::find_replace_one {} {
-    variable find_matches ; variable find_current
     set w [els::T]
     if {$w eq ""} { return }
-    if {![llength $find_matches] || $find_current < 0} { els::find_step 1 ; return }
-    lassign [lindex $find_matches $find_current] s e
+    # Use the findOne TAG range, which floats with edits, not the cached
+    # find_matches index, which does not: a direct buffer edit (the find bar can
+    # stay open while you type in the document) leaves the cached index pointing
+    # at the wrong span, so Replace would overwrite unrelated text.
+    set range [$w tag ranges findOne]
+    if {[llength $range] != 2} { els::find_step 1 ; return }
+    lassign $range s e
     set repl [els::repl_for $w $s $e]
     $w edit separator
     $w replace $s $e $repl
@@ -2193,13 +2213,17 @@ proc els::find_replace_one {} {
 }
 
 proc els::find_replace_all {} {
-    variable find_matches
     set w [els::T]
-    if {$w eq "" || ![llength $find_matches]} { return }
-    set n [llength $find_matches]
+    if {$w eq ""} { return }
+    # findAll tag ranges float with edits (cached find_matches indices do not),
+    # and are returned sorted; replace in reverse so earlier ranges stay valid.
+    set ranges [$w tag ranges findAll]
+    set n [expr {[llength $ranges] / 2}]
+    if {$n == 0} { return }
     $w edit separator
-    foreach m [lreverse $find_matches] {
-        lassign $m s e
+    for {set i [expr {[llength $ranges] - 2}]} {$i >= 0} {incr i -2} {
+        set s [lindex $ranges $i]
+        set e [lindex $ranges [expr {$i + 1}]]
         $w replace $s $e [els::repl_for $w $s $e]
     }
     $w edit separator
