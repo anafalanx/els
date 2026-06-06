@@ -24,6 +24,10 @@ Grab the latest **`els.exe`** from the [Releases](../../releases) page. It's one
 file, nothing to install. It's unsigned, so Windows SmartScreen may warn on
 first launch: choose **More info → Run anyway**.
 
+To make els available for `.txt` files, use **Help > Set Up File
+Associations...**. els registers itself as an option and opens Windows Default
+Apps so you can choose it there.
+
 ## Features
 
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
@@ -105,7 +109,7 @@ basis of els's encoding auto-detection.
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.23**: a working editor, evolving.
+it, or build it yourself. Currently **v0.24**: a working editor, evolving.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).

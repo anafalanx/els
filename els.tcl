@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.23"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.24"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -545,6 +545,72 @@ proc els::recent_manage_clear {} {
     if {$ans eq "yes"} { els::recent_clear }
 }
 
+# ---- Windows integration ------------------------------------------------
+# Register els as an available .txt handler; Windows still lets the user choose
+# the default app.  This writes only to HKCU, so it needs no admin rights.
+proc els::association_exe {} {
+    set exe [file normalize [info nameofexecutable]]
+    if {[string match {//zipfs:*} [info script]]} { return $exe }
+    set near [file join [file dirname [file normalize [info script]]] els.exe]
+    if {[file exists $near]} { return [file normalize $near] }
+    return ""
+}
+proc els::assoc_commands {exe} {
+    set exe [file nativename [file normalize $exe]]
+    set appExe [file tail $exe]
+    set progid {els.txt}
+    set openCmd [format {"%s" "%%1"} $exe]
+    set icon [format {"%s",0} $exe]
+    set appKey "HKCU\\Software\\Classes\\Applications\\$appExe"
+    set capKey {HKCU\Software\anafalanx\els\Capabilities}
+    return [list \
+        [list reg.exe add {HKCU\Software\Classes\els.txt} /ve /d {els Text File} /f] \
+        [list reg.exe add {HKCU\Software\Classes\els.txt\DefaultIcon} /ve /d $icon /f] \
+        [list reg.exe add {HKCU\Software\Classes\els.txt\shell\open\command} /ve /d $openCmd /f] \
+        [list reg.exe add {HKCU\Software\Classes\.txt\OpenWithProgids} /v $progid /t REG_SZ /d "" /f] \
+        [list reg.exe add $appKey /v FriendlyAppName /t REG_SZ /d els /f] \
+        [list reg.exe add "$appKey\\SupportedTypes" /v .txt /t REG_SZ /d "" /f] \
+        [list reg.exe add "$appKey\\shell\\open\\command" /ve /d $openCmd /f] \
+        [list reg.exe add $capKey /v ApplicationName /t REG_SZ /d els /f] \
+        [list reg.exe add $capKey /v ApplicationDescription /t REG_SZ /d {A tiny text editor for Windows.} /f] \
+        [list reg.exe add $capKey /v ApplicationIcon /t REG_SZ /d $icon /f] \
+        [list reg.exe add "$capKey\\FileAssociations" /v .txt /t REG_SZ /d $progid /f] \
+        [list reg.exe add {HKCU\Software\RegisteredApplications} /v els /t REG_SZ /d {Software\anafalanx\els\Capabilities} /f]]
+}
+proc els::assoc_run {cmd} {
+    exec {*}$cmd
+}
+proc els::assoc_register_txt {{exe ""}} {
+    if {$exe eq ""} { set exe [els::association_exe] }
+    if {$exe eq "" || ![file exists $exe]} {
+        error "Cannot find els.exe to register."
+    }
+    foreach cmd [els::assoc_commands $exe] {
+        els::assoc_run $cmd
+    }
+}
+proc els::open_default_apps {} {
+    if {[catch {exec cmd.exe /c start "" ms-settings:defaultapps &}]} {
+        els::open_url ms-settings:defaultapps
+    }
+}
+proc els::setup_file_associations {{exe ""}} {
+    if {$::tcl_platform(platform) ne "windows"} {
+        tk_messageBox -parent . -icon info -title els \
+            -message "File association setup is only available on Windows."
+        return 0
+    }
+    if {[catch {els::assoc_register_txt $exe} err]} {
+        tk_messageBox -parent . -icon error -title els \
+            -message "Could not register els for .txt files:\n$err"
+        return 0
+    }
+    tk_messageBox -parent . -icon info -title els \
+        -message "els is registered as an option for .txt files.\n\nWindows Settings will open so you can choose els as the default app."
+    els::open_default_apps
+    return 1
+}
+
 # ---- flat chrome styling ------------------------------------------------
 # The native 'vista' ttk theme can't be recoloured or flattened, so we base
 # the chrome on 'clam' (full colour control) and build flat, borderless styles.
@@ -667,6 +733,7 @@ proc els::build {} {
     menu .menu.help
     .menu add cascade -label Help -menu .menu.help
     .menu.help add command -label "Keyboard Shortcuts" -command els::shortcuts
+    .menu.help add command -label "Set Up File Associations..." -command els::setup_file_associations
     .menu.help add separator
     .menu.help add command -label "About els" -command els::about
 
