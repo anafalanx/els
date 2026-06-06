@@ -13,6 +13,8 @@ proc ui_reset {} {
     set ::els::find_matches {} ; set ::els::find_current -1
     set ::els::show_ws 0
     set ::els_test_openfile "" ; set ::els_test_savefile "" ; set ::els_test_mbanswer yes
+    set ::els_test_open_args {} ; set ::els_test_save_args {}
+    set ::els_test_popup_args {}
 }
 # run the real event loop for ms (lets debounced/idle `after`s fire)
 proc ui_settle {{ms 220}} { set ::__s 0 ; after $ms {set ::__s 1} ; vwait ::__s }
@@ -314,6 +316,14 @@ test ui-5.1 {Ctrl+G then Go jumps the caret to the line} -setup {ui_reset} -body
     list $built [cur_line] [winfo exists .goto]
 } -result {1 4 0}
 
+test ui-5.2 {Go To Line buttons look like dialog buttons} -setup {ui_reset} -body {
+    els::goto_line
+    catch {wm withdraw .goto}
+    set styles [list [.goto.f.b.ok cget -style] [.goto.f.b.cancel cget -style]]
+    destroy .goto
+    set styles
+} -result {Dialog.TButton Dialog.TButton}
+
 # ---- show whitespace (menu toggle) --------------------------------------
 test ui-6.1 {Show Whitespace tags spaces, tabs and trailing distinctly} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "a b\tindented   \nclean" ; update
@@ -366,6 +376,46 @@ test ui-8.3 {Edit menu opens Find and Replace} -setup {ui_reset} -body {
     list $f [winfo ismapped .find] [winfo ismapped .find.rr]
 } -result {1 1 1}
 
+test ui-8.3a {Open and Save As dialogs default to .txt files} -setup {ui_reset} -body {
+    .menu.file invoke "Open..." ; update
+    set openTypes [dict get $::els_test_open_args -filetypes]
+    set ::els_test_savefile [file join $::ELS_TMP dialog_default.txt]
+    .menu.file invoke "Save As..." ; update
+    set saveTypes [dict get $::els_test_save_args -filetypes]
+    list [lindex [lindex $openTypes 0] 0] \
+         [lindex [lindex $openTypes 0] 1] \
+         [lindex [lindex $saveTypes 0] 0] \
+         [lindex [lindex $saveTypes 0] 1] \
+         [dict get $::els_test_save_args -defaultextension]
+} -result {Text .txt Text .txt .txt}
+
+test ui-8.3b {opening an already-open file switches to its tab} -setup {ui_reset} -body {
+    set p1 [els_tmpfile already_open_one.txt "one\n"]
+    set p2 [els_tmpfile already_open_two.txt "two\n"]
+    set ::els_test_openfile $p1
+    .menu.file invoke "Open..." ; update
+    set id1 $::els::active
+    set ::els_test_openfile $p2
+    .menu.file invoke "Open..." ; update
+    set id2 $::els::active
+    set before [llength $::els::docs]
+    set ::els_test_openfile $p1
+    .menu.file invoke "Open..." ; update
+    list $before [llength $::els::docs] \
+         [expr {$::els::active eq $id1}] \
+         [expr {$::els::active ne $id2}]
+} -result {2 2 1 1}
+
+test ui-8.3c {encoding popup reserves room for cascades inside the window} -setup {ui_reset} -body {
+    event generate .sb.enc <ButtonPress-1> -x 5 -y 5
+    update
+    set menu [lindex $::els_test_popup_args 0]
+    set x [lindex $::els_test_popup_args 1]
+    set reserve [els::menu_cascade_reserve $menu]
+    set right [expr {[winfo rootx .] + [winfo width .]}]
+    expr {$reserve > 0 && $x + [winfo reqwidth $menu] + $reserve <= $right}
+} -result 1
+
 test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "keep" ; $w edit separator
     $w insert end "DROP"
@@ -398,6 +448,7 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     }
     set blob [join $texts \n]
     set tech    [string match -nocase *tcl* $blob]
+    set hasfocus [string match -nocase *focused?text?editor* $blob]
     set hasprog [string match -nocase *programmable* $blob]
     set hascopy [string match -nocase *Vercauteren* $blob]
     set haslic  [string match -nocase *MIT* $blob]
@@ -405,8 +456,8 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     list $isWin $name $hasicon $iconBig $aligned $centered \
          [expr {[lindex $bodyOrder end-1] eq ".about.body.ver"}] \
          [expr {[lindex $bodyOrder end] eq ".about.body.lic"}] \
-         $tech $hasprog $hascopy $haslic
-} -result {1 els 1 1 1 1 1 1 0 1 1 1}
+         $tech $hasfocus $hasprog $hascopy $haslic
+} -result {1 els 1 1 1 1 1 1 0 1 0 1 1}
 
 test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup {ui_reset} -body {
     els::shortcuts

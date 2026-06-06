@@ -37,18 +37,21 @@ set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
 
 # Replace native dialogs with stubs so a stray dialog never blocks a test run.
-proc ::tk_getOpenFile {args} { return $::els_test_openfile }
-proc ::tk_getSaveFile {args} { return $::els_test_savefile }
+proc ::tk_getOpenFile {args} { set ::els_test_open_args $args ; return $::els_test_openfile }
+proc ::tk_getSaveFile {args} { set ::els_test_save_args $args ; return $::els_test_savefile }
 proc ::tk_messageBox  {args} { return $::els_test_mbanswer }
 set ::els_test_openfile ""
 set ::els_test_savefile ""
+set ::els_test_open_args {}
+set ::els_test_save_args {}
 set ::els_test_mbanswer "yes"
 
 # Stub the OS-level menu post.  A real `tk_popup` in an unfocused/automated
 # context blocks (waiting on a grab) and would flash a grabbing menu on the
 # user's screen.  The real <Button-1> bindings still fire and build/configure
 # the real menus; tests select entries via the canonical `<menu> invoke`.
-proc ::tk_popup {args} {}
+proc ::tk_popup {args} { set ::els_test_popup_args $args }
+set ::els_test_popup_args {}
 
 # Neutralize input grabs in tests: the go-to-line modal grabs, which could trap
 # the user's input during an automated run. (Tests never assert on grab state.)

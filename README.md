@@ -1,6 +1,6 @@
 # els
 
-A tiny, programmable text editor for Windows: calm, opinionated, no-frills.
+A tiny text editor for Windows: calm, opinionated, no-frills.
 
 ![els editing a whimsical plain text note](docs/img/editor-whimsy-0.21.png)
 
@@ -105,7 +105,7 @@ basis of els's encoding auto-detection.
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.22**: a working editor, evolving.
+it, or build it yourself. Currently **v0.23**: a working editor, evolving.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).

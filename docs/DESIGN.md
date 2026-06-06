@@ -25,8 +25,8 @@ what Tk 9 can actually render well.
 4. **Calm is restraint plus speed.** A steady caret, no animation, instant
    scroll. The feeling of a good editor "disappearing" is latency, not
    decoration.
-5. **No knobs.** No settings for colour, font, or caret. Advanced overrides, if
-   ever, come through scripting, never a preferences panel.
+5. **Few knobs.** Settings should earn their place. Keep colour, font, and caret
+   choices out of the core UI unless they clearly serve everyday editing.
 
 ## The look
 

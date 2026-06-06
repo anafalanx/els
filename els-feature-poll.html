@@ -206,8 +206,8 @@
     <h1>els Feature Poll</h1>
     <p class="hint">
       Tick anything you want to consider for els. The previous roadmap picks
-      are pre-selected; installation, update, scripting, AI-help, and larger
-      editor features have been added for a broader pass.
+      are pre-selected; installation, update, and larger editor features have
+      been added for a broader pass.
     </p>
     <div class="selected-row">
       <textarea id="selected" readonly aria-label="Selected feature IDs"></textarea>
@@ -224,7 +224,7 @@
 
   <main>
     <div class="toolbar">
-      <input id="filter" type="search" placeholder="Filter features, e.g. installer, macro, search, AI, portable">
+      <input id="filter" type="search" placeholder="Filter features, e.g. installer, search, portable, spell">
       <div class="legend">
         <span class="tag planned">planned</span>
         <span class="tag big">larger editor</span>
@@ -379,7 +379,7 @@
           ["S10", "Incremental search mini-mode", "Find-as-you-type without opening the full bar.", ["big"]],
           ["S11", "Bookmark current line", "Mark important lines and jump between them.", ["big"]],
           ["S12", "Go to symbol / heading", "Navigate Markdown headings or simple code symbols.", ["big", "caution"]],
-          ["S13", "Go to matching bracket", "Useful for scripts and structured text.", ["big"]],
+          ["S13", "Go to matching bracket", "Useful for structured text.", ["big"]],
           ["S14", "Regex library / saved searches", "Named reusable regex snippets.", ["big"]],
           ["S15", "Search within selection", "Limit Find/Replace to selected text.", ["big"]]
         ]
@@ -455,44 +455,6 @@
         ]
       },
       {
-        name: "Programmability / External Tools",
-        note: "The EditPad Pro-like area: let power users wire els into their own workflow.",
-        items: [
-          ["X1", "Tcl scripting API", "Expose editor, documents, selections, menus, dialogs, and config to Tcl scripts.", ["big", "planned"]],
-          ["X2", "Scripts menu", "User scripts appear in a menu with optional shortcuts.", ["big"]],
-          ["X3", "Startup scripts", "Run trusted user scripts at startup.", ["big", "caution"]],
-          ["X4", "Script manager", "Enable/disable/reorder scripts, show errors.", ["big"]],
-          ["X5", "External tools manager", "Define commands with file/path/selection placeholders.", ["big"]],
-          ["X6", "Run tool on current file", "Pass the current file path to an external program.", ["big"]],
-          ["X7", "Filter selection through tool", "Pipe selection to a command and replace it with output.", ["big", "caution"]],
-          ["X8", "Capture tool output panel", "Show stdout/stderr and exit code in els.", ["big"]],
-          ["X9", "Tool environment variables", "Expose ELS_FILE, ELS_SELECTION, ELS_ENCODING, etc.", ["big"]],
-          ["X10", "Tool working-directory choices", "File folder, workspace folder, els folder, custom.", ["big"]],
-          ["X11", "Async tools with cancel", "Long-running external tools do not block the editor.", ["big"]],
-          ["X12", "Scriptable commands palette", "Scripts and built-ins all appear as commands.", ["big", "caution"]],
-          ["X13", "Event hooks", "onOpen, onSave, onClose, onSelectionChange hooks.", ["big", "caution"]],
-          ["X14", "User script examples folder", "Curated scripts for common tasks.", ["big"]],
-          ["X15", "Script permissions / trust model", "Make it explicit when scripts can run commands or touch files.", ["big", "caution"]]
-        ]
-      },
-      {
-        name: "AI-Assisted Scripting",
-        note: "Special provisions for users who ask AI tools to write Tcl scripts for els.",
-        items: [
-          ["A1", "API Reference window", "Exhaustive scripting API reference in Help.", ["planned"]],
-          ["A2", "Copy All API Reference", "One-click copy for pasting into an AI chat.", ["planned"]],
-          ["A3", "Copy compact API prompt", "Shorter AI-ready brief with conventions and examples.", ["planned"]],
-          ["A4", "Generate script scaffold", "Create a new Tcl script with metadata and boilerplate.", ["big"]],
-          ["A5", "Script lint / sanity check", "Run simple checks before enabling a user script.", ["big"]],
-          ["A6", "Dry-run script mode", "Run scripts against a temp document or with writes disabled.", ["big", "caution"]],
-          ["A7", "Error report copy button", "Copy stack trace, script path, els version, and API version.", ["big"]],
-          ["A8", "Examples for common AI requests", "Rename tabs, transform selection, run tools, insert templates.", ["big"]],
-          ["A9", "API versioning", "Stable scripting API number so AI-generated scripts can target it.", ["big"]],
-          ["A10", "Security guidance page", "Clear explanation of trusted local scripts and external commands.", ["big", "caution"]],
-          ["A11", "Script package format", "A folder with manifest, Tcl file, README, and examples.", ["big", "caution"]]
-        ]
-      },
-      {
         name: "Preferences / Help / Documentation",
         note: "Where configuration lives without making the editor feel busy.",
         items: [
@@ -502,7 +464,7 @@
           ["H6", "Welcome / first-run choices page", "Config location, update preference, restore-session preference.", ["big"]],
           ["H7", "Reset settings command", "Restore default settings after confirmation.", []],
           ["H8", "Open config file command", "Open els.conf directly for inspection.", []],
-          ["H9", "Open planning/work docs", "Quick access to README, design doc, API docs.", []],
+          ["H9", "Open planning/work docs", "Quick access to README and design notes.", []],
           ["H10", "Keyboard shortcut search", "Filter the shortcuts window.", ["big"]],
           ["H11", "Accessibility notes", "Document keyboard use, contrast, font choices.", ["big"]],
           ["H12", "Troubleshooting page", "Config location, SmartScreen, update checks, encoding issues.", ["big"]]

@@ -1,8 +1,8 @@
 #!/usr/bin/env wish
-# els — a tiny, scriptable text editor.  Tcl/Tk 9 edition.
+# els — a tiny, focused text editor.  Tcl/Tk 9 edition.
 #
 # This is the rewrite of the C23/Lua els (which shipped through v0.3, archived
-# in ../els-c).  Tk's Text widget is the buffer; Tcl is the scripting language.
+# in ../els-c).  Tk's Text widget is the buffer; Tcl/Tk supplies the UI runtime.
 # Design language carried over from v0.3: calm grey page, the signature red
 # caret, restrained chrome, opinionated (few knobs).
 #
@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.22"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.23"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -317,6 +317,15 @@ proc els::session_path {p} {
     if {$p eq ""} { return "" }
     if {[catch {file normalize $p} n]} { return "" }
     return $n
+}
+proc els::same_path {a b} {
+    set pa [els::session_path $a]
+    set pb [els::session_path $b]
+    if {$pa eq "" || $pb eq ""} { return 0 }
+    if {$::tcl_platform(platform) eq "windows"} {
+        return [string equal -nocase $pa $pb]
+    }
+    return [string equal $pa $pb]
 }
 proc els::session_sanitize {list} {
     set out {}
@@ -1338,6 +1347,21 @@ proc els::build_enc_popup {} {
     .encpop add cascade -label "Reopen with Encoding" -menu [els::enc_menu .encpop.re reopen]
     .encpop add cascade -label "Set Save Encoding"    -menu [els::enc_menu .encpop.sv save]
 }
+proc els::menu_cascade_reserve {menu {depth 1}} {
+    if {$depth <= 0 || ![winfo exists $menu]} { return 0 }
+    set best 0
+    set end [$menu index end]
+    if {$end eq "none"} { return 0 }
+    for {set i 0} {$i <= $end} {incr i} {
+        if {[$menu type $i] ne "cascade"} { continue }
+        set sub [$menu entrycget $i -menu]
+        if {$sub eq "" || ![winfo exists $sub]} { continue }
+        set width [winfo reqwidth $sub]
+        set nested [els::menu_cascade_reserve $sub [expr {$depth - 1}]]
+        set best [expr {max($best, $width + $nested)}]
+    }
+    return $best
+}
 # Post a status-bar picker UPWARD from its indicator, kept inside the main
 # window — a downward menu spills below the window's bottom sill (off-screen).
 proc els::popup_up {menu widget} {
@@ -1345,9 +1369,11 @@ proc els::popup_up {menu widget} {
     set mw [winfo reqwidth $menu] ; set mh [winfo reqheight $menu]
     set nx [winfo rootx $widget]  ; set ny [expr {[winfo rooty $widget] - $mh}]
     set winl [winfo rootx .] ; set winr [expr {$winl + [winfo width .]}]
-    if {$nx + $mw > $winr} { set nx [expr {$winr - $mw}] }
-    if {$nx < $winl}             { set nx $winl }
-    if {$ny < [winfo rooty .]}   { set ny [winfo rooty .] }
+    set reserve [els::menu_cascade_reserve $menu]
+    set maxx [expr {$winr - $mw - $reserve}]
+    if {$nx > $maxx} { set nx $maxx }
+    if {$nx < $winl}           { set nx $winl }
+    if {$ny < [winfo rooty .]} { set ny [winfo rooty .] }
     tk_popup $menu $nx $ny
 }
 proc els::popup_enc_menu {} {
@@ -1426,13 +1452,13 @@ proc els::set_eol {v} {
 }
 
 # ---- file operations ----------------------------------------------------
-# Filters for the Open / Save dialogs.  Without -filetypes the Windows dialog
-# shows an empty "Save as type" box; "All files" is first so it stays the
-# default and els never forces an extension onto a name.
+# Filters for the Open / Save dialogs.  Text files are first so .txt is the
+# default type, while All files remains available for extensionless or unusual
+# names.
 proc els::filetypes {} {
     return {
-        {{All files}      *}
         {{Text}           {.txt}}
+        {{All files}      *}
         {{Markdown}       {.md .markdown}}
         {{Tcl}            {.tcl}}
         {{C / C++}        {.c .h .cpp .hpp .cc}}
@@ -1448,8 +1474,16 @@ proc els::open {{p ""} {quiet 0}} {
         set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
         if {$p eq ""} { return }
     }
+    if {![catch {file normalize $p} np]} { set p $np }
     variable active
     variable docPath
+    foreach id $::els::docs {
+        if {[info exists docPath($id)] && [els::same_path $docPath($id) $p]} {
+            els::switch_to $id
+            els::recent_add $p
+            return $id
+        }
+    }
     if {[els::pristine $active]} {
         set id $active
     } else {
@@ -1532,6 +1566,7 @@ proc els::saveas {} {
     variable docPath
     if {$active eq ""} { return }
     set p [tk_getSaveFile -parent . -filetypes [els::filetypes] \
+               -defaultextension .txt \
                -initialfile [els::doc_name $active]]
     if {$p eq ""} { return }
     set docPath($active) $p
@@ -1591,7 +1626,7 @@ proc els::about {} {
     if {$iconSize > 0} { grid rowconfigure .about.top 0 -minsize $iconSize }
     frame .about.body -bg $bg
     pack  .about.body -in .about.card -anchor center -pady {14 0}
-    label .about.body.tag -text "a programmable text editor" \
+    label .about.body.tag -text "a focused text editor" \
         -font elsUI -fg $::els::MUTED -bg $bg -anchor center
     pack  .about.body.tag -anchor center -pady {0 12}
     label .about.body.copy -text "© 2026 Vincent Vercauteren" \
@@ -2120,8 +2155,8 @@ proc els::goto_line {} {
     ttk::label $top.f.l -text "Line (1 - $max):" -font elsUI
     ttk::entry $top.f.e -width 10 -font elsMono
     ttk::frame $top.f.b
-    ttk::button $top.f.b.ok     -text "Go"     -command [list els::goto_do $top]
-    ttk::button $top.f.b.cancel -text "Cancel" -command [list destroy $top]
+    ttk::button $top.f.b.ok     -text "Go"     -style Dialog.TButton -command [list els::goto_do $top]
+    ttk::button $top.f.b.cancel -text "Cancel" -style Dialog.TButton -command [list destroy $top]
     pack $top.f.b.ok $top.f.b.cancel -side left -padx 3
     grid $top.f.l -row 0 -column 0 -sticky w
     grid $top.f.e -row 0 -column 1 -padx 6 -sticky ew
