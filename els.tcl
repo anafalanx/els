@@ -852,9 +852,10 @@ proc els::assoc_capability_exts {} {
 }
 # Every extension currently associated with els, by ANY mechanism — drives the
 # dialog dynamically so types set via Explorer's Open With (even ones not in our
-# curated list) show up.  We gather CANDIDATES cheaply from one recursive FileExts
-# query (exts with an els-pointing UserChoice, or an OpenWithProgids naming els.txt
-# or the per-extension <ext>_auto_file), then decide each candidate authoritatively
+# curated list) show up.  We gather CANDIDATES cheaply from two recursive queries
+# — FileExts (exts with an els-pointing UserChoice, or an OpenWithProgids naming
+# els.txt / the per-extension <ext>_auto_file) and Classes (per-ext auto ProgIDs
+# whose command was repointed to els) — then decide each candidate authoritatively
 # with ext_opens_with_els (which honors UserChoiceLatest > UserChoice > Classes).
 proc els::assoc_registered_exts {} {
     set found {}
@@ -878,6 +879,18 @@ proc els::assoc_registered_exts {} {
             } elseif {$sub eq "owp" && [regexp {^\s+(\S+)\s+REG_} $ln -> pname]} {
                 set lpn [string tolower $pname]
                 if {$lpn eq "els.txt" || $lpn eq "${e}_auto_file"} { dict set cands $e 1 }
+            }
+        }
+    }
+    # Also sweep Classes for Explorer's per-extension auto ProgIDs (<ext>_auto_file)
+    # whose open command was repointed to els — the "Open with > Always" mechanism,
+    # which can leave a type opening with els via Classes alone (no FileExts entry).
+    if {![catch {exec reg.exe query {HKCU\Software\Classes}} cls]} {
+        foreach ln [split $cls \n] {
+            if {[regexp {\\Classes\\([^\\\r]+_auto_file)\s*$} $ln -> pid]} {
+                if {[els::command_is_els [els::progid_command $pid]]} {
+                    dict set cands [string tolower [string range $pid 0 end-10]] 1
+                }
             }
         }
     }

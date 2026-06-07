@@ -680,6 +680,20 @@ test assoc-3.4 {Apply opens Default Apps only when a NEW type is added, not on r
     list $afterRemoval $afterAdd
 } -result {0 1}
 
+test assoc-3.5 {assoc_registered_exts discovers a NON-curated type set via Explorer's Classes auto ProgID (Open-With)} -setup {
+    ui_reset
+    set ::els_t_ext elsz9probe
+    set ::els_t_C   {HKCU\Software\Classes}
+    catch {exec reg.exe add "$::els_t_C\\.$::els_t_ext" /ve /d ${::els_t_ext}_auto_file /f}
+    catch {exec reg.exe add "$::els_t_C\\${::els_t_ext}_auto_file\\shell\\open\\command" /ve /d {"C:\x\els.exe" "%1"} /f}
+} -cleanup {
+    catch {exec reg.exe delete "$::els_t_C\\.$::els_t_ext" /f}
+    catch {exec reg.exe delete "$::els_t_C\\${::els_t_ext}_auto_file" /f}
+} -body {
+    list [els::ext_opens_with_els $::els_t_ext] \
+         [expr {$::els_t_ext in [els::assoc_registered_exts]}]
+} -result {1 1}
+
 test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
     set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]
     set ::els::docPath($::els::active) $p
