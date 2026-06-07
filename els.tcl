@@ -406,7 +406,7 @@ proc els::recent_clear {} {
 proc els::recent_open {p} {
     if {![file exists $p]} {
         set ans [tk_messageBox -parent . -icon question -type yesno -title els \
-            -message "This file no longer exists:\n[file nativename $p]\n\nRemove it from the list?"]
+            -message "This file no longer exists:\n[els::display_path $p]\n\nRemove it from the list?"]
         if {$ans eq "yes"} { els::recent_remove $p }
         return
     }
@@ -417,6 +417,7 @@ proc els::recent_open {p} {
 # character budget rather than pixel width — for places without a measurable
 # width, like a menu label.
 proc els::elide_path_chars {p max} {
+    set p [els::strip_ext_prefix $p]
     if {[string length $p] <= $max} { return $p }
     set parts [file split $p]
     set best ""
@@ -544,7 +545,7 @@ proc els::recent_detail_tip {} {
     set p [els::recent_manage_path]
     if {$p eq ""} { return "" }
     if {[els::elide_path $p [els::recent_detail_avail]] eq $p} { return "" }
-    return [file nativename $p]
+    return [els::display_path $p]
 }
 # Per-row hover tooltip for the recent listbox: when the cursor is over a row
 # whose displayed path is elided, show the full native path near the cursor.
@@ -562,7 +563,7 @@ proc els::recent_row_motion {x y rx ry} {
     set p [lindex $::els::recent $i]
     if {[$lb get $i] eq $p} { return }      ;# row not elided -> no tip
     set ::els::tip_after [after 550 \
-        [list els::tip_pop_at [file nativename $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
+        [list els::tip_pop_at [els::display_path $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
 }
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
@@ -1125,7 +1126,7 @@ proc els::tab_text {id} {
 proc els::tab_tip {id} {
     if {![info exists ::els::docPath($id)]} { return "" }
     set p $::els::docPath($id)
-    return [expr {$p eq "" ? "" : [file nativename $p]}]
+    return [expr {$p eq "" ? "" : [els::display_path $p]}]
 }
 proc els::make_tab {id} {
     set tf [els::tabW $id]
@@ -1203,7 +1204,21 @@ proc els::update_namelabel {} {
     if {$avail < 24} { .sb.name configure -text [file tail $p] ; return }  ;# unrealized
     .sb.name configure -text [els::elide_path $p $avail]
 }
+# Strip a Windows extended-length prefix (\\?\ or //?/, incl. the UNC form) from
+# a path.  Tcl's `file normalize` adds it for paths over MAX_PATH (260), and it
+# must never leak into anything shown to a human.
+proc els::strip_ext_prefix {p} {
+    if {[regexp {^[\\/]{2}\?[\\/]UNC[\\/](.*)$} $p -> rest]} { return "//$rest" }
+    if {[regexp {^[\\/]{2}\?[\\/](.*)$} $p -> rest]} { return $rest }
+    return $p
+}
+# A path formatted for human display: native (backslash) separators, no
+# extended-length prefix.
+proc els::display_path {p} {
+    return [file nativename [els::strip_ext_prefix $p]]
+}
 proc els::elide_path {p avail} {
+    set p [els::strip_ext_prefix $p]
     if {[font measure elsUI $p] <= $avail} { return $p }
     set parts [file split $p]
     set best ""
@@ -1228,7 +1243,7 @@ proc els::name_tip {} {
     if {$active eq "" || ![info exists ::els::docPath($active)]} { return "" }
     set p $::els::docPath($active)
     if {$p eq "" || [.sb.name cget -text] eq $p} { return "" }
-    return [file nativename $p]
+    return [els::display_path $p]
 }
 proc els::status_link_enter {w} {
     if {![winfo exists $w]} { return }
