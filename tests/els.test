@@ -218,3 +218,40 @@ test quit-1.3 {quit, dirty doc answered no, discards and still exits} -setup {
 } -cleanup {
     rename ::exit {} ; rename ::els_test_real_exit ::exit
 } -result 1
+
+# ---- Save As / save-with-encoding ---------------------------------------
+test saveas-1.1 {Save As writes a new file, sets the path, clears dirty, records recent} -setup {els_reset} -body {
+    set f [file join $::ELS_TMP saveas_new.txt]
+    set d $::els::active
+    [els::W $d] insert end "brand new"
+    set ::els_test_savefile $f
+    els::saveas
+    set fh [::open $f r]; fconfigure $fh -encoding utf-8; set c [read $fh]; close $fh
+    list [els::same_path $::els::docPath($d) $f] [els::doc_dirty $d] [string trim $c] \
+         [els::same_path [lindex $::els::recent 0] $f]
+} -result {1 0 {brand new} 1}
+
+test saveas-1.2 {Save As cancelled writes nothing, leaves the doc untitled and dirty} -setup {els_reset} -body {
+    set d $::els::active
+    [els::W $d] insert end "still unsaved"
+    set ::els_test_savefile ""
+    els::saveas
+    list $::els::docPath($d) [els::doc_dirty $d]
+} -result {{} 1}
+
+# save_with only changes the encoding + marks dirty; the next save writes the
+# bytes.  Pick UTF-16LE+BOM on a utf-8 doc, then save, and check the file bytes.
+test save-2.1 {save_with a new encoding, then save, writes that encoding's bytes} -setup {els_reset} -body {
+    set f [file join $::ELS_TMP savewith.txt]
+    set d $::els::active
+    [els::W $d] insert end "hello"
+    set ::els::docPath($d) $f
+    els::save                      ;# first write as the default utf-8
+    els::save_with utf-16le 1      ;# choose UTF-16LE + BOM -> marks dirty only
+    set dirtyAfterPick [els::doc_dirty $d]
+    els::save                      ;# now the bytes get rewritten in the new encoding
+    set fh [::open $f rb]; set raw [read $fh]; close $fh
+    binary scan $raw H4 bomhex
+    set body [encoding convertfrom utf-16le [string range $raw 2 end]]
+    list $dirtyAfterPick $bomhex $body [els::doc_dirty $d]
+} -result {1 fffe hello 0}
