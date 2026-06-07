@@ -931,3 +931,21 @@ test update-1.3 {clicking the update notice dismisses its tooltip} -setup {
 } -cleanup {
     rename ::els::open_url {} ; rename ::els_test_real_open_url ::els::open_url
 } -result {1 0 1}
+
+# A long document shows the scrollbar AND it has a real (non-collapsed) width —
+# the custom arrow-less style once collapsed it to 1px (invisible) on big files.
+test ui-7.2 {the vertical scrollbar has a visible (non-collapsed) width} -setup {ui_reset} -body {
+    set w [els::T]
+    for {set i 0} {$i < 2000} {incr i} { $w insert end "line $i\n" }
+    els::refresh_view ; update
+    list [winfo ismapped .vs] [expr {[winfo reqwidth .vs] >= 8}]
+} -result {1 1}
+
+# The find count area must fit a large "N of M" without clipping (the label was
+# 11 chars; a 20k-match file produced "15912 of 20631" and got truncated).
+test ui-4.16 {the find count label fits a large match count without clipping} -setup {ui_reset} -body {
+    els::find_show find
+    set ::els::find_count "15912 of 20631"
+    update idletasks
+    expr {[winfo reqwidth .find.fr.n] >= [font measure elsUI "15912 of 20631"]}
+} -result 1

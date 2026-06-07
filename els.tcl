@@ -683,10 +683,13 @@ proc els::init_style {} {
             Vertical.Scrollbar.thumb -expand 1 -sticky nswe
         }
     }
+    # clam derives the scrollbar's CROSS-AXIS width from -arrowsize, not -width;
+    # the custom layout above has no arrow elements, so -arrowsize 12 just makes
+    # the (arrow-less) bar 12px wide.  -arrowsize 0 collapsed it to 1px (invisible).
     $s configure Vertical.TScrollbar -troughcolor $::els::PAGE \
         -background #CACACA -bordercolor $::els::PAGE \
         -lightcolor #CACACA -darkcolor #CACACA \
-        -borderwidth 0 -arrowsize 0 -width 12 -gripcount 0
+        -borderwidth 0 -arrowsize 12 -width 12 -gripcount 0
     $s map Vertical.TScrollbar -background [list active #B0B0B0 disabled $::els::PAGE]
 }
 
@@ -1903,7 +1906,7 @@ proc els::build_findbar {} {
     ttk::button .find.fr.prev -text "↑" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step -1}
     ttk::button .find.fr.next -text "↓" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step 1}
     ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
-        -foreground $::els::MUTED -width 11 -anchor e
+        -foreground $::els::MUTED -width 16 -anchor e   ;# room for large counts
     ttk::button .find.fr.x -text "×" -style Find.TButton -width 2 -takefocus 0 -command els::find_hide
     grid .find.fr.l    -row 0 -column 0 -padx 1 -sticky we
     grid .find.fr.q    -row 0 -column 1 -padx 1 -sticky we
