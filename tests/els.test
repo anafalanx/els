@@ -138,3 +138,83 @@ test unicode-1.1 {utf-8 content survives an open} -setup {els_reset} -body {
     els::open $f
     [els::T] get 1.0 1.end
 } -result {café ☕ 日本}
+
+# ---- closing a DIRTY document (the yes/no/cancel prompt) -----------------
+# close_doc prompts yesnocancel when the doc is dirty: cancel aborts, yes
+# saves-then-closes, no discards-then-closes, and "yes" whose Save As is
+# cancelled leaves the doc open and dirty.
+test close-2.1 {closing a dirty doc, answering yes, saves it then closes} -setup {els_reset} -body {
+    set f [file join $::ELS_TMP closeyes.txt]
+    set d $::els::active
+    [els::W $d] insert end "keep me"
+    set ::els::docPath($d) $f
+    set ::els_test_mbanswer yes
+    els::close_doc $d
+    set fh [::open $f r]; fconfigure $fh -encoding utf-8; set c [read $fh]; close $fh
+    list [lsearch -exact $::els::docs $d] [string trim $c]
+} -result {-1 {keep me}}
+
+test close-2.2 {closing a dirty doc, answering no, discards and closes} -setup {els_reset} -body {
+    set f [file join $::ELS_TMP closeno.txt]
+    set d $::els::active
+    [els::W $d] insert end "discard me"
+    set ::els::docPath($d) $f
+    set ::els_test_mbanswer no
+    els::close_doc $d
+    list [lsearch -exact $::els::docs $d] [file exists $f]
+} -result {-1 0}
+
+test close-2.3 {closing a dirty doc, answering cancel, keeps it open and dirty} -setup {els_reset} -body {
+    set d $::els::active
+    [els::W $d] insert end "unsaved"
+    set ::els_test_mbanswer cancel
+    els::close_doc $d
+    list [expr {[lsearch -exact $::els::docs $d] >= 0}] [els::doc_dirty $d]
+} -result {1 1}
+
+test close-2.4 {dirty untitled, yes, but Save As cancelled -> stays open and dirty} -setup {els_reset} -body {
+    set d $::els::active
+    [els::W $d] insert end "no path yet"
+    set ::els_test_mbanswer yes
+    set ::els_test_savefile ""    ;# Save As dialog cancelled
+    els::close_doc $d
+    list [expr {[lsearch -exact $::els::docs $d] >= 0}] [els::doc_dirty $d]
+} -result {1 1}
+
+# ---- quit ----------------------------------------------------------------
+# quit loops dirty docs (same prompt); a cancel aborts BEFORE save_geometry +
+# exit, so it is safe to drive directly.  The paths that proceed end in `exit`,
+# so those tests stub exit (restored in -cleanup) and assert it was reached.
+test quit-1.1 {quit with a dirty doc, answering cancel, aborts and keeps everything} -setup {els_reset} -body {
+    set d $::els::active
+    [els::W $d] insert end "unsaved work"
+    set ::els_test_mbanswer cancel
+    els::quit
+    list [expr {[lsearch -exact $::els::docs $d] >= 0}] [els::doc_dirty $d]
+} -result {1 1}
+
+test quit-1.2 {quit with clean docs saves geometry and exits} -setup {
+    els_reset
+    rename ::exit ::els_test_real_exit
+    set ::els_test_exited 0
+    proc ::exit {args} { set ::els_test_exited 1 }
+} -body {
+    els::quit
+    set ::els_test_exited
+} -cleanup {
+    rename ::exit {} ; rename ::els_test_real_exit ::exit
+} -result 1
+
+test quit-1.3 {quit, dirty doc answered no, discards and still exits} -setup {
+    els_reset
+    rename ::exit ::els_test_real_exit
+    set ::els_test_exited 0
+    proc ::exit {args} { set ::els_test_exited 1 }
+    set ::els_test_mbanswer no
+} -body {
+    [els::W $::els::active] insert end "discard on quit"
+    els::quit
+    set ::els_test_exited
+} -cleanup {
+    rename ::exit {} ; rename ::els_test_real_exit ::exit
+} -result 1
