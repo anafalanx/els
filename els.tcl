@@ -2514,23 +2514,30 @@ proc els::selftest {tf {report ""}} {
     update idletasks; update
     set w [els::T]
     set report [els::selftest_report_path $report]
-    catch {file mkdir [file dirname $report]}
-    set out [::open $report w]
-    puts $out "ok version=$::els::version tk=[info patchlevel]"
-    puts $out "mapped=[winfo ismapped .] title=[wm title .]"
-    puts $out "caret=[$w cget -insertbackground] page=[$w cget -bg] font=[$w cget -font]"
-    puts $out "icon=$::els::iconLoaded path=$::els::iconPath"
-    puts $out "gutter_width=[.ln cget -width] lines=[els::line_count]"
-    puts $out "current_line_tag=[$w tag ranges currentLine]"
-    puts $out "config=[els::config_file] geometry=[wm geometry .]"
-    puts $out "theme=[ttk::style theme use] scaling=[format %.3f [tk scaling]]"
-    puts $out "docs=$ndocs active=$::els::active tabs_ok=$tabs_ok"
-    puts $out "detect=$::els::have_detect"
     set dstate ""
     foreach id $::els::docs { append dstate "$id:[els::doc_dirty $id] " }
-    puts $out "doc_dirty=[string trimright $dstate]"
-    puts $out "open=$openok"
-    close $out
+    set lines [list \
+        "ok version=$::els::version tk=[info patchlevel]" \
+        "mapped=[winfo ismapped .] title=[wm title .]" \
+        "caret=[$w cget -insertbackground] page=[$w cget -bg] font=[$w cget -font]" \
+        "icon=$::els::iconLoaded path=$::els::iconPath" \
+        "gutter_width=[.ln cget -width] lines=[els::line_count]" \
+        "current_line_tag=[$w tag ranges currentLine]" \
+        "config=[els::config_file] geometry=[wm geometry .]" \
+        "theme=[ttk::style theme use] scaling=[format %.3f [tk scaling]]" \
+        "docs=$ndocs active=$::els::active tabs_ok=$tabs_ok" \
+        "detect=$::els::have_detect" \
+        "doc_dirty=[string trimright $dstate]" \
+        "open=$openok"]
+    set txt [join $lines \n]\n
+    # Guard the write: a read-only or non-writable report directory must not leave
+    # this headless selftest hung behind a background-error dialog.  On failure,
+    # fall back to stderr (still visible to whoever launched --selftest).
+    catch {file mkdir [file dirname $report]}
+    if {[catch {set out [::open $report w] ; puts -nonewline $out $txt ; close $out} err]} {
+        catch {puts stderr "selftest: could not write $report: $err"}
+        catch {puts -nonewline stderr $txt}
+    }
     after 150 {exit}
 }
 

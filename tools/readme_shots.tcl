@@ -139,6 +139,12 @@ proc readme_stage {} {
     update
 }
 
+# Read the staged config from this temp dir instead of the developer's real
+# els.conf (next-to-program / %LOCALAPPDATA%): pinning config_path before main
+# skips first-run resolution and the location dialog, so the screenshots show a
+# clean, deterministic session rather than whatever tabs, recent files, or window
+# geometry the developer's own config happens to hold.
+set ::els::config_path [file join $::README_TMP els.conf]
 els::main
 after 220 readme_stage
 }]

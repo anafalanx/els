@@ -55,7 +55,8 @@ set ::COMPONENTS {
 
 proc present {comp} { return [file exists [TCp {*}[dict get $comp probe]]] }
 
-proc version_of {key} {
+proc version_of {comp} {
+    set key [dict get $comp key]
     set v ""
     switch $key {
         tcl   { if {[catch {exec [TCp tcl9 bin tclsh90.exe]    << {puts [info patchlevel]}} v]} {
@@ -67,7 +68,14 @@ proc version_of {key} {
         gcc   { catch {exec [TCp msys64 ucrt64 bin gcc.exe] -dumpversion} v }
         git   { catch {exec [TCp git cmd git.exe] --version} v
                 set v [string trim [string map {{git version} {}} $v]] }
-        twapi { set v 5.2.0 }
+        twapi { # read the version the vendored pkgIndex actually declares (the
+                # probe IS that pkgIndex), so an in-place twapi update is reported
+                # as drift instead of being masked by a hardcoded constant.
+                set idx [TCp {*}[dict get $comp probe]]
+                if {![catch {open $idx r} fh]} {
+                    set d [read $fh] ; close $fh
+                    regexp {package ifneeded\s+twapi\s+(\S+)} $d -> v
+                } }
         curl  { catch {exec [TCp msys64 usr bin curl.exe] --version} out
                 regexp {curl (\S+)} $out -> v }
     }
@@ -77,7 +85,7 @@ proc version_of {key} {
 # {state version}  — state in {ok outdated missing broken}
 proc status_of {comp} {
     if {![present $comp]} { return [list missing ""] }
-    set v [version_of [dict get $comp key]]
+    set v [version_of $comp]
     if {[string match {ERROR:*} $v]} { return [list broken $v] }
     set want [dict get $comp want]
     if {$want ne "" && $v ne $want} { return [list outdated $v] }
