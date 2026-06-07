@@ -448,8 +448,7 @@ proc els::recent_manage {} {
         -borderwidth 0 -highlightthickness 1 -highlightbackground $::els::HAIR \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
         -bg $bg -fg $::els::INK -yscrollcommand {.recent.f.vs set}
-    scrollbar .recent.f.vs -orient vertical -command {.recent.f.list yview} \
-        -takefocus 0 -highlightthickness 0
+    ttk::scrollbar .recent.f.vs -orient vertical -command {.recent.f.list yview}
     grid .recent.f.list -row 2 -column 0 -columnspan 2 -sticky nsew
     grid .recent.f.vs   -row 2 -column 2 -sticky ns
 
@@ -678,9 +677,16 @@ proc els::init_style {} {
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
     $s map Dialog.TButton -background [list pressed $hair active $::els::TABBG] \
         -foreground [list disabled $::els::MUTED]
-    # Scrollbars are the CLASSIC Tk `scrollbar` widget (traditional 3D arrows +
-    # slider, platform/DPI-appropriate width) rather than a flat thumb-only ttk
-    # bar — see .vs in build and .recent.f.vs.  Function over form, by request.
+    # A traditional vertical scrollbar: clam's DEFAULT layout (so the up/down
+    # arrow buttons are always drawn — unlike a thumb-only layout, and unlike the
+    # classic Tk widget which on Windows only paints its arrows once activated).
+    # -arrowsize sets BOTH the arrow size and the bar's width, scaled for DPI so
+    # it is a chunky, easy-to-grab bar rather than a thin modern sliver.
+    set sbw [expr {max(17, int([tk scaling] * 14))}]
+    $s configure Vertical.TScrollbar -troughcolor $::els::PAGE \
+        -background #BCBCBC -arrowcolor #4A4A4A -bordercolor #9A9A9A \
+        -relief raised -borderwidth 1 -arrowsize $sbw
+    $s map Vertical.TScrollbar -background [list active #A4A4A4 disabled $::els::PAGE]
 }
 
 # ---- build the UI -------------------------------------------------------
@@ -752,9 +758,9 @@ proc els::build {} {
         -width 40 -takefocus 0 -cursor arrow
     set ::els::gutter_px -1   ;# fresh canvas: force the next width configure
 
-    # the shared scrollbar — classic Tk widget: traditional arrows + slider, and
-    # a real platform-default width (the flat ttk thumb rendered far too narrow)
-    scrollbar .vs -orient vertical -command els::scroll -takefocus 0 -highlightthickness 0
+    # the shared scrollbar (traditional: arrow buttons + a wide grabbable thumb;
+    # styled in init_style as Vertical.TScrollbar)
+    ttk::scrollbar .vs -orient vertical -command els::scroll -takefocus 0
 
     # the find / replace bar (hidden until Ctrl+F / Ctrl+H)
     els::build_findbar
