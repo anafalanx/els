@@ -11,6 +11,8 @@
 *-shot.png
 /smoke.tcl
 /tests/_tmp/
+# large generated sample files for manual testing (regenerate via tools/gen_sample.tcl)
+/samples/
 
 # compiled C extensions / build output (rebuilt via `x build-ext`)
 /build/
