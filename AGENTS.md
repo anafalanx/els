@@ -13,7 +13,8 @@ Tcl 8.x behavior.
   pages relevant to your change (each file is named after the command/function,
   e.g. `commands/text.md`, `commands/ttk_treeview.md`, `c-api/Tcl_Obj.md`).
 - Do **not** try to read all 1293 pages into context — open the few that matter
-  for the task. Grep the tree to find the right page.
+  for the task. Grep the tree to find the right page. If, during execution of
+  the task, you need further guidance from the manual, you can read more pages.
 - The pages are generated from the vendored nroff by `tools/man2md.tcl`; to
   refresh them, rerun `tclsh90 tools/man2md.tcl` (do not hand-edit the output).
 
