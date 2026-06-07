@@ -41,11 +41,14 @@ proc startup_wait_report {report pid} {
             set f [open $report r]
             set data [read $f]
             close $f
-            return $data
+            # only accept a fully-written report (parses as a dict)
+            if {![catch {dict size $data}]} { return $data }
         }
         after 50
     }
-    catch {exec taskkill /PID [lindex $pid 0] /T /F}
+    # recycle-safe: only kill if the PID is still the wish we launched
+    catch {exec taskkill /FI "PID eq [lindex $pid 0]" \
+                        /FI "IMAGENAME eq [file tail [startup_wish]]" /T /F}
     error "startup probe did not finish"
 }
 proc startup_probe {appdir args} {

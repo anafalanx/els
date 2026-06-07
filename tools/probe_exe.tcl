@@ -30,11 +30,15 @@ proc wait_report {report pid} {
             set f [open $report r]
             set data [read $f]
             close $f
-            return $data
+            # only return once it parses as a dict — guards against reading a
+            # half-written report (belt-and-braces atop the atomic write)
+            if {![catch {dict size $data}]} { return $data }
         }
         after 50
     }
-    catch {exec taskkill /PID [lindex $pid 0] /T /F}
+    # recycle-safe kill: the OS may have reassigned the PID to an unrelated
+    # process after a crash, so only kill it if it is still an els.exe
+    catch {exec taskkill /FI "PID eq [lindex $pid 0]" /FI "IMAGENAME eq els.exe" /T /F}
     error "exe probe did not finish: $report"
 }
 

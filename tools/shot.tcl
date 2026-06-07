@@ -69,11 +69,18 @@ proc dib_to_photo {dib} {
 
     set tmp [file join [::shot_tmpdir] _shot_[pid].ppm]
     set fh [::open $tmp w]
-    fconfigure $fh -translation binary
-    puts -nonewline $fh $ppm
-    close $fh
-    set img [image create photo -file $tmp]
-    file delete -force $tmp
+    try {
+        fconfigure $fh -translation binary
+        puts -nonewline $fh $ppm
+    } finally {
+        close $fh
+    }
+    # always remove the scratch PPM, even if Tk fails to read it back
+    try {
+        set img [image create photo -file $tmp]
+    } finally {
+        file delete -force $tmp
+    }
     return $img
 }
 
@@ -133,13 +140,17 @@ proc main {argv} {
     }
     after 700                     ;# let Tk finish painting
     # PrintWindow the target directly — occlusion-proof, no foreground needed.
-    set img [dib_to_photo [elscap::window [hwnd_int $hwin]]]
-    $img write $out -format png
-    puts "wrote $out ([image width $img]x[image height $img])"
-    # close only the window we spawned (clean WM_CLOSE, then ensure exit)
-    catch {twapi::send_message $hwin 0x10 0 0}   ;# WM_CLOSE
-    after 400
-    catch {twapi::end_process $pid -force}
+    # Whatever happens during capture/convert/write, always close the window we
+    # spawned so a failure can't leave an orphaned els process behind.
+    try {
+        set img [dib_to_photo [elscap::window [hwnd_int $hwin]]]
+        $img write $out -format png
+        puts "wrote $out ([image width $img]x[image height $img])"
+    } finally {
+        catch {twapi::send_message $hwin 0x10 0 0}   ;# WM_CLOSE
+        after 400
+        catch {twapi::end_process $pid -force}
+    }
 }
 
 # ---- headless converter self-test (no capture, no focus steal) ----------

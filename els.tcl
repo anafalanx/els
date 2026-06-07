@@ -2450,9 +2450,12 @@ proc els::startup_probe {report} {
         argv0 $::argv0]
     if {$report ne ""} {
         catch {file mkdir [file dirname $report]}
-        if {![catch {set fh [::open $report w]}]} {
+        # write atomically (temp + rename) so a reader polling for the report can
+        # never observe a half-written file (TOCTOU)
+        if {![catch {set fh [::open $report.tmp w]}]} {
             puts $fh $data
             close $fh
+            catch {file rename -force $report.tmp $report}
         }
     }
     exit

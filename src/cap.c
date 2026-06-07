@@ -35,12 +35,20 @@ static int Window_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     if (w <= 0 || h <= 0) return fail(ip, "window has zero size");
 
     HDC screen = GetDC(NULL);
-    HDC mem    = CreateCompatibleDC(screen);
+    if (!screen) { return fail(ip, "GetDC failed"); }
+    HDC mem     = CreateCompatibleDC(screen);
     HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
+    if (!mem || !bmp) {
+        /* clean up whatever was allocated before bailing — no GDI handle leak */
+        if (bmp) { DeleteObject(bmp); }
+        if (mem) { DeleteDC(mem); }
+        ReleaseDC(NULL, screen);
+        return fail(ip, "GDI bitmap/DC allocation failed");
+    }
     HGDIOBJ old = SelectObject(mem, bmp);
 
     BOOL ok = PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT);
-    SelectObject(mem, old);   /* bmp must not be selected when GetDIBits runs */
+    SelectObject(mem, old);   /* restore old; bmp must not be selected for GetDIBits */
 
     BITMAPINFOHEADER bih = {0};
     bih.biSize        = sizeof(BITMAPINFOHEADER);
@@ -62,7 +70,7 @@ static int Window_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     int lines = GetDIBits(screen, bmp, 0, (UINT)h, buf + 40,
                           (BITMAPINFO *)&qih, DIB_RGB_COLORS);
 
-    SelectObject(mem, old);
+    /* old is already re-selected above; just release the GDI objects */
     DeleteObject(bmp);
     DeleteDC(mem);
     ReleaseDC(NULL, screen);

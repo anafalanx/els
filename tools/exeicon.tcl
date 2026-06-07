@@ -43,34 +43,46 @@ set gen  [file join $ROOT tools icon.tcl]
 set sizes {256 128 64 48 32 16}
 set RT_ICON 3 ; set RT_GROUP_ICON 14 ; set LANG 1033
 
-# render each size and read its PNG bytes
+# render each size and read its PNG bytes.  The whole render + resource update
+# is wrapped so the temp render dir is always removed, and the PE update handle
+# is always released (committed on success, discarded on any failure) — never
+# leaked, and never leaving the wrapper exe half-rewritten.
 set tmp [file join $TC _exeicon] ; file delete -force $tmp ; file mkdir $tmp
-set imgs {} ; set id 101
-foreach s $sizes {
-    set p [file join $tmp i$s.png]
-    exec $wish $gen $s $p
-    set fh [open $p rb] ; set png [read $fh] ; close $fh
-    lappend imgs [list $s $png $id] ; incr id
-}
+try {
+    set imgs {} ; set id 101
+    foreach s $sizes {
+        set p [file join $tmp i$s.png]
+        exec $wish $gen $s $p
+        set fh [open $p rb] ; try { set png [read $fh] } finally { close $fh }
+        lappend imgs [list $s $png $id] ; incr id
+    }
 
-# GRPICONDIR: header (reserved,type=1,count) + a 14-byte entry per image
-set dir [binary format sss 0 1 [llength $imgs]]
-foreach e $imgs {
-    lassign $e s png id
-    set wh [expr {$s >= 256 ? 0 : $s}]   ;# 0 means 256 in the icon directory
-    append dir [binary format ccccssis $wh $wh 0 0 1 32 [string length $png] $id]
-}
+    # GRPICONDIR: header (reserved,type=1,count) + a 14-byte entry per image
+    set dir [binary format sss 0 1 [llength $imgs]]
+    foreach e $imgs {
+        lassign $e s png id
+        set wh [expr {$s >= 256 ? 0 : $s}]   ;# 0 means 256 in the icon directory
+        append dir [binary format ccccssis $wh $wh 0 0 1 32 [string length $png] $id]
+    }
 
-set h [twapi::begin_resource_update $exe]
-foreach e $imgs {
-    lassign $e s png id
-    twapi::update_resource $h $RT_ICON $id $LANG $png
+    set h [twapi::begin_resource_update $exe]
+    set committed 0
+    try {
+        foreach e $imgs {
+            lassign $e s png id
+            twapi::update_resource $h $RT_ICON $id $LANG $png
+        }
+        # replace the wrapper's group icons (named APP and TK) so Explorer shows ours
+        foreach grp {APP TK} {
+            twapi::update_resource $h $RT_GROUP_ICON $grp $LANG $dir
+        }
+        twapi::end_resource_update $h
+        set committed 1
+    } finally {
+        if {!$committed} { catch {twapi::end_resource_update $h -discard} }
+    }
+} finally {
+    file delete -force $tmp
 }
-# replace the wrapper's group icons (named APP and TK) so Explorer shows ours
-foreach grp {APP TK} {
-    twapi::update_resource $h $RT_GROUP_ICON $grp $LANG $dir
-}
-twapi::end_resource_update $h
-file delete -force $tmp
 puts "embedded PE icon ([join $sizes ,]px) into [file tail $exe]"
 exit 0
