@@ -111,3 +111,39 @@ test find-2.2 {Up/Down recall walks history into the query} -setup {find_reset} 
     els::find_history_recall -1 ; set c $::els::find_q
     list $a $b $c
 } -result {three two three}
+
+# ---- edge cases ---------------------------------------------------------
+test find-1.8 {find_step backward cycles and wraps to the last match} -setup {find_reset} -body {
+    [els::T] insert end "x x x"
+    set ::els::find_q x ; els::find_update
+    set seq [list $::els::find_current]
+    els::find_step -1 ; lappend seq $::els::find_current   ;# wrap -> 2
+    els::find_step -1 ; lappend seq $::els::find_current   ;# 1
+    els::find_step -1 ; lappend seq $::els::find_current   ;# 0
+    set seq
+} -result {0 2 1 0}
+
+test find-1.9 {an empty query clears the matches and reports nothing} -setup {find_reset} -body {
+    [els::T] insert end "anything here"
+    set ::els::find_q "" ; els::find_update
+    list [llength $::els::find_matches] $::els::find_count
+} -result {0 {}}
+
+test replace-1.4 {Replace with no current match leaves the buffer untouched} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "hello world"
+    set ::els::find_q zzz ; set ::els::find_r Q ; els::find_update
+    els::find_replace_one
+    list $::els::find_count [$w get 1.0 "end - 1 char"]
+} -result {{No results} {hello world}}
+
+test replace-1.5 {Replace All with no matches changes nothing} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "hello world"
+    set ::els::find_q zzz ; set ::els::find_r Q ; els::find_update
+    els::find_replace_all
+    $w get 1.0 "end - 1 char"
+} -result {hello world}
+
+test find-2.3 {search history is capped at the 16 newest terms} -setup {find_reset} -body {
+    for {set i 1} {$i <= 20} {incr i} { els::find_history_push "term$i" }
+    list [llength $::els::find_history] [lindex $::els::find_history 0] [lindex $::els::find_history end]
+} -result {16 term20 term5}
