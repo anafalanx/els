@@ -79,3 +79,48 @@ test unit-doc-3 {untitled name; path name is the basename} -setup {els_reset} -b
     set ::els::docPath($id) [file join $::ELS_TMP hello.txt]
     list $u [els::doc_name $id]
 } -result {untitled hello.txt}
+
+# ---- icu_to_tcl mapping (beyond unit-icu-1..9) --------------------------
+test unit-icu-10 {icu_to_tcl maps many charset names to Tcl encodings} -body {
+    set out {}
+    foreach name {windows-1251 ISO-8859-15 KOI8-R Big5 windows-874 TIS-620 EUC-JP ISO-2022-JP} {
+        lappend out [els::icu_to_tcl $name]
+    }
+    set out
+} -result {cp1251 iso8859-15 koi8-r big5 cp874 tis-620 euc-jp iso2022-jp}
+
+test unit-icu-11 {icu_to_tcl falls back to encoding names for an unlisted alias} -body {
+    list [els::icu_to_tcl cp1252] [els::icu_to_tcl ascii] [els::icu_to_tcl bogus-charset-xyz]
+} -result {cp1252 ascii {}}
+
+# ---- bytes_ascii_only (guards the [string is ascii] implementation) -----
+# Note: an embedded NUL counts as ASCII (it is < 0x80) — which is exactly why
+# detect_encoding checks for NUL bytes BEFORE consulting bytes_ascii_only.
+test unit-ascii-1 {bytes_ascii_only: ASCII (incl. NUL) true; high/utf-8 bytes false} -body {
+    list \
+        [els::bytes_ascii_only "plain text 123"] \
+        [els::bytes_ascii_only [binary format c* {72 73 0}]] \
+        [els::bytes_ascii_only [binary format c* {72 233 73}]] \
+        [els::bytes_ascii_only [encoding convertto utf-8 "café"]]
+} -result {1 1 0 0}
+
+# ---- detect_wide gate (parity + NUL-ratio) ------------------------------
+test unit-wide-1 {detect_wide: plain ASCII text is not wide} -body {
+    els::detect_wide "hello world" "hello world"
+} -result {}
+test unit-wide-2 {detect_wide: a couple of stray NULs split across parities are not wide} -body {
+    set s "[string repeat ab 19]\x00\x00"   ;# 38 ASCII bytes + one even + one odd NUL
+    els::detect_wide $s $s
+} -result {}
+test unit-wide-3 {detect_wide: a strong NUL-in-odd-bytes signature is UTF-16LE} -body {
+    set s [encoding convertto utf-16le "hello world this is wide text"]
+    els::detect_wide $s $s
+} -result utf-16le
+
+# ---- decode (BOM stripping per encoding) --------------------------------
+test unit-decode-4 {decode strips a utf-16le BOM then decodes the body} -body {
+    els::decode "\xFF\xFE[encoding convertto utf-16le ok]" utf-16le 1
+} -result ok
+test unit-decode-5 {decode without a BOM strips nothing} -body {
+    els::decode [encoding convertto utf-8 "héllo"] utf-8 0
+} -result héllo
