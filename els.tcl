@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.26"      ;# Tk edition; the C line ended at 0.3
+    variable version "0.27"      ;# Tk edition; the C line ended at 0.3
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -1932,7 +1932,7 @@ proc els::about {} {
     if {$iconSize > 0} { grid rowconfigure .about.top 0 -minsize $iconSize }
     frame .about.body -bg $bg
     pack  .about.body -in .about.card -anchor center -pady {14 0}
-    label .about.body.tag -text "a focused text editor" \
+    label .about.body.tag -text "a simple text editor" \
         -font elsUI -fg $::els::MUTED -bg $bg -anchor center
     pack  .about.body.tag -anchor center -pady {0 12}
     label .about.body.copy -text "© 2026 Vincent Vercauteren" \

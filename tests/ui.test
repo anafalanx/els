@@ -452,7 +452,7 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     }
     set blob [join $texts \n]
     set tech    [string match -nocase *tcl* $blob]
-    set hasfocus [string match -nocase *focused?text?editor* $blob]
+    set hastag  [string match -nocase *simple?text?editor* $blob]
     set hasprog [string match -nocase *programmable* $blob]
     set hascopy [string match -nocase *Vercauteren* $blob]
     set haslic  [string match -nocase *MIT* $blob]
@@ -460,7 +460,7 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     list $isWin $name $hasicon $iconBig $aligned $centered \
          [expr {[lindex $bodyOrder end-1] eq ".about.body.ver"}] \
          [expr {[lindex $bodyOrder end] eq ".about.body.lic"}] \
-         $tech $hasfocus $hasprog $hascopy $haslic
+         $tech $hastag $hasprog $hascopy $haslic
 } -result {1 els 1 1 1 1 1 1 0 1 0 1 1}
 
 test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup {ui_reset} -body {
