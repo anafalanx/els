@@ -16,6 +16,13 @@ namespace import ::tcltest::test
 set ::els_stress_sourced 1
 source [file join [file dirname [info script]] encoding_stress.tcl]
 
-test stress-1.1 {UI-driven encoding stress: ~800 ops, no hang/crash/corruption, within budget} -body {
+# Gate the slow run on the `stress` constraint (run.tcl sets it: ON normally,
+# OFF for `x test --fast`).  Default it ON if run.tcl did not set it.
+if {![info exists ::tcltest::testConstraints(stress)]} {
+    ::tcltest::testConstraint stress 1
+}
+
+test stress-1.1 {UI-driven encoding stress: ~800 ops, no hang/crash/corruption, within budget} \
+        -constraints stress -body {
     els_stress_run   ;# returns the list of failures — empty == all good
 } -result {}

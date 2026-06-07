@@ -108,7 +108,8 @@ proc need {args} {
 proc task_help {args} {
     puts {els task runner — usage: x <command> [args]
 
-  test               run the in-process test suite (tcltest + event generate)
+  test [--fast]      run the in-process test suite (tcltest + event generate);
+                     --fast skips the slow ~800-op encoding stress test
   probe <f> [args]   run an ad-hoc verification script under the CONSOLE tclsh
                      with the dialog-quiet preamble (tests/probe.tcl) preloaded,
                      so a probe error goes to stderr, never a modal dialog
