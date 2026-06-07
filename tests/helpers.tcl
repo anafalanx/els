@@ -36,6 +36,35 @@ source [file join $::ELS_ROOT els.tcl]
 set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
 
+# ---- total control of error reporting: no dialog ever reaches the screen ----
+#
+# THE fix for GUI error boxes "raining" on the desktop.  Loading Tk installs a
+# background-error handler (tk::dialog::error::bgerror) that POPS A MODAL DIALOG
+# for any uncaught error in an event handler, after-callback, or binding.  In an
+# automated run that dialog steals focus, can't be read, and stalls the process.
+# Replace the handler (every spelling of it) so such errors go to stderr + a log
+# we can read, and capture them in a list tests can assert on.  Nothing appears
+# on screen, ever.
+#
+# Companion rule (enforced by tools/x.tcl `probe`): run tests and probes with
+# tclsh90 — a CONSOLE app whose startup errors print to stderr — NEVER wish90, a
+# GUI-subsystem app with no console that can only REPORT a startup error as a
+# modal dialog, before any handler could be installed.
+set ::ELS_TEST_ERRLOG [file join $::ELS_TMP bgerror.log]
+set ::els_test_bgerrors {}
+proc ::els_test_bgerror {msg {opts {}}} {
+    lappend ::els_test_bgerrors $msg
+    catch {
+        set fh [open $::ELS_TEST_ERRLOG a]
+        puts $fh "---- bgerror ----\n$msg\n$::errorInfo"
+        close $fh
+    }
+    catch {puts stderr "BGERROR: $msg"}
+}
+catch {interp bgerror {} ::els_test_bgerror}      ;# the mechanism Tk actually uses
+proc ::bgerror {msg} { ::els_test_bgerror $msg }  ;# classic name, belt and braces
+catch {proc ::tk::dialog::error::bgerror {msg args} { ::els_test_bgerror $msg }}
+
 # Replace native dialogs with stubs so a stray dialog never blocks a test run.
 proc ::tk_getOpenFile {args} { set ::els_test_open_args $args ; return $::els_test_openfile }
 proc ::tk_getSaveFile {args} { set ::els_test_save_args $args ; return $::els_test_savefile }
@@ -57,6 +86,12 @@ set ::els_test_popup_args {}
 # the user's input during an automated run. (Tests never assert on grab state.)
 proc ::grab {args} {}
 
+# Stub the remaining native modal entry points for completeness, so no code path
+# can surface one. (els does not use these today, but a future feature might.)
+proc ::tk_dialog         {args} { return 0 }
+proc ::tk_chooseColor    {args} { return "" }
+proc ::tk_chooseDirectory {args} { return "" }
+
 # Build a clean els UI for a test, resetting all document state.
 proc els_reset {} {
     catch {. configure -menu {}}
@@ -72,6 +107,11 @@ proc els_reset {} {
     set ::els::restore_session 1
     set ::els::session_files {}
     set ::els::session_active ""
+    # Per-test hygiene: restore the dialog stubs to their defaults and clear the
+    # captured background errors, so one test's answer can't leak into the next.
+    set ::els_test_openfile "" ; set ::els_test_savefile ""
+    set ::els_test_mbanswer "yes" ; set ::els_test_popup_args {}
+    set ::els_test_bgerrors {}
     catch {file delete -force $::els::config_path}
     catch {font configure elsMono -size 11}
     set ::els::font_size 11

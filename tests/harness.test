@@ -1,0 +1,47 @@
+# tests/harness.test — the test harness tests ITSELF: prove that no GUI error
+# dialog can ever reach the screen during an automated run, and that every modal
+# entry point is stubbed.  These guard the "no dialogs raining" guarantee.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+# A background error (the kind Tk would normally show in a modal dialog) is
+# routed to our handler and captured, NOT shown.  If the default Tk handler were
+# still active this would pop a dialog and stall; instead it lands in the list.
+test harness-1.1 {a background error is captured by our handler, never shown} -setup {els_reset} -body {
+    set ::els_test_bgerrors {}
+    after 0 {error "intentional background boom"}
+    update    ;# pump the event loop so the after fires and the bg handler runs
+    expr {[lsearch -glob $::els_test_bgerrors *boom*] >= 0}
+} -result 1
+
+# An error thrown from inside a real event binding is likewise captured.
+test harness-1.2 {an error inside a binding is captured, not dialogged} -setup {els_reset} -body {
+    set ::els_test_bgerrors {}
+    bind . <<HarnessBoom>> {error "binding boom"}
+    event generate . <<HarnessBoom>>
+    update    ;# the binding runs in the event loop -> error goes to our handler
+    bind . <<HarnessBoom>> {}
+    expr {[lsearch -glob $::els_test_bgerrors *boom*] >= 0}
+} -result 1
+
+# The native modal dialogs are stubbed and honour their control variables, so no
+# code path can block on one or flash it on screen.
+test harness-1.3 {modal dialog entry points are stubbed and non-blocking} -setup {els_reset} -body {
+    set ::els_test_mbanswer cancel
+    set r1 [tk_messageBox -type yesnocancel -message x]
+    set ::els_test_savefile ""
+    set r2 [tk_getSaveFile]
+    list $r1 [expr {$r2 eq ""}] \
+        [llength [info commands tk_dialog]] [llength [info commands tk_chooseDirectory]]
+} -result {cancel 1 1 1}
+
+# els_reset restores the dialog stubs to their defaults each test, so a previous
+# test's answer cannot leak forward.
+test harness-1.4 {els_reset restores dialog stub defaults} -setup {
+    set ::els_test_mbanswer no
+    set ::els_test_savefile somethingelse
+    els_reset
+} -body {
+    list $::els_test_mbanswer $::els_test_savefile $::els_test_popup_args
+} -result {yes {} {}}

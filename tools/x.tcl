@@ -109,6 +109,9 @@ proc task_help {args} {
     puts {els task runner — usage: x <command> [args]
 
   test               run the in-process test suite (tcltest + event generate)
+  probe <f> [args]   run an ad-hoc verification script under the CONSOLE tclsh
+                     with the dialog-quiet preamble (tests/probe.tcl) preloaded,
+                     so a probe error goes to stderr, never a modal dialog
   stress             UI-driven encoding stress test (open/reopen/save every
                      encoding, lots of mojibake; proves it never hangs)
   run [file ...]     launch the editor (wish + els.tcl)
@@ -188,6 +191,26 @@ proc task_probe-exe {args} {
 proc task_test {args} {
     need tclsh
     stream [tclsh] [P tests run.tcl] {*}$args
+}
+
+# Run a throwaway verification probe the controlled way: CONSOLE tclsh (errors
+# -> stderr, never a dialog) with tests/probe.tcl preloaded (transparent root,
+# bgerror -> stderr, modal dialogs stubbed).  Never wish.  This is how all ad-hoc
+# verification should run so a probe can never rain a dialog on the user.
+proc task_probe {args} {
+    need tclsh
+    if {![llength $args]} { error "usage: x probe <script.tcl> \[args ...]" }
+    set script [lindex $args 0]
+    if {![file exists $script]} { error "probe script not found: $script" }
+    set pp [string map {\\ /} [P tests probe.tcl]]
+    set sp [string map {\\ /} [file normalize $script]]
+    set boot "set ::argv0 {$sp}\nset ::argv {[lrange $args 1 end]}\nsource {$pp}\nsource {$sp}"
+    if {[catch {exec [tclsh] << $boot >@ stdout 2>@ stderr} err opts]} {
+        if {[lindex [dict get $opts -errorcode] 0] eq "CHILDSTATUS"} {
+            exit [lindex [dict get $opts -errorcode] 2]
+        }
+        return -options $opts $err
+    }
 }
 
 proc task_stress {args} {
