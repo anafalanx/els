@@ -78,10 +78,20 @@ proc els_reset {} {
     catch {set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]}
     els::build
     update
-    # Force Tk focus onto the document so synthetic key events are delivered even
-    # when the (transparent) test window isn't the OS-active window — otherwise
-    # `event generate <KeyPress>` is flaky depending on what else has focus.
-    catch {focus -force [els::T]}
+    # Settle Tk focus on the document before any test generates keys.  Synthetic
+    # `event generate <KeyPress>` is redirected to the focus widget, so it lands
+    # nowhere if focus has not committed — which is what made the keyboard tests
+    # flaky when the (transparent) test root was not the OS-active window.  A
+    # single `focus -force` may not take on the first event-loop turn, so force
+    # it and pump the loop until `[focus]` actually reports the document widget
+    # (bounded, so it can never hang).  This only commits Tk's internal focus; it
+    # does not raise or activate the window over the user's foreground app.
+    set t [els::T]
+    for {set i 0} {$i < 20} {incr i} {
+        catch {focus -force $t}
+        update
+        if {[focus] eq $t} break
+    }
 }
 
 # Active (or named) document's text, minus the widget's mandatory final newline.
