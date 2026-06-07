@@ -938,8 +938,9 @@ test ui-7.2 {the vertical scrollbar is shown with a real (chunky) width} -setup 
     set w [els::T]
     for {set i 0} {$i < 2000} {incr i} { $w insert end "line $i\n" }
     els::refresh_view ; update
-    # mapped and wide enough to grab — guards the 1px-collapse regression
-    list [winfo ismapped .vs] [expr {[winfo reqwidth .vs] >= 14}]
+    # mapped and not collapsed — guards the 1px regression.  Width is a points
+    # value scaled per-DPI, so use a low, DPI-agnostic floor rather than a px count
+    list [winfo ismapped .vs] [expr {[winfo reqwidth .vs] >= 8}]
 } -result {1 1}
 
 # The find count area must fit a large "N of M" without clipping (the label was

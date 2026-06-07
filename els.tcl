@@ -680,12 +680,13 @@ proc els::init_style {} {
     # A traditional vertical scrollbar: clam's DEFAULT layout (so the up/down
     # arrow buttons are always drawn — unlike a thumb-only layout, and unlike the
     # classic Tk widget which on Windows only paints its arrows once activated).
-    # -arrowsize sets BOTH the arrow size and the bar's width, scaled for DPI so
-    # it is a chunky, easy-to-grab bar rather than a thin modern sliver.
-    set sbw [expr {max(17, int([tk scaling] * 14))}]
+    # -arrowsize sets both the arrow size and the bar's width.  Give it in POINTS
+    # (as clam's own default 10.5p does) so ttk scales it per-DPI automatically —
+    # a bare pixel value is NOT scaled by tk scaling.  12p is a chunky, easy-to-
+    # grab bar at any DPI.
     $s configure Vertical.TScrollbar -troughcolor $::els::PAGE \
         -background #BCBCBC -arrowcolor #4A4A4A -bordercolor #9A9A9A \
-        -relief raised -borderwidth 1 -arrowsize $sbw
+        -relief raised -borderwidth 1 -arrowsize 12p
     $s map Vertical.TScrollbar -background [list active #A4A4A4 disabled $::els::PAGE]
 }
 
