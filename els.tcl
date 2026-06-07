@@ -300,17 +300,26 @@ proc els::save_geometry {} {
     if {$::els::selftest} { return }
     set f [els::config_file]
     if {$f eq ""} { return }
+    # Build the whole payload BEFORE touching the file: a throw in any value
+    # command (e.g. `wm geometry .` on a window being torn down at quit) must not
+    # leave a truncated, empty config behind.
+    if {[catch {
+        set payload [dict create geometry [wm geometry .] \
+                         recent $::els::recent word_wrap $::els::word_wrap \
+                         show_whitespace $::els::show_ws \
+                         restore_session $::els::restore_session \
+                         session_files [els::session_current_files] \
+                         session_active [els::session_current_active]]
+    }]} { return }
+    # Write to a temp file then atomically rename, so a crash mid-write cannot
+    # corrupt the existing config either.
+    set tmp $f.tmp
     if {[catch {
         file mkdir [file dirname $f]
-        set fh [::open $f w]
-        puts $fh [dict create geometry [wm geometry .] \
-                      recent $::els::recent word_wrap $::els::word_wrap \
-                      show_whitespace $::els::show_ws \
-                      restore_session $::els::restore_session \
-                      session_files [els::session_current_files] \
-                      session_active [els::session_current_active]]
-        close $fh
-    }]} { return }
+        set fh [::open $tmp w]
+        try { puts $fh $payload } finally { close $fh }
+        file rename -force $tmp $f
+    }]} { catch {file delete -force $tmp} ; return }
 }
 
 proc els::session_path {p} {
@@ -1649,6 +1658,18 @@ proc els::saveas {} {
                -defaultextension .txt \
                -initialfile [els::doc_name $active]]
     if {$p eq ""} { return }
+    if {![catch {file normalize $p} np]} { set p $np }
+    # refuse to point this tab at a file already open in another tab: otherwise
+    # the two buffers diverge and saving one silently clobbers the other
+    foreach id $::els::docs {
+        if {$id ne $active && [info exists docPath($id)] && \
+                [els::same_path $docPath($id) $p]} {
+            tk_messageBox -parent . -icon warning -title els \
+                -message "That file is already open in another tab.\
+                          \nClose it there first, or choose a different name."
+            return
+        }
+    }
     set docPath($active) $p
     els::save
     els::update_tab $active
@@ -2125,7 +2146,9 @@ proc els::find_update {} {
     if {$find_word} {
         set useRegex 1
         set p [expr {$find_regex ? $find_q : [els::re_escape $find_q]}]
-        set pat "\\m$p\\M"
+        # group the pattern so the word boundaries bind the WHOLE pattern, not
+        # just the first/last alternative of an alternation like foo|bar
+        set pat "\\m(?:$p)\\M"
     }
     set sargs {-all}
     if {$useRegex}   { lappend sargs -regexp }
@@ -2196,7 +2219,7 @@ proc els::repl_for {w s e} {
     set matched [$w get $s $e]
     set repl $find_r
     if {$find_regex} {
-        set pat [expr {$find_word ? "\\m$find_q\\M" : $find_q}]
+        set pat [expr {$find_word ? "\\m(?:$find_q)\\M" : $find_q}]
         set fl {} ; if {!$find_case} { lappend fl -nocase }
         catch {regsub {*}$fl -- $pat $matched $find_r repl}
     }

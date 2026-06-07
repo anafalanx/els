@@ -850,3 +850,37 @@ test reg-5.2 {a genuine BOM-less UTF-16LE ASCII file is still detected as wide} 
     set id [els::open $p]
     list $::els::docEnc($id) [string match *quick* [[els::T] get 1.0 "end - 1 char"]]
 } -result {utf-16le 1}
+
+test reg-6.1 {Save As onto a path already open in another tab is refused (no lost update)} -setup {ui_reset} -body {
+    set shared [file join $::ELS_TMP reg61.txt]
+    set fh [open $shared w] ; puts $fh "ORIGINAL" ; close $fh
+    set id1 [els::open $shared]
+    set id2 [els::new_doc]
+    [els::T] insert end "FROM TAB 2"
+    set ::els_test_savefile $shared
+    els::saveas
+    set fh [open $shared r] ; set disk [string trim [read $fh]] ; close $fh
+    list $::els::docPath($id2) $disk
+} -result {{} ORIGINAL}
+
+test reg-6.2 {config save is atomic: a mid-build throw leaves the old config intact} -setup {ui_reset} -cleanup {
+    catch {rename els::session_current_files {}}
+    catch {rename _els_scf els::session_current_files}
+} -body {
+    set f [els::config_file]
+    els::save_geometry
+    set fh [open $f r] ; set good [read $fh] ; close $fh
+    rename els::session_current_files _els_scf
+    proc els::session_current_files {} { error boom }
+    els::save_geometry
+    set fh [open $f r] ; set after [read $fh] ; close $fh
+    list [expr {$after eq $good && [string length $good] > 0}] [file exists $f.tmp]
+} -result {1 0}
+
+test reg-7.1 {Whole Word + Regex alternation does not match inside larger words} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "foo bar foobar"
+    set ::els::find_regex 1 ; set ::els::find_word 1 ; set ::els::find_q {foo|bar}
+    els::find_update
+    llength $::els::find_matches
+} -result 2
