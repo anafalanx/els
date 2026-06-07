@@ -239,6 +239,20 @@ test saveas-1.2 {Save As cancelled writes nothing, leaves the doc untitled and d
     list $::els::docPath($d) [els::doc_dirty $d]
 } -result {{} 1}
 
+test saveas-1.3 {Save As write failure keeps the old path and does not add a recent} -setup {els_reset} -body {
+    set old [els_tmpfile saveas_old.txt "old\n"]
+    set d [els::open $old]
+    set beforeRecent $::els::recent
+    [els::W $d] insert end "edited"
+    set bad [file join $::ELS_TMP missing_dir saveas_failed.txt]
+    catch {file delete -force [file dirname $bad]}
+    set ::els_test_savefile $bad
+    set ok [els::saveas]
+    list $ok [els::same_path $::els::docPath($d) $old] \
+         [els::doc_dirty $d] [expr {$::els::recent eq $beforeRecent}] \
+         [file exists $bad]
+} -result {0 1 1 1 0}
+
 # save_with only changes the encoding + marks dirty; the next save writes the
 # bytes.  Pick UTF-16LE+BOM on a utf-8 doc, then save, and check the file bytes.
 test save-2.1 {save_with a new encoding, then save, writes that encoding's bytes} -setup {els_reset} -body {

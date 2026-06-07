@@ -195,6 +195,12 @@ test enc-3.10 {ICU detect returns empty for empty input (no crash on a 0-length 
          [expr {[::elsdet::detect "the quick brown fox jumps over the lazy dog"] ne ""}]
 } -result {1 1}
 
+test enc-3.11 {ICU extension package name matches the generated pkgIndex} -constraints detect -body {
+    package require icudet
+    list [package provide icudet] [package provide elsdet] \
+         [expr {[::elsdet::detect "the quick brown fox jumps over the lazy dog"] ne ""}]
+} -result {0.1 0.1 1}
+
 # ---- picker menus -------------------------------------------------------
 test enc-4.1 {encoding & EOL picker menus build, "Other" lists every encoding} -setup {els_reset} -body {
     els::build_enc_popup

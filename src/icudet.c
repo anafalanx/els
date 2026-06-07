@@ -86,6 +86,7 @@ int Icudet_Init(Tcl_Interp *ip) {
      * loads this from inside `::els`), and relative names would land there. */
     Tcl_CreateNamespace(ip, "::elsdet", nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::elsdet::detect", Detect_Cmd, nullptr, nullptr);
-    Tcl_PkgProvide(ip, "elsdet", "0.1");
+    if (Tcl_PkgProvide(ip, "icudet", "0.1") != TCL_OK) return TCL_ERROR;
+    if (Tcl_PkgProvide(ip, "elsdet", "0.1") != TCL_OK) return TCL_ERROR;
     return TCL_OK;
 }

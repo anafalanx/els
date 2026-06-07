@@ -1625,7 +1625,7 @@ proc els::open {{p ""} {quiet 0}} {
 proc els::save {} {
     variable active
     variable docPath
-    if {$active eq ""} { return }
+    if {$active eq ""} { return 0 }
     if {$docPath($active) eq ""} { return [els::saveas] }
     set w [els::W $active]
     set text [$w get 1.0 "end - 1 char"]
@@ -1652,7 +1652,7 @@ proc els::save {} {
         close $fh
     } err]} {
         tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
-        return
+        return 0
     }
     $w edit modified 0
     # keep the cached raw bytes in sync with what is now on disk, so a later
@@ -1662,6 +1662,7 @@ proc els::save {} {
     set ::els::docRaw($active) $bytes
     els::update_tab $active
     els::settitle
+    return 1
 }
 proc els::saveas {} {
     variable active
@@ -1670,7 +1671,7 @@ proc els::saveas {} {
     set p [tk_getSaveFile -parent . -filetypes [els::filetypes] \
                -defaultextension .txt \
                -initialfile [els::doc_name $active]]
-    if {$p eq ""} { return }
+    if {$p eq ""} { return 0 }
     if {![catch {file normalize $p} np]} { set p $np }
     # refuse to point this tab at a file already open in another tab: otherwise
     # the two buffers diverge and saving one silently clobbers the other
@@ -1680,13 +1681,20 @@ proc els::saveas {} {
             tk_messageBox -parent . -icon warning -title els \
                 -message "That file is already open in another tab.\
                           \nClose it there first, or choose a different name."
-            return
+            return 0
         }
     }
+    set oldPath $docPath($active)
     set docPath($active) $p
-    els::save
+    if {![els::save]} {
+        set docPath($active) $oldPath
+        els::update_tab $active
+        els::settitle
+        return 0
+    }
     els::update_tab $active
     els::recent_add $p
+    return 1
 }
 proc els::session_restore {} {
     if {!$::els::restore_session} { return 0 }
