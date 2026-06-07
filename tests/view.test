@@ -80,11 +80,17 @@ test wrap-1.2 {new documents inherit the current wrap setting} -setup {els_reset
 } -result word
 
 # ---- font zoom ----------------------------------------------------------
-test zoom-1.1 {zoom changes the document font size; the gutter shares the font} -setup {els_reset} -body {
+test zoom-1.1 {zoom changes the document font size; the gutter numbers share it} -setup {els_reset} -body {
+    [els::T] insert end "one\ntwo\n"
     set base [font configure elsMono -size]
-    els::zoom 3 ; set up [font configure elsMono -size]
+    els::zoom 3 ; els::draw_gutter ; update
+    set up [font configure elsMono -size]
+    # the gutter draws its numbers in the shared elsMono font, so zooming scales
+    # them with the document; check a drawn number uses elsMono
+    set fonts {}
+    foreach id [.ln find all] { if {[.ln type $id] eq "text"} { lappend fonts [.ln itemcget $id -font] } }
     list [expr {$up == $base + 3}] \
-         [expr {[font configure elsMono -size] == [font configure [.ln cget -font] -size]}] \
+         [expr {[lsearch -exact $fonts elsMono] >= 0}] \
          [expr {[lindex [[els::T] configure -spacing1] 4] == $::els::LEAD}]
 } -result {1 1 1}
 
@@ -96,25 +102,63 @@ test zoom-1.2 {zoom out, reset, and clamping} -setup {els_reset} -body {
     list $down $reset $hi $lo
 } -result {9 11 48 6}
 
-test wrap-1.3 {with wrap on, the gutter gains a continuation row per wrapped line} -setup {els_reset} -body {
+test wrap-1.3 {under word wrap, gutter numbers follow the wrapped display rows} -setup {els_reset} -body {
     set w [els::T]
-    wm geometry . 360x300 ; update      ;# narrow, to force a wrap
-    $w insert end "[string repeat ab 120]\nshort\n" ; update
+    wm geometry . 500x500 ; update      ;# tall enough to show line 1's wrap + lines 2,3
+    $w insert end "[string repeat {word } 30]\nsecond\nthird\n"
     set ::els::word_wrap 1 ; els::set_wrap ; update
-    # the long first line wraps, so the gutter has more rows than logical lines
-    expr {[lindex [split [.ln index end] .] 0] > [els::line_count]}
+    els::draw_gutter ; update
+    set ny [gutter_numbers]
+    set ls [font metrics elsMono -linespace]
+    # line 1 wraps to several rows, so number 2 sits more than one row below it
+    list [dict exists $ny 1] [dict exists $ny 2] \
+         [expr {[dict get $ny 2] - [dict get $ny 1] > $ls}]
+} -result {1 1 1}
+
+test wrap-1.4 {gutter numbers align to the text's display rows under wrap (dlineinfo)} -setup {els_reset} -body {
+    set w [els::T]
+    wm geometry . 500x500 ; update
+    $w insert end "[string repeat {word } 30]\nsecond\n"
+    set ::els::word_wrap 1 ; els::set_wrap ; update
+    els::draw_gutter ; update
+    # the canvas number for line 2 sits at line 2's first-display-row baseline
+    set di [$w dlineinfo 2.0]
+    set wantY [expr {[lindex $di 1] + [lindex $di 4] - [font metrics elsMono -ascent]}]
+    expr {abs([dict get [gutter_numbers] 2] - $wantY) <= 1}
 } -result 1
 
-test wrap-1.4 {a wrapped gutter group gets the leading-fix tags over the right rows} -setup {els_reset} -body {
+# ---- gutter: viewport-rendered Canvas -----------------------------------
+test gutter-1.1 {empty buffer draws line 1 and no current-line band} -setup {els_reset} -body {
+    els::draw_gutter ; update
+    list [dict keys [gutter_numbers]] [gutter_bands]
+} -result {1 0}
+
+test gutter-1.2 {a non-empty buffer draws one current-line band at the caret's line} -setup {els_reset} -body {
     set w [els::T]
-    wm geometry . 360x300 ; update      ;# narrow, to force line 1 to wrap
-    $w insert end "A [string repeat {x } 80]\nshort\n" ; update
-    set ::els::word_wrap 1 ; els::set_wrap ; update
-    # line 1 spans D gutter rows (lines 1..D); to match the text's leading the
-    # number row drops its bottom lead (gNoBot on 1..D-1) and the continuation
-    # rows drop their top lead (gNoTop on 2..D) — so the group is LEAD+D·ls+LEAD
-    set D [$w count -displaylines 1.0 2.0]
-    list [expr {$D > 1}] \
-         [expr {[.ln tag ranges gNoBot] eq [list 1.0 $D.0]}] \
-         [expr {[.ln tag ranges gNoTop] eq [list 2.0 [expr {$D + 1}].0]}]
-} -result {1 1 1}
+    $w insert end "one\ntwo\nthree\nfour"
+    $w mark set insert 3.0
+    els::refresh_view ; update
+    set bandY ""
+    foreach id [.ln find all] { if {[.ln type $id] eq "rectangle"} { set bandY [lindex [.ln coords $id] 1] } }
+    list [gutter_bands] [expr {$bandY == [lindex [$w dlineinfo 3.0] 1]}]
+} -result {1 1}
+
+test gutter-1.3 {the gutter renders only the visible numbers and follows scrolling} -setup {els_reset} -body {
+    set w [els::T]
+    wm geometry . 360x240 ; update
+    for {set i 1} {$i <= 400} {incr i} { $w insert end "L$i\n" }
+    els::draw_gutter ; update
+    set drawn [dict size [gutter_numbers]]
+    $w see end ; update ; els::draw_gutter ; update
+    set mn [lindex [lsort -integer [dict keys [gutter_numbers]]] 0]
+    list [expr {$drawn < 400}] [expr {$mn > 1}]
+} -result {1 1}
+
+test gutter-1.4 {the gutter widens as the line count grows by an order of magnitude} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "a\n" ; els::draw_gutter ; update
+    set narrow [.ln cget -width]
+    for {set i 1} {$i <= 200} {incr i} { $w insert end "x\n" }
+    els::draw_gutter ; update
+    expr {[.ln cget -width] > $narrow}
+} -result 1

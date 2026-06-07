@@ -80,6 +80,8 @@ namespace eval els {
     variable session_active ""    ;# active file path saved from the previous run
     variable config_path ""      ;# resolved els.conf path ("" until resolved)
     variable cfg_radio appdata   ;# first-run location dialog selection
+    variable gutter_px -1        ;# last-set gutter canvas width (px); -1 = unset
+    variable gutter_after ""     ;# coalesced gutter-redraw after token
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -749,18 +751,13 @@ proc els::build {} {
     # the tab strip
     frame .tabs -bg $::els::TABBG
 
-    # the shared line-number gutter — mirrors the buffer's padding + leading so
-    # numbers align with their text rows; quiet ink so it defers to the page
-    text .ln -width 4 -wrap none -font elsMono \
-        -bg $::els::GUTTER -fg $::els::GUTTINK \
-        -borderwidth 0 -highlightthickness 0 -padx 6 -pady 6 \
-        -spacing1 $::els::LEAD -spacing3 $::els::LEAD \
-        -takefocus 0 -cursor arrow -insertwidth 0 -state disabled
-    .ln tag configure currentLine -background $::els::LINE
-    # under word wrap, these suppress a gutter row's top / bottom leading so a
-    # wrapped logical line's continuation rows don't accumulate extra height
-    .ln tag configure gNoTop -spacing1 0
-    .ln tag configure gNoBot -spacing3 0
+    # the shared line-number gutter — a Canvas that draws only the numbers for
+    # the display rows currently on screen (see els::draw_gutter), so it is
+    # O(visible rows) regardless of file size and aligns with wrapped lines for
+    # free via the text widget's own dlineinfo.  quiet ink, defers to the page
+    canvas .ln -bg $::els::GUTTER -borderwidth 0 -highlightthickness 0 \
+        -width 40 -takefocus 0 -cursor arrow
+    set ::els::gutter_px -1   ;# fresh canvas: force the next width configure
 
     # the shared scrollbar
     ttk::scrollbar .vs -orient vertical -command {els::scroll}
@@ -1154,67 +1151,68 @@ proc els::update_current_line {} {
     if {[$w get 1.0 "end - 1 char"] ne ""} {
         $w tag add currentLine "$line.0" "$line.end + 1 char"
     }
-    .ln tag remove currentLine 1.0 end
-    if {$::els::word_wrap} {
-        # the gutter row of this logical line = display lines before it + 1
-        set grow [expr {[$w count -displaylines 1.0 "$line.0"] + 1}]
-        .ln tag add currentLine "$grow.0" "$grow.end"
-    } else {
-        .ln tag add currentLine "$line.0" "$line.end"
+    # the gutter's matching current-line band is drawn by els::draw_gutter
+}
+# Draw the line-number gutter for the CURRENTLY VISIBLE rows only, onto the
+# Canvas .ln.  We ask the text widget where each visible logical line's first
+# display row sits (dlineinfo) and place a right-aligned number at that baseline;
+# continuation rows of a wrapped line get no number.  Cost is O(visible rows),
+# independent of document size, and wrap alignment is exact and automatic (no
+# leading-mirror tags).  The current line gets a wash behind its number.
+proc els::draw_gutter {} {
+    set w [els::T]
+    if {$w eq "" || ![winfo exists .ln]} { return }
+    .ln delete all
+    set lines [els::line_count]
+    set digits [expr {max(2, [string length $lines] + 1)}]
+    # Pixel width for `digits` glyphs + padding.  Reconfigure ONLY on change: a
+    # width change is a geometry op, so caching keeps the scroll path geometry-
+    # free (digit count only changes on edits, never on a pure scroll).
+    set px [expr {[font measure elsMono [string repeat 8 $digits]] + 12}]
+    if {$px != $::els::gutter_px} {
+        set ::els::gutter_px $px
+        .ln configure -width $px
+    }
+    set h [winfo height $w]
+    if {$h <= 1} { return }   ;# not realized yet — a later refresh will draw it
+    set gw [winfo width .ln]
+    set right [expr {$gw - 6}]
+    set ascent [font metrics elsMono -ascent]
+    set first [lindex [split [$w index @0,0] .] 0]
+    set last  [lindex [split [$w index "@0,$h"] .] 0]
+    set cur   [lindex [split [$w index insert] .] 0]
+    set hasText [expr {[$w get 1.0 "end - 1 char"] ne ""}]
+    for {set ln $first} {$ln <= $last} {incr ln} {
+        set di [$w dlineinfo "$ln.0"]
+        if {$di eq ""} { continue }   ;# this line's first row is scrolled off
+        lassign $di dx dy dw dh dbase
+        if {$hasText && $ln == $cur} {
+            .ln create rectangle 0 $dy $gw [expr {$dy + $dh}] \
+                -fill $::els::LINE -outline ""
+        }
+        # anchor ne at (right, baseline-ascent) puts the number's baseline on the
+        # text row's baseline and its right edge at the gutter's right margin
+        .ln create text $right [expr {$dy + $dbase - $ascent}] -anchor ne \
+            -text $ln -font elsMono -fill $::els::GUTTINK
     }
 }
-proc els::update_line_numbers {} {
-    set w [els::T]
-    if {$w eq ""} { return }
-    set lines [els::line_count]
-    set width [expr {max(2, [string length $lines] + 1)}]
-    set numbers "" ; set groups {}
-    if {$::els::word_wrap} {
-        # one number per logical line + a blank row for each extra display row it
-        # wraps onto; record the multi-row groups so we can fix their leading
-        set g 1
-        for {set i 1} {$i <= $lines} {incr i} {
-            if {$i < $lines} { set to "[expr {$i + 1}].0" } else { set to end }
-            set dl [$w count -displaylines "$i.0" $to]
-            if {$dl < 1} { set dl 1 }
-            append numbers [format "%*d" [expr {$width - 1}] $i] [string repeat "\n" $dl]
-            if {$dl > 1} { lappend groups $g $dl }
-            incr g $dl
-        }
-    } else {
-        for {set i 1} {$i <= $lines} {incr i} {
-            append numbers [format "%*d\n" [expr {$width - 1}] $i]
-        }
-    }
-    .ln configure -state normal -width $width
-    .ln tag remove gNoTop 1.0 end ; .ln tag remove gNoBot 1.0 end
-    .ln delete 1.0 end
-    .ln insert end $numbers
-    # A wrapped logical line spans D gutter rows but the text gives it only
-    # LEAD above the first display row and LEAD below the last (none between).
-    # Mirror that: the number row keeps its top lead but drops its bottom lead;
-    # the final continuation row keeps the bottom lead; middle rows drop both —
-    # so the gutter group's height equals the text's (LEAD + D·linespace + LEAD).
-    foreach {first dl} $groups {
-        set last [expr {$first + $dl - 1}]
-        .ln tag add gNoBot "$first.0" "$last.0"
-        .ln tag add gNoTop "[expr {$first + 1}].0" "[expr {$last + 1}].0"
-    }
-    .ln configure -state disabled
-    els::sync_scroll
+# Coalesce gutter redraws caused by scrolling: a burst schedules ONE draw after
+# the display loop settles (mirrors the vscroll / whitespace deferrals, and
+# keeps the canvas width-configure out of the -yscrollcommand re-entrancy path).
+proc els::gutter_schedule {} {
+    variable gutter_after
+    after cancel $gutter_after
+    set gutter_after [after idle els::draw_gutter]
 }
 proc els::sync_scroll {} {
-    set w [els::T]
-    if {$w ne "" && [winfo exists .ln]} {
-        .ln yview moveto [lindex [$w yview] 0]
-    }
+    if {[els::T] ne "" && [winfo exists .ln]} { els::gutter_schedule }
 }
 proc els::yscroll {id first last} {
     variable active
     variable vs_after
     if {$id ne $active} { return }
     .vs set $first $last
-    .ln yview moveto $first
+    els::gutter_schedule   ;# redraw the visible gutter numbers for the new view
     # Defer the scrollbar show/hide to idle: it calls `grid` (a geometry change),
     # and running that from inside a -yscrollcommand can re-enter the display
     # loop. Coalesced so a burst of scrolls schedules one update.
@@ -1255,8 +1253,8 @@ proc els::wheel {delta} {
 proc els::refresh_view {} {
     if {[els::T] eq ""} { return }
     els::update_pos
-    els::update_line_numbers
     els::update_current_line
+    els::draw_gutter
     els::update_vscroll
     if {$::els::show_ws} { els::ws_refresh }
 }
@@ -2196,6 +2194,7 @@ proc els::find_highlight {idx} {
     set find_count "[expr {$idx + 1}] of $n"
     els::update_pos
     els::update_current_line
+    els::draw_gutter   ;# the caret moved — refresh the gutter band + visible nums
 }
 
 proc els::find_step {dir} {
@@ -2334,17 +2333,15 @@ proc els::set_show_ws {{persist 1}} {
     if {$persist} { els::save_geometry }
 }
 
-# Word wrap: soft-wrap long lines in every document.  The line-number gutter is
-# a separate -wrap none widget synced by fraction, so when wrap is on we give it
-# a blank continuation row for each extra display row a logical line occupies
-# (see update_line_numbers / update_current_line) so the numbers stay aligned.
+# Word wrap: soft-wrap long lines in every document.  The line-number gutter
+# (a Canvas, see els::draw_gutter) redraws from the text's dlineinfo, so wrapped
+# lines stay aligned automatically — refresh_view repaints it after the toggle.
 proc els::set_wrap {{persist 1}} {
     variable docs
     set mode [expr {$::els::word_wrap ? "word" : "none"}]
     foreach id $docs {
         if {[winfo exists [els::W $id]]} { [els::W $id] configure -wrap $mode }
     }
-    els::update_line_numbers
     els::refresh_view
     if {$persist} { els::save_geometry }
 }
@@ -2361,8 +2358,7 @@ proc els::set_font_size {size} {
         set w [els::W $id]
         if {[winfo exists $w]} { $w configure -spacing1 $::els::LEAD -spacing3 $::els::LEAD }
     }
-    catch {.ln configure -spacing1 $::els::LEAD -spacing3 $::els::LEAD}
-    els::update_line_numbers
+    set ::els::gutter_px -1   ;# font size changed: force a width recompute
     els::refresh_view
 }
 proc els::zoom {d}      { els::set_font_size [expr {$::els::font_size + $d}] }

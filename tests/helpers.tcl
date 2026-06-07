@@ -135,6 +135,24 @@ proc els_text {{id ""}} {
     return [$w get 1.0 "end - 1 char"]
 }
 
+# Canvas-gutter introspection for tests.  gutter_numbers returns a dict mapping
+# each drawn line number -> its anchor y on the canvas; gutter_bands counts the
+# current-line band rectangles.
+proc gutter_numbers {} {
+    set out {}
+    foreach id [.ln find all] {
+        if {[.ln type $id] eq "text"} {
+            dict set out [.ln itemcget $id -text] [lindex [.ln coords $id] 1]
+        }
+    }
+    return $out
+}
+proc gutter_bands {} {
+    set n 0
+    foreach id [.ln find all] { if {[.ln type $id] eq "rectangle"} { incr n } }
+    return $n
+}
+
 # Write a temp file with content; return its path.
 proc els_tmpfile {name content {enc utf-8}} {
     set p [file join $::ELS_TMP $name]
