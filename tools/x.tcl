@@ -69,7 +69,19 @@ proc tclsh {} { return [TCp tcl9 bin tclsh90.exe] }
 proc wish  {} { return [TCp tcl9 bin wish90.exe] }
 proc gcc   {} { return [TCp msys64 ucrt64 bin gcc.exe] }
 
-proc stream {args} { exec {*}$args >@ stdout 2>@ stderr }
+# Stream a child's stdout/stderr through to ours.  A non-zero exit from the
+# child is a NORMAL signal here (a failing test, a missing tool), so propagate
+# the child's own exit code rather than letting exec's "child process exited
+# abnormally" bubble up as if the task runner itself had crashed.  A genuine
+# exec failure (could not start, killed by a signal) is re-raised as before.
+proc stream {args} {
+    if {[catch {exec {*}$args >@ stdout 2>@ stderr} err opts]} {
+        if {[lindex [dict get $opts -errorcode] 0] eq "CHILDSTATUS"} {
+            exit [lindex [dict get $opts -errorcode] 2]
+        }
+        return -options $opts $err
+    }
+}
 
 # Cheap per-command guard: a task declares the tool(s) it needs; we only check
 # those exist (a microsecond `file exists`, NOT a full toolchain scan), and

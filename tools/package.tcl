@@ -100,14 +100,38 @@ if {[file isdirectory [file join $ROOT resources]]} {
 }
 
 # 3b. optional: embed compiled C extensions (loadable from the zipfs image)
+#
+# Only the extensions the PRODUCT itself loads ship in els.exe.  build/ also
+# holds cap.dll (the test-only PrintWindow capture used by tools/shot.tcl) and
+# elsx.dll (a demo extension); embedding every build/*.dll would bake those into
+# the shipped binary.  els.tcl `package require`s only icudet (charset
+# detection), so that is the whole allow-list.
+set PRODUCT_EXTS {icudet}
 set ndll 0
 if {$withExt} {
-    foreach dll [glob -nocomplain [file join $ROOT build *.dll]] {
-        file copy -force $dll [file join $stage [file tail $dll]]
+    foreach name $PRODUCT_EXTS {
+        set dll [file join $ROOT build $name.dll]
+        if {![file exists $dll]} continue
+        file copy -force $dll [file join $stage $name.dll]
         incr ndll
     }
+    # Write a lean pkgIndex carrying only the allow-listed loaders, reusing the
+    # exact `package ifneeded` lines `x build-ext` generated (so the version and
+    # init-proc name stay in sync) but dropping cap/elsx.
     set pidx [file join $ROOT build pkgIndex.tcl]
-    if {$ndll && [file exists $pidx]} { file copy -force $pidx [file join $stage pkgIndex.tcl] }
+    if {$ndll && [file exists $pidx]} {
+        set fh [open $pidx r] ; set src [read $fh] ; close $fh
+        set keep {}
+        foreach ln [split $src \n] {
+            foreach name $PRODUCT_EXTS {
+                if {[regexp "package ifneeded $name \[ \t\]" $ln]} { lappend keep $ln ; break }
+            }
+        }
+        set fh [open [file join $stage pkgIndex.tcl] w]
+        puts $fh "# lean product index — only the extensions els loads ([join $PRODUCT_EXTS {, }])"
+        puts $fh [join $keep \n]
+        close $fh
+    }
 }
 
 # 4. fuse — STRIP=stage so the staged tree lands at the archive root
