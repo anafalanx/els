@@ -471,18 +471,32 @@ proc els::recent_manage {} {
     grid rowconfigure .recent.f 2 -weight 1
     bind .recent.f.list <<ListboxSelect>> els::recent_manage_select
     bind .recent.f.list <Double-Button-1> els::recent_manage_open
-    # re-elide the rows to the new width whenever the window is resized
+    # re-elide the rows AND the detail label to the current width on any resize
     bind .recent.f.list <Configure> els::recent_manage_refresh
     bind .recent <Escape> {destroy .recent}
     bind .recent <Delete> els::recent_manage_remove
+    # the selected entry's full native path, on hover (the detail label elides it)
+    els::tooltip_for .recent.f.path els::recent_detail_tip
+
     els::recent_manage_refresh
     update idletasks
-    set w [winfo reqwidth .recent] ; set h [winfo reqheight .recent]
-    wm minsize .recent $w $h
+    # Pin a deliberate size, then keep it: a long selected path must NOT balloon
+    # the dialog through geometry propagation.  Width comes from the button row /
+    # subtitle plus a comfortable default — never from the longest path — and the
+    # rows + detail label elide to whatever width we settle on.  Height is one
+    # detail line plus chrome (the label is single-line, so it never grows tall).
+    set pad 44                              ;# frame padding (18*2) + a little slack
+    set minw [expr {[winfo reqwidth .recent.f.buttons] + $pad}]
+    set defw [expr {[font measure elsUI [string repeat n 52]] + $pad}]
+    set w [expr {max($minw, $defw)}]
+    set h [winfo reqheight .recent]
+    wm minsize .recent $minw $h
     set x [expr {[winfo rootx .] + ([winfo width .]  - $w) / 2}]
     set y [expr {[winfo rooty .] + ([winfo height .] - $h) / 3}]
-    wm geometry .recent +$x+$y
+    wm geometry .recent ${w}x${h}+$x+$y
     wm deiconify .recent
+    update idletasks
+    els::recent_manage_refresh   ;# the window now has its real width: elide to it
     focus .recent.f.list
 }
 # Pixel width available for a row of text inside the recent listbox (minus its
@@ -494,6 +508,21 @@ proc els::recent_manage_avail {} {
     if {![winfo exists $lb]} { return 100000 }
     set w [expr {[winfo width $lb] - 12}]
     return [expr {$w < 24 ? 100000 : $w}]
+}
+# Same idea for the bottom detail label (it spans the full content width).
+proc els::recent_detail_avail {} {
+    set l .recent.f.path
+    if {![winfo exists $l]} { return 100000 }
+    set w [expr {[winfo width $l] - 8}]
+    return [expr {$w < 24 ? 100000 : $w}]
+}
+# Tooltip text for the detail label: the full native path, but only while the
+# label is actually eliding it (mirrors the status-bar name tip).
+proc els::recent_detail_tip {} {
+    set p [els::recent_manage_path]
+    if {$p eq ""} { return "" }
+    if {[els::elide_path $p [els::recent_detail_avail]] eq $p} { return "" }
+    return [file nativename $p]
 }
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
@@ -535,7 +564,10 @@ proc els::recent_manage_select {} {
     foreach r $::els::recent {
         if {![file exists $r]} { set hasMissing 1 ; break }
     }
-    .recent.f.path configure -text [expr {$has ? [file nativename $p] : "No recent files"}]
+    # elide the detail path too (full native path is on hover) so a long path
+    # can't stretch the dialog wide
+    .recent.f.path configure -text \
+        [expr {$has ? [els::elide_path $p [els::recent_detail_avail]] : "No recent files"}]
     foreach b {.recent.f.buttons.open .recent.f.buttons.remove} {
         $b configure -state [expr {$has ? "normal" : "disabled"}]
     }

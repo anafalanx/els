@@ -675,9 +675,10 @@ test recent-2.1 {recent manager elides long paths but keeps the filename} -setup
     list [expr {$short eq "C:/short.txt"}] [string match "…/*notes.txt" $long] $fits
 } -result {1 1 1}
 
-# Eliding the visible row is cosmetic: the detail label still shows the full
-# native path, and the row index still maps to the real (unabridged) path.
-test recent-2.2 {recent detail label and index map to the full path despite elision} -setup {ui_reset} -body {
+# Eliding is cosmetic: the detail label elides (keeps the filename) so it can't
+# stretch the dialog, the full native path is carried by the hover tooltip, and
+# the row index still maps to the real (unabridged) path.
+test recent-2.2 {recent index maps to the full path; the tooltip carries it in full} -setup {ui_reset} -body {
     set full C:/Users/anafa/dev/els/a/very/deeply/nested/folder/with/segments/notes.txt
     set ::els::recent [list $full]
     els::recent_manage
@@ -689,10 +690,13 @@ test recent-2.2 {recent detail label and index map to the full path despite elis
     .recent.f.list selection set 0
     els::recent_manage_select
     set label [.recent.f.path cget -text]
+    set tip   [els::recent_detail_tip]
     set path  [els::recent_manage_path]
     catch {destroy .recent}
-    list [expr {$label eq [file nativename $full]}] [expr {$path eq $full}]
-} -result {1 1}
+    list [string match "…/*notes.txt" $label] \
+         [expr {$tip eq [file nativename $full]}] \
+         [expr {$path eq $full}]
+} -result {1 1 1}
 
 # The recent window's scrollbar is a ttk TScrollbar (the same traditional family
 # as the main editor bars), not the classic widget.
@@ -705,6 +709,32 @@ test recent-2.3 {recent window uses the shared ttk scrollbar style} -setup {ui_r
     catch {destroy .recent}
     set cls
 } -result TScrollbar
+
+# Regression: selecting a very long path must NOT balloon the dialog wide (the
+# detail label used to request the full path's width and geometry-propagate it to
+# the toplevel, which then stretched the listbox so its rows never had to elide).
+# The width must hold, and both the row and the detail label must stay elided.
+test recent-2.4 {a long selected path neither widens the dialog nor un-elides the list} -setup {ui_reset} -body {
+    set long "C:/a/very/deeply/nested/folder/structure/with/many/segments/that/keeps/going/and/going/until/it/is/extremely/long/notes.txt"
+    set ::els::recent [list "C:/short.txt" $long]
+    els::recent_manage
+    catch {wm attributes .recent -alpha 0.0}
+    update ; update idletasks
+    set w0 [winfo width .recent]
+    .recent.f.list selection clear 0 end
+    .recent.f.list selection set 1     ;# click the long path
+    els::recent_manage_select
+    update ; update idletasks
+    set w1     [winfo width .recent]
+    set row1   [.recent.f.list get 1]
+    set detail [.recent.f.path cget -text]
+    set davail [els::recent_detail_avail]
+    catch {destroy .recent}
+    list [expr {$w1 <= $w0 + 4}] \
+         [string match "…/*notes.txt" $row1] \
+         [string match "…/*notes.txt" $detail] \
+         [expr {[font measure elsUI $detail] <= $davail}]
+} -result {1 1 1 1}
 
 test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
     set ::els::word_wrap 1
