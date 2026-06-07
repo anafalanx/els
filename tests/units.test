@@ -124,3 +124,41 @@ test unit-decode-4 {decode strips a utf-16le BOM then decodes the body} -body {
 test unit-decode-5 {decode without a BOM strips nothing} -body {
     els::decode [encoding convertto utf-8 "héllo"] utf-8 0
 } -result héllo
+
+# ---- title bar: only 'els' + version (no filename) ----------------------
+test unit-title-1 {title bar shows only els + version, even with a file open} -setup {els_reset} -body {
+    els::open [els_tmpfile titled.txt "hi\n"]
+    els::settitle
+    wm title .
+} -result "els $::els::version"
+
+# ---- path helpers -------------------------------------------------------
+test unit-samepath-1 {same_path is case-insensitive on Windows and rejects empties} -body {
+    list \
+        [els::same_path "C:/Foo/Bar.txt" "c:/foo/BAR.TXT"] \
+        [els::same_path "C:/Foo/Bar.txt" "C:/Foo/Baz.txt"] \
+        [els::same_path "" "C:/x.txt"]
+} -result {1 0 0}
+
+test unit-sessionsan-1 {session_sanitize drops blanks and normalized duplicates} -body {
+    els::session_sanitize [list "C:/x/y.txt" "" "C:/x/y.txt" "C:/x/z.txt"]
+} -result [list [els::session_path "C:/x/y.txt"] [els::session_path "C:/x/z.txt"]]
+
+# ---- elide_path (status-bar name elision) -------------------------------
+test unit-elide-1 {elide_path returns the path unchanged when it fits} -setup {els_reset} -body {
+    els::elide_path "C:/a/b/file.txt" 100000
+} -result {C:/a/b/file.txt}
+test unit-elide-2 {elide_path fits the result in the budget and marks the elision} -setup {els_reset} -body {
+    set p "C:/very/deeply/nested/directory/document.txt"
+    set out [els::elide_path $p 80]
+    list [expr {[font measure elsUI $out] <= 80}] [string match …* $out] \
+         [expr {[string length $out] < [string length $p]}]
+} -result {1 1 1}
+
+# ---- selftest report path resolution ------------------------------------
+test unit-selftest-path-1 {selftest_report_path honours an explicit request} -body {
+    els::selftest_report_path "C:/tmp/my-report.txt"
+} -result {C:/tmp/my-report.txt}
+test unit-selftest-path-2 {selftest_report_path falls back to a default file name} -body {
+    string match *els-selftest.txt [els::selftest_report_path ""]
+} -result 1
