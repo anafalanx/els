@@ -1986,27 +1986,44 @@ proc els::shortcuts {} {
                 Ctrl+X  {Cut}
                 Ctrl+C  {Copy}
                 Ctrl+V  {Paste}
+                Ctrl+A  {Select all}
+            }
+        }
+        {
+            Navigation {
+                {Home / End}      {Line start / end}
+                {Ctrl+Home / End} {File start / end}
+                {Ctrl+← / →}      {Word left / right}
+                {Ctrl+↑ / ↓}      {Paragraph up / down}
+                {PageUp / PageDn} {Page up / down}
+            }
+            Selection {
+                {Shift+arrows}        {Extend selection}
+                {Ctrl+Shift+← / →}    {Extend by word}
+                {Shift+Home / End}    {Select to line edge}
+                {Ctrl+Shift+Home/End} {Select to file edge}
+            }
+            Tabs {
+                Ctrl+Tab        {Next tab}
+                Ctrl+Shift+Tab  {Previous tab}
             }
         }
         {
             Search {
-                Ctrl+F       {Find}
-                Ctrl+H       {Replace}
-                Ctrl+G       {Go to line}
-                Enter        {Next match}
-                Shift+Enter  {Previous match}
-                {↑ / ↓}      {Search history}
-                Esc          {Close find bar}
+                Ctrl+F          {Find}
+                Ctrl+H          {Replace}
+                Ctrl+G          {Go to line}
+                {F3 / Shift+F3} {Next / prev match}
+                Enter           {Next match}
+                Shift+Enter     {Previous match}
+                {↑ / ↓}         {Search history}
+                Esc             {Close find bar}
             }
             View {
                 {Ctrl  +}    {Zoom in}
                 {Ctrl  −}    {Zoom out}
                 {Ctrl  0}    {Reset zoom}
                 {Ctrl Wheel} {Zoom}
-            }
-            Tabs {
-                Ctrl+Tab        {Next tab}
-                Ctrl+Shift+Tab  {Previous tab}
             }
         }
     }
@@ -2028,8 +2045,8 @@ proc els::shortcuts {} {
             grid  $sec.h -row 0 -column 0 -columnspan 2 -sticky w -padx 10 -pady {8 5}
             set sr 1
             foreach {k d} $rows {
-                label $sec.k$sr -text $k -font elsMono -fg $::els::INK   -bg $bg -anchor w
-                label $sec.d$sr -text $d -font elsUI   -fg $::els::MUTED -bg $bg -anchor w
+                label $sec.k$sr -text $k -font elsMonoHelp -fg $::els::INK   -bg $bg -anchor w
+                label $sec.d$sr -text $d -font elsUI       -fg $::els::MUTED -bg $bg -anchor w
                 grid  $sec.k$sr -row $sr -column 0 -sticky w -padx {10 18} -pady {1 1}
                 grid  $sec.d$sr -row $sr -column 1 -sticky w -padx {0 12}  -pady {1 1}
                 incr sr
