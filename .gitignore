@@ -20,6 +20,10 @@
 # the fused single-file exe (rebuilt via `x build`; ship via releases)
 /els.exe
 
+# release staging dir: `x build` writes dist/els.exe here so a running els.exe
+# is never disturbed; holds the exe + scratch shots, none of it committed
+/dist/
+
 # a "portable" config chosen during a dev run lands next to els.tcl (the repo
 # root here); real builds write it next to els.exe instead
 /els.conf
