@@ -838,3 +838,15 @@ test reg-4.1 {Ctrl+H in the find field switches to replace without eating a char
     event generate $e <Control-h> ; update
     list [$e get] $::els::find_mode
 } -result {foobar replace}
+
+test reg-5.1 {an ASCII file with a stray NUL is read as text, not misdetected as UTF-16} -setup {ui_reset} -body {
+    set p [raw_write reg51.txt "field1\x00field2 the quick brown fox jumps over the lazy dog\n"]
+    set id [els::open $p]
+    list $::els::docEnc($id) [string match *field2* [[els::T] get 1.0 "end - 1 char"]]
+} -result {utf-8 1}
+
+test reg-5.2 {a genuine BOM-less UTF-16LE ASCII file is still detected as wide} -constraints detect -setup {ui_reset} -body {
+    set p [raw_write reg52.txt [encoding convertto utf-16le "The quick brown fox jumps over the lazy dog.\n"]]
+    set id [els::open $p]
+    list $::els::docEnc($id) [string match *quick* [[els::T] get 1.0 "end - 1 char"]]
+} -result {utf-16le 1}

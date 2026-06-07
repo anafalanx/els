@@ -1298,9 +1298,26 @@ proc els::icu_to_tcl {name} {
     return ""
 }
 
-# Resolve a BOM-less wide encoding (NUL bytes present).  ICU nails LE/BE/32;
-# without ICU, fall back to a NUL-parity guess (UTF-16 LE/BE only).
+# Resolve a BOM-less wide encoding from a STRONG UTF-16/32 NUL signature.  A
+# genuine wide file has many NULs concentrated in one byte-parity (the high-byte
+# of each mostly-ASCII code unit).  A file with only a few stray NULs (a log, a
+# text/db export, ASCII with an embedded NUL) is NOT wide and returns "" so it is
+# read as text instead of being mangled into UTF-16.  ICU picks LE/BE/32 once the
+# signature is established; without ICU, parity gives UTF-16 LE/BE.
 proc els::detect_wide {raw sample} {
+    set n [string length $sample]
+    if {$n < 4} { return "" }
+    set even 0 ; set odd 0 ; set i 0
+    foreach b [split $sample ""] {
+        if {$b eq "\x00"} { if {$i & 1} { incr odd } else { incr even } }
+        incr i
+    }
+    set nul [expr {$even + $odd}]
+    set dominant [expr {max($even, $odd)}]
+    set other    [expr {min($even, $odd)}]
+    # require a structural share of NULs (>~5%) lopsided to one parity; a couple
+    # of stray NULs, or NULs spread across both parities (binary), are not wide
+    if {$nul * 20 < $n || $other > $dominant / 3} { return "" }
     if {$::els::have_detect} {
         set d [::elsdet::detect $raw]
         if {[llength $d] == 2} {
@@ -1308,22 +1325,13 @@ proc els::detect_wide {raw sample} {
             if {[string match utf-* $enc]} { return $enc }
         }
     }
-    set even 0 ; set odd 0 ; set i 0
-    foreach b [split $sample ""] {
-        if {$b eq "\x00"} { if {$i & 1} { incr odd } else { incr even } }
-        incr i
-    }
-    if {$even == 0 && $odd == 0} { return "" }
-    if {$even > $odd} { return utf-16be }
-    return utf-16le
+    return [expr {$even > $odd ? "utf-16be" : "utf-16le"}]
 }
 
+# Fast ASCII-only test: true iff every byte is < 0x80.  Uses the C-level
+# `string is` instead of a per-byte Tcl loop (which froze the UI on a big file).
 proc els::bytes_ascii_only {raw} {
-    foreach ch [split $raw ""] {
-        scan $ch %c c
-        if {$c > 127} { return 0 }
-    }
-    return 1
+    return [string is ascii $raw]
 }
 
 proc els::detect_encoding {raw} {
