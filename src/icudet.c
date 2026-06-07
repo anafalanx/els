@@ -48,7 +48,10 @@ static int Detect_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     if (err > 0 || !det) { Tcl_SetObjResult(ip, Tcl_NewObj()); return TCL_OK; }
     err = 0; p_setText(det, (const char *)bytes, (int)len, &err);
     err = 0; UCSM m = p_detect(det, &err);
-    Tcl_Obj *res = Tcl_NewObj();
+    /* build the {name conf} list only on success; allocate the empty fallback
+     * obj only when there is no match — creating it up front and overwriting it
+     * with the list would abandon (leak) the empty obj on every detection. */
+    Tcl_Obj *res = nullptr;
     if (m && err <= 0) {
         err = 0; const char *name = p_getName(m, &err);
         err = 0; int conf = p_getConfidence(m, &err);
@@ -58,6 +61,7 @@ static int Detect_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
             Tcl_ListObjAppendElement(ip, res, Tcl_NewIntObj(conf));
         }
     }
+    if (res == nullptr) res = Tcl_NewObj();   /* empty = no detection */
     p_close(det);
     Tcl_SetObjResult(ip, res);
     return TCL_OK;

@@ -51,10 +51,16 @@ static int Window_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     bih.biCompression = BI_RGB;
 
     Tcl_Size npix = (Tcl_Size)w * h * 4;
-    unsigned char *buf = (unsigned char *)Tcl_Alloc(40 + npix);
+    unsigned char *buf = (unsigned char *)Tcl_Alloc(40 + npix);  /* Tcl_Alloc panics on OOM */
     memcpy(buf, &bih, 40);
+    /* GetDIBits treats its BITMAPINFO as in+out: it reads the requested format
+     * and writes the actual dimensions back into it.  Give it a scratch copy so
+     * it cannot mutate the top-down header we just wrote into buf (e.g. flip
+     * biHeight to +h), which would leave the stored header inconsistent with the
+     * top-down pixel rows. */
+    BITMAPINFOHEADER qih = bih;
     int lines = GetDIBits(screen, bmp, 0, (UINT)h, buf + 40,
-                          (BITMAPINFO *)&bih, DIB_RGB_COLORS);
+                          (BITMAPINFO *)&qih, DIB_RGB_COLORS);
 
     SelectObject(mem, old);
     DeleteObject(bmp);
