@@ -1,0 +1,21 @@
+# tests/stress.test — the UI-driven encoding stress test, in the default suite.
+#
+# Opens / reopens / saves ~34 sample files across every encoding (deliberately
+# mismatched, to force mojibake) — ~800 real UI operations driven by generated
+# events and menu invokes — and asserts els never hangs, crashes, or corrupts
+# the buffer, that every op stays within the per-op time budget, and that BOM /
+# UTF detection stays correct.  This is the slowest test in the suite by design
+# (the same body `x stress` runs standalone); it is the in-suite safety net
+# against encoding regressions.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+# Tell encoding_stress.tcl it is being sourced (not run as `x stress`), so it
+# defines els_stress_run without auto-running + exiting.
+set ::els_stress_sourced 1
+source [file join [file dirname [info script]] encoding_stress.tcl]
+
+test stress-1.1 {UI-driven encoding stress: ~800 ops, no hang/crash/corruption, within budget} -body {
+    els_stress_run   ;# returns the list of failures — empty == all good
+} -result {}

@@ -148,7 +148,16 @@ set ::SAMPLES {
 # 7 encodings to reopen each sample as (mostly wrong → mojibake)
 set ::REOPEN_SET {utf-8 utf-16le utf-16be cp1252 cp1251 cp932 big5}
 
-puts "=== els encoding stress (UI-driven: events + menu invoke) ==="
+# The whole run, wrapped in a proc so the default suite (tests/stress.test) can
+# invoke it and assert on the result; `x stress` runs it standalone (below).
+# Returns the list of failures — empty means PASS.
+proc els_stress_run {} {
+    set ::FAIL {} ; set ::DETECT {}        ;# fresh accumulators for this run
+    foreach c {open reopen saveas savewith opengarble} {
+        dict set ::T_count $c 0 ; dict set ::T_total $c 0
+        dict set ::T_max $c 0   ; dict set ::T_maxlbl $c ""
+    }
+    puts "=== els encoding stress (UI-driven: events + menu invoke) ==="
 puts "detector: [expr {$::els::have_detect ? {ICU available} : {UNAVAILABLE (BOM/UTF-8/cp1252 only)}}]"
 puts "samples: [expr {[llength $::SAMPLES]/4}]   reopen-as: [llength $::REOPEN_SET]/sample   save-as: 5/sample"
 puts "per-op budget: ${::BUDGET_MS} ms\n"
@@ -259,12 +268,21 @@ if {$::els::have_detect} {
     want_detect utf-16be-nobom utf-16be 0
 }
 
-# ---- verdict -------------------------------------------------------------
-puts ""
-if {[llength $::FAIL]} {
-    puts "RESULT: FAIL ([llength $::FAIL] issue(s))"
-    foreach f $::FAIL { puts "  - $f" }
-    exit 1
+    return $::FAIL
 }
-puts "RESULT: PASS — $nOps UI operations, no hang, no crash, all within budget."
-exit 0
+
+# ---- entry points -------------------------------------------------------
+# Standalone (`x stress`): run it, print the verdict, exit with a status.  When
+# sourced by the default suite, tests/stress.test sets ::els_stress_sourced
+# first and calls els_stress_run itself, so skip the auto-run here.
+if {![info exists ::els_stress_sourced]} {
+    set fails [els_stress_run]
+    puts ""
+    if {[llength $fails]} {
+        puts "RESULT: FAIL ([llength $fails] issue(s))"
+        foreach f $fails { puts "  - $f" }
+        exit 1
+    }
+    puts "RESULT: PASS — no hang, no crash, all within budget."
+    exit 0
+}
