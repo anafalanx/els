@@ -448,7 +448,8 @@ proc els::recent_manage {} {
         -borderwidth 0 -highlightthickness 1 -highlightbackground $::els::HAIR \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
         -bg $bg -fg $::els::INK -yscrollcommand {.recent.f.vs set}
-    ttk::scrollbar .recent.f.vs -orient vertical -command {.recent.f.list yview}
+    scrollbar .recent.f.vs -orient vertical -command {.recent.f.list yview} \
+        -takefocus 0 -highlightthickness 0
     grid .recent.f.list -row 2 -column 0 -columnspan 2 -sticky nsew
     grid .recent.f.vs   -row 2 -column 2 -sticky ns
 
@@ -677,20 +678,9 @@ proc els::init_style {} {
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
     $s map Dialog.TButton -background [list pressed $hair active $::els::TABBG] \
         -foreground [list disabled $::els::MUTED]
-    # a slim, arrow-less vertical scrollbar (thumb only)
-    $s layout Vertical.TScrollbar {
-        Vertical.Scrollbar.trough -sticky ns -children {
-            Vertical.Scrollbar.thumb -expand 1 -sticky nswe
-        }
-    }
-    # clam derives the scrollbar's CROSS-AXIS width from -arrowsize, not -width;
-    # the custom layout above has no arrow elements, so -arrowsize 12 just makes
-    # the (arrow-less) bar 12px wide.  -arrowsize 0 collapsed it to 1px (invisible).
-    $s configure Vertical.TScrollbar -troughcolor $::els::PAGE \
-        -background #CACACA -bordercolor $::els::PAGE \
-        -lightcolor #CACACA -darkcolor #CACACA \
-        -borderwidth 0 -arrowsize 12 -width 12 -gripcount 0
-    $s map Vertical.TScrollbar -background [list active #B0B0B0 disabled $::els::PAGE]
+    # Scrollbars are the CLASSIC Tk `scrollbar` widget (traditional 3D arrows +
+    # slider, platform/DPI-appropriate width) rather than a flat thumb-only ttk
+    # bar — see .vs in build and .recent.f.vs.  Function over form, by request.
 }
 
 # ---- build the UI -------------------------------------------------------
@@ -762,8 +752,9 @@ proc els::build {} {
         -width 40 -takefocus 0 -cursor arrow
     set ::els::gutter_px -1   ;# fresh canvas: force the next width configure
 
-    # the shared scrollbar
-    ttk::scrollbar .vs -orient vertical -command {els::scroll}
+    # the shared scrollbar — classic Tk widget: traditional arrows + slider, and
+    # a real platform-default width (the flat ttk thumb rendered far too narrow)
+    scrollbar .vs -orient vertical -command els::scroll -takefocus 0 -highlightthickness 0
 
     # the find / replace bar (hidden until Ctrl+F / Ctrl+H)
     els::build_findbar
