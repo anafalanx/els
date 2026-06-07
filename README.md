@@ -24,9 +24,10 @@ Grab the latest **`els.exe`** from the [Releases](../../releases) page. It's one
 file, nothing to install. It's unsigned, so Windows SmartScreen may warn on
 first launch: choose **More info → Run anyway**.
 
-To make els available for `.txt` files, use **Help > Set Up File
-Associations...**. els registers itself as an option and opens Windows Default
-Apps so you can choose it there.
+To make els open `.txt` and other plain-text files, use **Help > File
+Associations...**. els registers as an option, and the dialog reflects every
+type currently opening with els — however it was set, including Explorer's "Open
+with" — so you can add or remove them; Windows still confirms any new default.
 
 ## Features
 
@@ -45,10 +46,14 @@ Apps so you can choose it there.
   tints.
 - **Recent files & session restore**: a compact recent-files manager plus
   reopen-on-start, on by default.
-- **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel (the font
-  family is fixed: no picker, by design).
-- **Go to line**, window-geometry persistence, portable/profile `els.conf`, the
-  els look and the awl icon.
+- **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel, remembered
+  across sessions (the font family is fixed: no picker, by design).
+- **File associations**: register els as an opener for plain-text types via
+  **Help > File Associations...**; the dialog reflects what currently opens with
+  els (including choices made through Explorer's "Open with") and removes them
+  cleanly, by whatever mechanism they were set.
+- **Go to line**, **Always on Top**, window- and zoom-level persistence,
+  portable/profile `els.conf`, the els look and the awl icon.
 
 ![Find and replace with visible whitespace](docs/img/find-whitespace-0.21.png)
 
@@ -109,7 +114,7 @@ basis of els's encoding auto-detection.
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.28**: a working editor, evolving.
+it, or build it yourself. Currently **v0.29**: a working editor, evolving.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).
