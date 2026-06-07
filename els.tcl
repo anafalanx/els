@@ -1991,16 +1991,16 @@ proc els::shortcuts {} {
         }
         {
             Navigation {
-                {Home / End}      {Line start / end}
-                {Ctrl+Home / End} {File start / end}
+                {Home/End}        {Line start / end}
+                {Ctrl+Home/End}   {File start / end}
                 {Ctrl+←/→}        {Word left / right}
                 {Ctrl+↑/↓}        {Paragraph up / down}
-                {PageUp / PageDn} {Page up / down}
+                {PageUp/PageDn}   {Page up / down}
             }
             Selection {
                 {Shift+arrows}        {Extend selection}
                 {Ctrl+Shift+←/→}      {Extend by word}
-                {Shift+Home / End}    {Select to line edge}
+                {Shift+Home/End}      {Select to line edge}
                 {Ctrl+Shift+Home/End} {Select to file edge}
             }
             Tabs {
@@ -2013,7 +2013,7 @@ proc els::shortcuts {} {
                 Ctrl+F          {Find}
                 Ctrl+H          {Replace}
                 Ctrl+G          {Go to line}
-                {F3 / Shift+F3} {Next / prev match}
+                {F3/Shift+F3}   {Next / prev match}
                 Enter           {Next match}
                 Shift+Enter     {Previous match}
                 {↑/↓}           {Search history}
