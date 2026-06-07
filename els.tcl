@@ -2147,13 +2147,31 @@ proc els::tip_cancel {} {
     if {[info exists ::els::tip_after]} { after cancel $::els::tip_after ; unset ::els::tip_after }
     catch {destroy .tip}
 }
+# Wrap long tooltip text so it can't run off the screen.  Tk labels only wrap at
+# whitespace, but our long tips are paths (separators, usually no spaces), so we
+# insert the breaks: after a separator/space once a line reaches ~target, and a
+# hard break if a run grows past target+cap with no natural break point.
+proc els::tip_wrap {s {target 72} {cap 24}} {
+    if {[string length $s] <= $target} { return $s }
+    set out {} ; set line ""
+    foreach ch [split $s ""] {
+        append line $ch
+        set n [string length $line]
+        if {($n >= $target && [string first $ch "/\\ -_"] >= 0) || $n >= $target + $cap} {
+            lappend out $line ; set line ""
+        }
+    }
+    if {$line ne ""} { lappend out $line }
+    return [join $out \n]
+}
 proc els::tip_pop {w text} {
     catch {destroy .tip}
     if {![winfo exists $w] || $text eq ""} { return }
     toplevel .tip -bd 0
     wm overrideredirect .tip 1
     catch {wm attributes .tip -topmost 1}
-    label .tip.l -text $text -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
+    label .tip.l -text [els::tip_wrap $text] -justify left \
+        -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
     pack .tip.l
     update idletasks
     set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
@@ -2192,7 +2210,8 @@ proc els::tip_pop_at {text rx ry} {
     toplevel .tip -bd 0
     wm overrideredirect .tip 1
     catch {wm attributes .tip -topmost 1}
-    label .tip.l -text $text -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
+    label .tip.l -text [els::tip_wrap $text] -justify left \
+        -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
     pack .tip.l
     update idletasks
     set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]

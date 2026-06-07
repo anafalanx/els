@@ -856,6 +856,19 @@ test lp-2.2 {a >260 document shows a clean, prefix-free name and tooltip} -const
          [expr {[string match {[A-Za-z]:\\*} $nt]}]
 } -result {1 0 1}
 
+# Tooltips wrap long (separator-only) paths so they can't run off the screen.
+test tip-1.1 {tip_wrap leaves short text alone and wraps long paths losslessly} -body {
+    set short C:/a/b.txt
+    set long "[string repeat deeply-nested-path-segment-00/ 8]leaf.txt"
+    set lines [split [els::tip_wrap $long] \n]
+    set maxlen 0
+    foreach l $lines { if {[string length $l] > $maxlen} { set maxlen [string length $l] } }
+    list [els::tip_wrap $short] \
+         [expr {[llength $lines] > 1}] \
+         [expr {$maxlen <= 96}] \
+         [expr {[join $lines {}] eq $long}]
+} -result {C:/a/b.txt 1 1 1}
+
 test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
     set ::els::word_wrap 1
     els::set_wrap
