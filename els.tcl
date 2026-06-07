@@ -296,6 +296,9 @@ proc els::load_geometry {} {
         set ::els::always_on_top [expr {$t ? 1 : 0}]
         catch {els::set_always_on_top 0}
     }
+    if {![catch {dict get $data font_size} fs] && [string is integer -strict $fs]} {
+        catch {els::set_font_size $fs 0}   ;# apply the saved zoom (no re-persist)
+    }
     if {![catch {dict get $data restore_session} rs]} {
         set ::els::restore_session [expr {$rs ? 1 : 0}]
     }
@@ -318,6 +321,7 @@ proc els::save_geometry {} {
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
                          always_on_top $::els::always_on_top \
+                         font_size $::els::font_size \
                          restore_session $::els::restore_session \
                          session_files [els::session_current_files] \
                          session_active [els::session_current_active]]
@@ -2606,7 +2610,7 @@ proc els::set_wrap {{persist 1}} {
 # Text size (the font FAMILY is fixed; users can only zoom).  elsMono is a named
 # font shared by every document and the gutter, so resizing it scales them all;
 # we then recompute the leading and rebuild the gutter so numbers stay aligned.
-proc els::set_font_size {size} {
+proc els::set_font_size {size {persist 1}} {
     set size [expr {max(6, min(48, $size))}]
     set ::els::font_size $size
     font configure elsMono -size $size
@@ -2617,6 +2621,7 @@ proc els::set_font_size {size} {
     }
     set ::els::gutter_px -1   ;# font size changed: force a width recompute
     els::refresh_view
+    if {$persist} { els::save_geometry }   ;# remember the zoom level across runs
 }
 proc els::zoom {d}      { els::set_font_size [expr {$::els::font_size + $d}] }
 proc els::zoom_reset {} { els::set_font_size 11 }

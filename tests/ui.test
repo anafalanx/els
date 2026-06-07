@@ -930,6 +930,14 @@ test cfg-0.1a {show whitespace survives a config save / load round-trip} -setup 
         [expr {[llength [$w tag ranges wsSpace]] > 0 || [llength [$w tag ranges wsTrail]] > 0}]
 } -result {1 1 1}
 
+test cfg-0.1b {zoom level (font size) is persisted and restored, and applied to elsMono} -setup {ui_reset} -body {
+    els::set_font_size 18                                  ;# zoom -> persists
+    set persisted [dict get [raw_read $::els::config_path] font_size]
+    els::set_font_size 11 0                                ;# change in memory only
+    els::load_geometry                                    ;# restores 18 from config
+    list $persisted $::els::font_size [font configure elsMono -size]
+} -result {18 18 18}
+
 test cfg-0.2 {restore previous session defaults on and is exposed as a setting} -setup {ui_reset} -body {
     set labels {}
     for {set i 0} {$i <= [.menu.file index end]} {incr i} {
