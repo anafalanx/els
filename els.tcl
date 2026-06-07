@@ -86,6 +86,7 @@ namespace eval els {
     variable gutter_px -1        ;# last-set gutter canvas width (px); -1 = unset
     variable gutter_after ""     ;# coalesced gutter-redraw after token
     variable recent_row_tip -1   ;# recent-list row whose hover tip is active
+    variable assoc_sel           ;# file-associations dialog: ext -> checked (array)
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -668,60 +669,197 @@ proc els::association_exe {} {
     if {[file exists $near]} { return [file normalize $near] }
     return ""
 }
-proc els::assoc_commands {exe} {
+# The curated set of plain-text file types els is a sensible default for.  Tier
+# is "rec" (recommended, pre-checked) or "opt" (offered, unchecked).  Code/markup
+# (json, xml, html, js, py, ...) is deliberately absent: els has no syntax
+# highlighting, so it should not claim to be the default for those.
+proc els::assoc_types {} {
+    return {
+        rec txt        {Plain text}
+        rec log        {Log files}
+        rec ini        {INI settings}
+        rec conf       {Config files}
+        rec cfg        {Config files}
+        rec nfo        {Info text}
+        rec text       {Plain text}
+        opt toml       {TOML config}
+        opt yaml       {YAML config}
+        opt yml        {YAML config}
+        opt csv        {Comma-separated}
+        opt tsv        {Tab-separated}
+        opt env        {Env / dotenv}
+        opt properties {Java properties}
+        opt srt        {Subtitles}
+    }
+}
+proc els::assoc_recommended {} {
+    set out {}
+    foreach {t e d} [els::assoc_types] { if {$t eq "rec"} { lappend out $e } }
+    return $out
+}
+# Which extensions to pre-check in the dialog: whatever is already registered, or
+# the recommended set on a clean machine.
+proc els::assoc_precheck {registered} {
+    return [expr {[llength $registered] ? $registered : [els::assoc_recommended]}]
+}
+# reg.exe commands to register els as an OPTION for each extension in $exts (and
+# in Windows' Default-Apps list).  Per-user only (HKCU); never sets an
+# extension's default ProgID and never touches UserChoice — Windows still asks
+# the user to confirm the default.  $exts defaults to the recommended set.
+proc els::assoc_commands {exe {exts ""}} {
+    if {$exts eq ""} { set exts [els::assoc_recommended] }
     set exe [file nativename [file normalize $exe]]
     set appExe [file tail $exe]
-    set progid {els.txt}
+    set progid els.txt
     set openCmd [format {"%s" "%%1"} $exe]
     set icon [format {"%s",0} $exe]
+    set clsKey "HKCU\\Software\\Classes\\$progid"
     set appKey "HKCU\\Software\\Classes\\Applications\\$appExe"
     set capKey {HKCU\Software\anafalanx\els\Capabilities}
-    return [list \
-        [list reg.exe add {HKCU\Software\Classes\els.txt} /ve /d {els Text File} /f] \
-        [list reg.exe add {HKCU\Software\Classes\els.txt\DefaultIcon} /ve /d $icon /f] \
-        [list reg.exe add {HKCU\Software\Classes\els.txt\shell\open\command} /ve /d $openCmd /f] \
-        [list reg.exe add {HKCU\Software\Classes\.txt\OpenWithProgids} /v $progid /t REG_SZ /d "" /f] \
-        [list reg.exe add $appKey /v FriendlyAppName /t REG_SZ /d els /f] \
-        [list reg.exe add "$appKey\\SupportedTypes" /v .txt /t REG_SZ /d "" /f] \
-        [list reg.exe add "$appKey\\shell\\open\\command" /ve /d $openCmd /f] \
-        [list reg.exe add $capKey /v ApplicationName /t REG_SZ /d els /f] \
-        [list reg.exe add $capKey /v ApplicationDescription /t REG_SZ /d {A tiny text editor for Windows.} /f] \
-        [list reg.exe add $capKey /v ApplicationIcon /t REG_SZ /d $icon /f] \
-        [list reg.exe add "$capKey\\FileAssociations" /v .txt /t REG_SZ /d $progid /f] \
-        [list reg.exe add {HKCU\Software\RegisteredApplications} /v els /t REG_SZ /d {Software\anafalanx\els\Capabilities} /f]]
+    set cmds {}
+    # one shared ProgID for every els text type
+    lappend cmds [list reg.exe add $clsKey /ve /d {els Text File} /f]
+    lappend cmds [list reg.exe add "$clsKey\\DefaultIcon" /ve /d $icon /f]
+    lappend cmds [list reg.exe add "$clsKey\\shell\\open\\command" /ve /d $openCmd /f]
+    # the application + its capabilities (so els appears in Default Apps)
+    lappend cmds [list reg.exe add $appKey /v FriendlyAppName /t REG_SZ /d els /f]
+    lappend cmds [list reg.exe add "$appKey\\shell\\open\\command" /ve /d $openCmd /f]
+    lappend cmds [list reg.exe add $capKey /v ApplicationName /t REG_SZ /d els /f]
+    lappend cmds [list reg.exe add $capKey /v ApplicationDescription /t REG_SZ /d {A tiny text editor for Windows.} /f]
+    lappend cmds [list reg.exe add $capKey /v ApplicationIcon /t REG_SZ /d $icon /f]
+    lappend cmds [list reg.exe add {HKCU\Software\RegisteredApplications} /v els /t REG_SZ /d {Software\anafalanx\els\Capabilities} /f]
+    foreach e $exts {
+        lappend cmds [list reg.exe add "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid /t REG_SZ /d "" /f]
+        lappend cmds [list reg.exe add "$appKey\\SupportedTypes" /v ".$e" /t REG_SZ /d "" /f]
+        lappend cmds [list reg.exe add "$capKey\\FileAssociations" /v ".$e" /t REG_SZ /d $progid /f]
+    }
+    return $cmds
+}
+# reg.exe commands to UNregister els as an option for each extension in $exts
+# (leaving the shared ProgID and the app registration intact).
+proc els::assoc_unregister_commands {exts} {
+    set progid els.txt
+    set appExe [file tail [els::association_exe]]
+    set appKey "HKCU\\Software\\Classes\\Applications\\$appExe"
+    set capKey {HKCU\Software\anafalanx\els\Capabilities}
+    set cmds {}
+    foreach e $exts {
+        lappend cmds [list reg.exe delete "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid /f]
+        lappend cmds [list reg.exe delete "$capKey\\FileAssociations" /v ".$e" /f]
+        if {$appExe ne ""} {
+            lappend cmds [list reg.exe delete "$appKey\\SupportedTypes" /v ".$e" /f]
+        }
+    }
+    return $cmds
 }
 proc els::assoc_run {cmd} {
     exec {*}$cmd
 }
-proc els::assoc_register_txt {{exe ""}} {
-    if {$exe eq ""} { set exe [els::association_exe] }
-    if {$exe eq "" || ![file exists $exe]} {
-        error "Cannot find els.exe to register."
+# Extensions (from our curated set) currently registered to els's ProgID.
+proc els::assoc_registered_exts {} {
+    set progid els.txt
+    set out {}
+    foreach {t e d} [els::assoc_types] {
+        if {![catch {exec reg.exe query "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid}]} {
+            lappend out $e
+        }
     }
-    foreach cmd [els::assoc_commands $exe] {
-        els::assoc_run $cmd
-    }
+    return $out
 }
 proc els::open_default_apps {} {
     if {[catch {exec cmd.exe /c start "" ms-settings:defaultapps &}]} {
         els::open_url ms-settings:defaultapps
     }
 }
-proc els::setup_file_associations {{exe ""}} {
+# Apply the dialog's checkbox state: register the checked extensions, unregister
+# the unchecked ones, then send the user to Windows' Default-Apps settings.
+proc els::assoc_apply {} {
+    variable assoc_sel
+    set exe [els::association_exe]
+    if {$exe eq "" || ![file exists $exe]} {
+        tk_messageBox -parent .assoc -icon warning -title els \
+            -message "Associations can only be set from the built els.exe.\nBuild it (x build) and run that, then try again."
+        return
+    }
+    set reg {} ; set unreg {}
+    foreach {t e d} [els::assoc_types] {
+        if {[info exists assoc_sel($e)] && $assoc_sel($e)} { lappend reg $e } else { lappend unreg $e }
+    }
+    set err ""
+    foreach cmd [els::assoc_commands $exe $reg] {
+        if {[catch {els::assoc_run $cmd} e]} { set err $e }
+    }
+    foreach cmd [els::assoc_unregister_commands $unreg] { catch {els::assoc_run $cmd} }
+    if {$err ne ""} {
+        tk_messageBox -parent .assoc -icon error -title els \
+            -message "Some associations could not be set:\n$err"
+        return
+    }
+    catch {destroy .assoc}
+    tk_messageBox -parent . -icon info -title els \
+        -message "Done. Windows Settings will open so you can pick els as the default for the types you chose."
+    els::open_default_apps
+}
+proc els::file_associations {} {
     if {$::tcl_platform(platform) ne "windows"} {
         tk_messageBox -parent . -icon info -title els \
-            -message "File association setup is only available on Windows."
-        return 0
+            -message "File associations are only available on Windows."
+        return
     }
-    if {[catch {els::assoc_register_txt $exe} err]} {
-        tk_messageBox -parent . -icon error -title els \
-            -message "Could not register els for .txt files:\n$err"
-        return 0
+    catch {destroy .assoc}
+    toplevel .assoc -bg $::els::PAGE
+    wm withdraw .assoc
+    wm title .assoc "File Associations"
+    wm transient .assoc .
+    wm resizable .assoc 0 0
+    set bg $::els::PAGE
+    variable assoc_sel
+    array unset assoc_sel
+    set pre [els::assoc_precheck [els::assoc_registered_exts]]
+    foreach {t e d} [els::assoc_types] { set assoc_sel($e) [expr {$e in $pre}] }
+    frame .assoc.f -bg $bg
+    pack  .assoc.f -padx 28 -pady 22
+    label .assoc.f.title -text "File Associations" -font elsUIb -fg $::els::INK -bg $bg
+    label .assoc.f.sub -text "Which plain-text file types should open with els?" \
+        -font elsUI -fg $::els::MUTED -bg $bg
+    grid .assoc.f.title -row 0 -column 0 -columnspan 2 -sticky w
+    grid .assoc.f.sub   -row 1 -column 0 -columnspan 2 -sticky w -pady {2 14}
+    set rc [frame .assoc.f.rec -bg $bg -highlightthickness 1 -highlightbackground $::els::HAIR]
+    set oc [frame .assoc.f.opt -bg $bg -highlightthickness 1 -highlightbackground $::els::HAIR]
+    grid $rc -row 2 -column 0 -sticky nw -padx {0 14}
+    grid $oc -row 2 -column 1 -sticky nw
+    label $rc.h -text "Recommended" -font elsUIb -fg $::els::INK -bg $bg
+    label $oc.h -text "Optional"     -font elsUIb -fg $::els::INK -bg $bg
+    grid $rc.h -row 0 -column 0 -columnspan 2 -sticky w -padx 12 -pady {8 5}
+    grid $oc.h -row 0 -column 0 -columnspan 2 -sticky w -padx 12 -pady {8 5}
+    set rr 1 ; set orr 1
+    foreach {t e d} [els::assoc_types] {
+        if {$t eq "rec"} { set par $rc ; set row $rr } else { set par $oc ; set row $orr }
+        checkbutton $par.c$e -text ".$e" -variable ::els::assoc_sel($e) \
+            -font elsMonoHelp -fg $::els::INK -bg $bg -activebackground $bg \
+            -activeforeground $::els::INK -selectcolor $bg -highlightthickness 0 -anchor w -padx 4
+        label $par.d$e -text $d -font elsUI -fg $::els::MUTED -bg $bg -anchor w
+        grid $par.c$e -row $row -column 0 -sticky w -padx {10 16} -pady 1
+        grid $par.d$e -row $row -column 1 -sticky w -padx {0 12} -pady 1
+        if {$t eq "rec"} { incr rr } else { incr orr }
     }
-    tk_messageBox -parent . -icon info -title els \
-        -message "els is registered as an option for .txt files.\n\nWindows Settings will open so you can choose els as the default app."
-    els::open_default_apps
-    return 1
+    grid rowconfigure $rc 99 -minsize 8 ; grid rowconfigure $oc 99 -minsize 8
+    label .assoc.f.note -text "els registers as an option only; Windows still asks you to confirm the default per type." \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor w -justify left -wraplength 420
+    grid .assoc.f.note -row 3 -column 0 -columnspan 2 -sticky w -pady {14 12}
+    frame .assoc.f.b -bg $bg
+    grid .assoc.f.b -row 4 -column 0 -columnspan 2 -sticky ew
+    ttk::button .assoc.f.b.apply -text Apply -style Dialog.TButton -command els::assoc_apply
+    ttk::button .assoc.f.b.close -text Close -style Dialog.TButton -command {destroy .assoc}
+    pack .assoc.f.b.close .assoc.f.b.apply -side right -padx {6 0}
+    grid columnconfigure .assoc.f {0 1} -weight 1
+    bind .assoc <Escape> {destroy .assoc}
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth .assoc]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .assoc]) / 4}]
+    wm geometry .assoc +$x+$y
+    wm deiconify .assoc
+    focus .assoc
 }
 
 # ---- flat chrome styling ------------------------------------------------
@@ -854,7 +992,7 @@ proc els::build {} {
     menu .menu.help
     .menu add cascade -label Help -menu .menu.help
     .menu.help add command -label "Keyboard Shortcuts" -command els::shortcuts
-    .menu.help add command -label "Set Up File Associations..." -command els::setup_file_associations
+    .menu.help add command -label "File Associations..." -command els::file_associations
     .menu.help add separator
     .menu.help add command -label "About els" -command els::about
 

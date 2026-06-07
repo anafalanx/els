@@ -505,7 +505,7 @@ test ui-9.3 {Help exposes Keyboard Shortcuts; Save As is bound to Ctrl+Shift+S} 
             lappend labels [.menu.help entrycget $i -label]
         }
     }
-    list [lindex $labels 0] [expr {"Set Up File Associations..." in $labels}] \
+    list [lindex $labels 0] [expr {"File Associations..." in $labels}] \
          [expr {[bind . <Control-Shift-S>] ne ""}]
 } -result {{Keyboard Shortcuts} 1 1}
 
@@ -531,7 +531,7 @@ test ui-9.4 {file association registration is per-user and does not take over .t
          [expr {!$touchesUserChoice}]
 } -result {1 1 1 1 1 1 1}
 
-test ui-9.5 {Help setup registers .txt then opens Default Apps} -setup {
+test ui-9.5 {File Associations: opening shows the dialog, Apply registers the checked types + opens Default Apps} -setup {
     ui_reset
     set ::els_test_assoc_exe [raw_write assoc_els.exe ""]
     set ::els_test_assoc_commands {}
@@ -542,20 +542,69 @@ test ui-9.5 {Help setup registers .txt then opens Default Apps} -setup {
     proc ::els::assoc_run {cmd} { lappend ::els_test_assoc_commands $cmd }
     rename ::els::open_default_apps ::els::open_default_apps_real
     proc ::els::open_default_apps {} { set ::els_test_default_apps 1 }
+    rename ::els::assoc_registered_exts ::els::assoc_registered_exts_real
+    proc ::els::assoc_registered_exts {} { return {} }
 } -cleanup {
-    rename ::els::association_exe {}
-    rename ::els::association_exe_real ::els::association_exe
-    rename ::els::assoc_run {}
-    rename ::els::assoc_run_real ::els::assoc_run
-    rename ::els::open_default_apps {}
-    rename ::els::open_default_apps_real ::els::open_default_apps
+    rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
+    rename ::els::assoc_run {} ; rename ::els::assoc_run_real ::els::assoc_run
+    rename ::els::open_default_apps {} ; rename ::els::open_default_apps_real ::els::open_default_apps
+    rename ::els::assoc_registered_exts {} ; rename ::els::assoc_registered_exts_real ::els::assoc_registered_exts
+    catch {destroy .assoc}
 } -body {
-    .menu.help invoke "Set Up File Associations..."
-    set attempted [llength $::els_test_assoc_commands]
-    set blob [join [lmap cmd $::els_test_assoc_commands {join $cmd "\n"}] "\n"]
-    set usesExe [expr {[string first [file nativename $::els_test_assoc_exe] $blob] >= 0}]
-    list $attempted $usesExe $::els_test_default_apps
-} -result {12 1 1}
+    .menu.help invoke "File Associations..."          ;# opens the dialog
+    set isWin [winfo exists .assoc]
+    foreach {t e d} [els::assoc_types] { set ::els::assoc_sel($e) [expr {$e in {txt log}}] }
+    els::assoc_apply
+    set blob [join [lmap cmd $::els_test_assoc_commands {join $cmd " "}] "\n"]
+    list $isWin \
+         [expr {[string first {\.txt\OpenWithProgids} $blob] >= 0}] \
+         [expr {[string first {\.log\OpenWithProgids} $blob] >= 0}] \
+         [expr {[string first [file nativename $::els_test_assoc_exe] $blob] >= 0}] \
+         $::els_test_default_apps
+} -result {1 1 1 1 1}
+
+test assoc-1.1 {assoc_commands registers only the chosen extensions, per-user, as options} -setup {ui_reset} -body {
+    set blob [join [lmap c [els::assoc_commands [file join $::ELS_TMP els.exe] {log csv}] {join $c " "}] "\n"]
+    list [expr {[string first {\.log\OpenWithProgids} $blob] >= 0}] \
+         [expr {[string first {\.csv\OpenWithProgids} $blob] >= 0}] \
+         [expr {[string first {\.txt\OpenWithProgids} $blob] < 0}] \
+         [expr {[string first {FileAssociations} $blob] >= 0}] \
+         [expr {[string first HKLM $blob] < 0}] \
+         [expr {[string first UserChoice $blob] < 0}]
+} -result {1 1 1 1 1 1}
+
+test assoc-1.2 {assoc_unregister_commands removes the option for the given extensions} -setup {ui_reset} -body {
+    set blob [join [lmap c [els::assoc_unregister_commands {log}] {join $c " "}] "\n"]
+    list [expr {[string first {reg.exe delete} $blob] >= 0}] \
+         [expr {[string first {\.log\OpenWithProgids} $blob] >= 0}]
+} -result {1 1}
+
+test assoc-1.3 {curated set: recommended is the plain-text core; no markdown or code; precheck logic} -setup {ui_reset} -body {
+    set exts {} ; foreach {t e d} [els::assoc_types] { lappend exts $e }
+    list [els::assoc_recommended] \
+         [expr {"md" ni $exts && "markdown" ni $exts}] \
+         [expr {"json" ni $exts && "js" ni $exts && "py" ni $exts && "html" ni $exts}] \
+         [els::assoc_precheck {}] \
+         [els::assoc_precheck {csv yml}]
+} -result {{txt log ini conf cfg nfo text} 1 1 {txt log ini conf cfg nfo text} {csv yml}}
+
+test assoc-2.1 {File Associations dialog has checkboxes for recommended + optional types} -setup {
+    ui_reset
+    rename ::els::assoc_registered_exts ::els::assoc_registered_exts_real
+    proc ::els::assoc_registered_exts {} { return {} }
+} -cleanup {
+    rename ::els::assoc_registered_exts {} ; rename ::els::assoc_registered_exts_real ::els::assoc_registered_exts
+    catch {destroy .assoc}
+} -body {
+    els::file_associations
+    catch {wm withdraw .assoc}
+    set allSel 1
+    foreach {t e d} [els::assoc_types] { if {![info exists ::els::assoc_sel($e)]} { set allSel 0 } }
+    list [winfo exists .assoc] \
+         [winfo exists .assoc.f.rec.ctxt] [winfo exists .assoc.f.opt.ccsv] \
+         [winfo exists .assoc.f.b.apply] \
+         $::els::assoc_sel(txt) $::els::assoc_sel(csv) $allSel
+} -result {1 1 1 1 1 0 1}
 
 test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
     set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]
