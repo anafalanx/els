@@ -545,7 +545,7 @@ proc els::recent_detail_tip {} {
     set p [els::recent_manage_path]
     if {$p eq ""} { return "" }
     if {[els::elide_path $p [els::recent_detail_avail]] eq $p} { return "" }
-    return [els::display_path $p]
+    return [els::path_tip $p]
 }
 # Per-row hover tooltip for the recent listbox: when the cursor is over a row
 # whose displayed path is elided, show the full native path near the cursor.
@@ -563,7 +563,7 @@ proc els::recent_row_motion {x y rx ry} {
     set p [lindex $::els::recent $i]
     if {[$lb get $i] eq $p} { return }      ;# row not elided -> no tip
     set ::els::tip_after [after 550 \
-        [list els::tip_pop_at [els::display_path $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
+        [list els::tip_pop_at [els::path_tip $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
 }
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
@@ -1126,7 +1126,7 @@ proc els::tab_text {id} {
 proc els::tab_tip {id} {
     if {![info exists ::els::docPath($id)]} { return "" }
     set p $::els::docPath($id)
-    return [expr {$p eq "" ? "" : [els::display_path $p]}]
+    return [expr {$p eq "" ? "" : [els::path_tip $p]}]
 }
 proc els::make_tab {id} {
     set tf [els::tabW $id]
@@ -1217,6 +1217,14 @@ proc els::strip_ext_prefix {p} {
 proc els::display_path {p} {
     return [file nativename [els::strip_ext_prefix $p]]
 }
+# Tooltip text for a path: the display path followed by its character length in
+# square brackets, e.g.  C:\dir\file.txt [15].  ("" stays "" so empty tips are
+# still suppressed.)  The length is of the real path, sans extended prefix.
+proc els::path_tip {p} {
+    if {$p eq ""} { return "" }
+    set d [els::display_path $p]
+    return "$d \[[string length $d]\]"
+}
 proc els::elide_path {p avail} {
     set p [els::strip_ext_prefix $p]
     if {[font measure elsUI $p] <= $avail} { return $p }
@@ -1243,7 +1251,7 @@ proc els::name_tip {} {
     if {$active eq "" || ![info exists ::els::docPath($active)]} { return "" }
     set p $::els::docPath($active)
     if {$p eq "" || [.sb.name cget -text] eq $p} { return "" }
-    return [els::display_path $p]
+    return [els::path_tip $p]
 }
 proc els::status_link_enter {w} {
     if {![winfo exists $w]} { return }

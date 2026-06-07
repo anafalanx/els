@@ -538,21 +538,22 @@ test ui-9.5 {Help setup registers .txt then opens Default Apps} -setup {
     list $attempted $usesExe $::els_test_default_apps
 } -result {12 1 1}
 
-test ui-10.1 {status name tooltip: native path only while the label is eliding} -setup {ui_reset} -body {
-    set ::els::docPath($::els::active) "C:/some/dir/notes.txt"
-    .sb.name configure -text "C:/some/dir/notes.txt"   ;# whole path fits — no tip
+test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
+    set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]
+    set ::els::docPath($::els::active) $p
+    .sb.name configure -text $p             ;# whole path fits — no tip
     set a [els::name_tip]
-    .sb.name configure -text "…/notes.txt"             ;# elided — show full path
+    .sb.name configure -text "…/notes.txt"  ;# elided — show full path + length
     set b [els::name_tip]
-    list [expr {$a eq ""}] [expr {$b eq [file nativename "C:/some/dir/notes.txt"]}]
+    list [expr {$a eq ""}] [expr {$b eq "$fn \[[string length $fn]\]"}]
 } -result {1 1}
 
-test ui-10.2 {tab tooltip is the native full path, empty for an untitled tab} -setup {ui_reset} -body {
+test ui-10.2 {tab tooltip is the native full path + length, empty for an untitled tab} -setup {ui_reset} -body {
     set id $::els::active
     set u [els::tab_tip $id]
-    set ::els::docPath($id) "C:/x/y.txt"
+    set ::els::docPath($id) "C:/x/y.txt" ; set fn [file nativename "C:/x/y.txt"]
     set delayed [expr {[string first " $::els::tab_tip_delay" [bind [els::tabW $id] <Enter>]] >= 0}]
-    list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq [file nativename "C:/x/y.txt"]}] $delayed
+    list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq "$fn \[[string length $fn]\]"}] $delayed
 } -result {1 1 1}
 
 test ui-10.3 {find bar sits above the text (row 1); text + gutter at row 2} -setup {ui_reset} -body {
@@ -692,9 +693,10 @@ test recent-2.2 {recent index maps to the full path; the tooltip carries it in f
     set label [.recent.f.path cget -text]
     set tip   [els::recent_detail_tip]
     set path  [els::recent_manage_path]
+    set fn    [file nativename $full]
     catch {destroy .recent}
     list [string match "…/*notes.txt" $label] \
-         [expr {$tip eq [file nativename $full]}] \
+         [expr {$tip eq "$fn \[[string length $fn]\]"}] \
          [expr {$path eq $full}]
 } -result {1 1 1}
 
@@ -868,6 +870,14 @@ test tip-1.1 {tip_wrap leaves short text alone and wraps long paths losslessly} 
          [expr {$maxlen <= 96}] \
          [expr {[join $lines {}] eq $long}]
 } -result {C:/a/b.txt 1 1 1}
+
+# Path tooltips append the path's character length in [brackets]; the extended
+# prefix is stripped first so the count is of the real path; "" stays "".
+test tip-1.2 {path_tip appends the path length and strips the extended prefix} -body {
+    list [els::path_tip C:/Users/me/notes.txt] \
+         [els::path_tip {//?/C:/a/b/leaf.txt}] \
+         [els::path_tip {}]
+} -result {{C:\Users\me\notes.txt [21]} {C:\a\b\leaf.txt [15]} {}}
 
 test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
     set ::els::word_wrap 1
