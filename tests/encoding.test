@@ -136,12 +136,15 @@ test enc-3.4b {chosen save encoding is not stored in config} \
             set ::els_test_selftest $::els::selftest
             set ::els::selftest 0
         } -body {
-    set p [write_raw no_encoding_pref.txt "plain ascii\n"]
+    set p [write_raw enc_not_persisted.txt "plain ascii\n"]
     els::open $p
     els::save_with iso8859-1 0
     els::save_geometry
     set conf [read_raw $::els::config_path]
-    expr {[string first file_encodings $conf] < 0}
+    # the chosen per-document save encoding must NOT leak into the shared config;
+    # assert the literal encoding name is absent (the old check only looked for a
+    # key els never writes, so it passed no matter what)
+    expr {[string first iso8859-1 $conf] < 0 && [string first file_encodings $conf] < 0}
 } -cleanup {
     set ::els::selftest $::els_test_selftest
     unset -nocomplain ::els_test_selftest
@@ -199,7 +202,7 @@ proc rt_bom {enc} {
     return [dict get {utf-8 "\xEF\xBB\xBF" utf-16le "\xFF\xFE" utf-16be "\xFE\xFF" \
                       utf-32le "\xFF\xFE\x00\x00" utf-32be "\x00\x00\xFE\xFF"} $enc]
 }
-test enc-roundtrip-100 {save-with-encoding then reopen recovers the text in most cases} \
+test enc-roundtrip-100 {save-with-encoding then reopen recovers the text for all 100 combos} \
         -constraints detect -setup {els_reset} -body {
     array set S {
         uni      "Café — naïve Ωμέγα 日本語 한국어 €100"
@@ -260,7 +263,9 @@ test enc-roundtrip-100 {save-with-encoding then reopen recovers the text in most
     if {[llength $misses]} { puts "  not recovered: [join $misses {, }]" }
     puts "  (UTF*/CJK/Western recover fully; short single-byte Cyrillic /\
 Central-European are the heuristic's hard cases)"
-    # "in most cases" — UTF variants, CJK and Western round-trip; the inherent
-    # ambiguity of short single-byte legacy text caps the rest.
-    expr {$total == 100 && $recovered >= 70}
+    # Strict: every one of the 100 combos must recover its text exactly.  The
+    # bar used to be a vague ">= 70"; the save/reopen path actually round-trips
+    # all of them (each text is paired with an encoding that can represent it),
+    # so assert the full count and catch any regression in save/detect/decode.
+    expr {$total == 100 && $recovered == 100}
 } -result 1
