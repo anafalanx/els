@@ -73,6 +73,10 @@ test ui-1.5 {empty document does not paint a text current-line band} -setup {ui_
     list $emptyRanges [expr {[llength [$w tag ranges currentLine]] > 0}]
 } -result {0 1}
 
+test ui-1.6 {document caret is a 4px non-blinking bar; the gutter shows none} -setup {ui_reset} -body {
+    list [[els::T] cget -insertwidth] [[els::T] cget -insertofftime] [.ln cget -insertwidth]
+} -result {4 0 0}
+
 # ---- tabs (via generated events) ----------------------------------------
 test ui-2.1 {Ctrl+N opens a new tab} -setup {ui_reset} -body {
     set b [llength $::els::docs]
