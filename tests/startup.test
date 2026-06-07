@@ -2,9 +2,24 @@
 source [file join [file dirname [info script]] helpers.tcl]
 namespace import ::tcltest::test
 
+# Locate a wish to drive the process-level probes.  Prefer one sitting next to
+# the interpreter that is actually running the suite (portable to any layout),
+# then fall back to the vendored toolchain path; return "" if none is found so
+# the tests SKIP (constraint below) instead of hard-failing the whole suite on a
+# machine without the vendored wish.
 proc startup_wish {} {
-    return [file join $::ELS_ROOT .toolchain tcl9 bin wish90.exe]
+    set dir [file dirname [info nameofexecutable]]
+    foreach cand [list \
+            [file join $dir wish90.exe]  [file join $dir wish90] \
+            [file join $dir wish.exe]    [file join $dir wish] \
+            [file join $::ELS_ROOT .toolchain tcl9 bin wish90.exe] \
+            [file join $::ELS_ROOT .toolchain tcl9 bin wish90]] {
+        if {[file executable $cand]} { return $cand }
+    }
+    return ""
 }
+# Run the process-level startup tests only when a wish is actually available.
+::tcltest::testConstraint startup [expr {[startup_wish] ne ""}]
 proc startup_appdir {name} {
     set d [file join $::ELS_TMP startup_$name]
     catch {file delete -force $d}
@@ -54,7 +69,7 @@ proc startup_probe {appdir args} {
     return [startup_wait_report $report $pid]
 }
 
-test startup-1.1 {first launch without config maps and asks where to keep els.conf} -setup {
+test startup-1.1 {first launch without config maps and asks where to keep els.conf} -constraints startup -setup {
     set app [startup_appdir first]
 } -body {
     set r [startup_probe $app]
@@ -65,7 +80,7 @@ test startup-1.1 {first launch without config maps and asks where to keep els.co
     catch {file delete -force $app}
 } -result {1 1 1 {} 0 0}
 
-test startup-1.2 {existing config suppresses first-run location prompt} -setup {
+test startup-1.2 {existing config suppresses first-run location prompt} -constraints startup -setup {
     set app [startup_appdir configured]
 } -body {
     set conf [file join $app els.conf]
@@ -78,7 +93,7 @@ test startup-1.2 {existing config suppresses first-run location prompt} -setup {
     catch {file delete -force $app}
 } -result {1 0 els.conf 1}
 
-test startup-1.3 {startup restore reopens saved files and active tab} -setup {
+test startup-1.3 {startup restore reopens saved files and active tab} -constraints startup -setup {
     set app [startup_appdir restore]
 } -body {
     set p1 [startup_write [file join $app one.txt] "one\n"]
@@ -95,7 +110,7 @@ test startup-1.3 {startup restore reopens saved files and active tab} -setup {
     catch {file delete -force $app}
 } -result {0 2 {one.txt two.txt} two.txt}
 
-test startup-1.4 {explicit launch file takes precedence over saved session} -setup {
+test startup-1.4 {explicit launch file takes precedence over saved session} -constraints startup -setup {
     set app [startup_appdir explicit]
 } -body {
     set p1 [startup_write [file join $app previous.txt] "previous\n"]

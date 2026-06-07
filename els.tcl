@@ -2451,6 +2451,15 @@ proc els::main {} {
         set startupReport [expr {$envProbe ? $::env(ELS_STARTUP_PROBE) : \
                                  ($startupProbe ? [lindex $::argv 1] : "")}]
         set fileArgs [expr {!$envProbe && $startupProbe ? [lrange $::argv 2 end] : $::argv}]
+        if {$startupProbe} {
+            # Headless probe: keep the window off the user's screen (alpha 0 still
+            # counts as mapped, so the probe's assertions hold) and route any
+            # startup error to stderr + exit instead of a modal dialog — the test
+            # then fails on a missing report rather than hanging behind a dialog.
+            catch {wm attributes . -alpha 0.0}
+            proc ::bgerror {msg args} { catch {puts stderr "els startup-probe: $msg"} ; exit 3 }
+            catch {interp bgerror {} ::bgerror}
+        }
         # open every file argument, each in its own tab (the first reuses the
         # initial empty document).  Explicit launch files take precedence over
         # the saved session, which is only for a plain app start.
