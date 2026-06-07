@@ -87,7 +87,12 @@ namespace eval els {
     variable gutter_after ""     ;# coalesced gutter-redraw after token
     variable recent_row_tip -1   ;# recent-list row whose hover tip is active
     variable assoc_sel           ;# file-associations dialog: ext -> checked (array)
+    variable boot_script ""      ;# path of this file at source time (see below)
 }
+# Capture the script path NOW, while a `source` is active: `info script` is only
+# valid during sourcing and returns "" from later event/callback contexts, so we
+# remember it here to locate the running els.exe reliably (see association_exe).
+set ::els::boot_script [info script]
 
 # ---- look: the els visual identity --------------------------------------
 # A calm grey page, generously leaded, with one red flourish.  Chrome defers
@@ -663,9 +668,14 @@ proc els::recent_manage_clear {} {
 # Register els as an available .txt handler; Windows still lets the user choose
 # the default app.  This writes only to HKCU, so it needs no admin rights.
 proc els::association_exe {} {
-    set exe [file normalize [info nameofexecutable]]
-    if {[string match {//zipfs:*} [info script]]} { return $exe }
-    set near [file join [file dirname [file normalize [info script]]] els.exe]
+    # Use the boot script captured at load time, NOT `info script` — this proc
+    # runs from a button callback where `info script` is "", which previously made
+    # us fall back to a cwd-relative els.exe lookup (so registration only worked
+    # when els happened to be launched from its own folder).
+    set bs $::els::boot_script
+    if {[string match {//zipfs:*} $bs]} { return [file normalize [info nameofexecutable]] }
+    if {$bs eq ""} { return "" }
+    set near [file join [file dirname [file normalize $bs]] els.exe]
     if {[file exists $near]} { return [file normalize $near] }
     return ""
 }
@@ -755,14 +765,57 @@ proc els::assoc_unregister_commands {exts} {
 proc els::assoc_run {cmd} {
     exec {*}$cmd
 }
-# Extensions (from our curated set) currently registered to els's ProgID.
+# Read a single registry value ("" = the key's default).  Returns "" if absent.
+proc els::reg_value {key {val ""}} {
+    set q [expr {$val eq "" ? [list reg.exe query $key /ve] : [list reg.exe query $key /v $val]}]
+    if {[catch {exec {*}$q} out]} { return "" }
+    set name [expr {$val eq "" ? {(Default)} : $val}]
+    foreach ln [split $out \n] {
+        if {[regexp -- {REG_\w+\s+(.*)$} $ln -> data] && [string first $name $ln] >= 0} {
+            return [string trimright $data]
+        }
+    }
+    return ""
+}
+# Is a ProgId one of els's?  els can be referenced as the shared ProgID els.txt
+# or as the per-app entry Applications\els.exe (what Explorer's Open With uses).
+proc els::is_els_progid {pid} {
+    set p [string tolower [string trim $pid]]
+    if {$p eq "els.txt" || $p eq {applications\els.exe}} { return 1 }
+    set exe [els::association_exe]
+    if {$exe ne "" && $p eq "applications\\[string tolower [file tail $exe]]"} { return 1 }
+    return 0
+}
+# The effective per-user default ProgId for an extension: Windows 11's
+# UserChoiceLatest first, then the classic UserChoice (both set by Settings or by
+# Explorer's "Open with > Always").
+proc els::assoc_default_progid {ext} {
+    set fe {HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts}
+    set p [els::reg_value "$fe\\.$ext\\UserChoiceLatest\\ProgId" ProgId]
+    if {$p ne ""} { return $p }
+    return [els::reg_value "$fe\\.$ext\\UserChoice" ProgId]
+}
+# reg.exe commands to clear an extension's per-user default (both schemes).  Used
+# when unchecking a type whose current default is els, so it stops opening here.
+proc els::assoc_userchoice_delete_commands {ext} {
+    set fe {HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts}
+    return [list \
+        [list reg.exe delete "$fe\\.$ext\\UserChoiceLatest" /f] \
+        [list reg.exe delete "$fe\\.$ext\\UserChoice" /f]]
+}
+# Extensions (from our curated set) currently associated with els — whether els
+# was registered as an option (Capabilities / the extension's OpenWithProgids) OR
+# is the current per-user default (including one set manually via Open With).
 proc els::assoc_registered_exts {} {
     set progid els.txt
+    set capFA {HKCU\Software\anafalanx\els\Capabilities\FileAssociations}
     set out {}
     foreach {t e d} [els::assoc_types] {
-        if {![catch {exec reg.exe query "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid}]} {
-            lappend out $e
-        }
+        set hit 0
+        if {[els::reg_value $capFA ".$e"] ne ""} { set hit 1 }
+        if {!$hit && ![catch {exec reg.exe query "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid}]} { set hit 1 }
+        if {!$hit && [els::is_els_progid [els::assoc_default_progid $e]]} { set hit 1 }
+        if {$hit} { lappend out $e }
     }
     return $out
 }
@@ -786,19 +839,40 @@ proc els::assoc_apply {} {
         if {[info exists assoc_sel($e)] && $assoc_sel($e)} { lappend reg $e } else { lappend unreg $e }
     }
     set err ""
-    foreach cmd [els::assoc_commands $exe $reg] {
-        if {[catch {els::assoc_run $cmd} e]} { set err $e }
+    if {[llength $reg]} {
+        foreach cmd [els::assoc_commands $exe $reg] {
+            if {[catch {els::assoc_run $cmd} e]} { set err $e }
+        }
     }
-    foreach cmd [els::assoc_unregister_commands $unreg] { catch {els::assoc_run $cmd} }
+    # remove the option registration for unchecked types, and if els is their
+    # current per-user default (e.g. set via Explorer's Open With), clear that too
+    # so they stop opening with els.  Some shell-set defaults are ACL-protected by
+    # Windows; record any we couldn't clear so we can be honest about it.
+    set stuck {}
+    foreach e $unreg {
+        foreach cmd [els::assoc_unregister_commands [list $e]] { catch {els::assoc_run $cmd} }
+        if {[els::is_els_progid [els::assoc_default_progid $e]]} {
+            foreach cmd [els::assoc_userchoice_delete_commands $e] { catch {els::assoc_run $cmd} }
+            if {[els::is_els_progid [els::assoc_default_progid $e]]} { lappend stuck $e }
+        }
+    }
     if {$err ne ""} {
         tk_messageBox -parent .assoc -icon error -title els \
             -message "Some associations could not be set:\n$err"
         return
     }
     catch {destroy .assoc}
-    tk_messageBox -parent . -icon info -title els \
-        -message "Done. Windows Settings will open so you can pick els as the default for the types you chose."
-    els::open_default_apps
+    set msg ""
+    if {[llength $reg]} {
+        set msg "Windows Settings will open so you can pick els as the default for the types you chose."
+    }
+    if {[llength $stuck]} {
+        append msg [expr {$msg eq "" ? "" : "\n\n"}] \
+            "Windows blocked clearing the default for [join [lmap e $stuck {string cat . $e}] {, }] — reset those under Settings > Default apps."
+    }
+    if {$msg eq ""} { set msg "els associations updated." }
+    tk_messageBox -parent . -icon info -title els -message $msg
+    if {[llength $reg]} { els::open_default_apps }
 }
 proc els::file_associations {} {
     if {$::tcl_platform(platform) ne "windows"} {

@@ -606,6 +606,39 @@ test assoc-2.1 {File Associations dialog has checkboxes for recommended + option
          $::els::assoc_sel(txt) $::els::assoc_sel(csv) $allSel
 } -result {1 1 1 1 1 0 1}
 
+test assoc-3.1 {is_els_progid recognizes els's ProgIds (els.txt + Applications\\els.exe), rejects others} -setup {ui_reset} -body {
+    list [els::is_els_progid els.txt] \
+         [els::is_els_progid {Applications\els.exe}] \
+         [els::is_els_progid {APPLICATIONS\ELS.EXE}] \
+         [els::is_els_progid conf_auto_file] \
+         [els::is_els_progid {Applications\notepad.exe}]
+} -result {1 1 1 0 0}
+
+test assoc-3.2 {userchoice delete targets BOTH UserChoiceLatest and UserChoice under FileExts} -setup {ui_reset} -body {
+    set blob [join [lmap c [els::assoc_userchoice_delete_commands conf] {join $c " "}] "\n"]
+    list [expr {[string first {reg.exe delete} $blob] >= 0}] \
+         [expr {[string first {Explorer\FileExts\.conf\UserChoiceLatest} $blob] >= 0}] \
+         [expr {[string first {Explorer\FileExts\.conf\UserChoice /f} $blob] >= 0}]
+} -result {1 1 1}
+
+# Regression for the "can only set from the built els.exe" intermittency: the exe
+# is resolved from the boot script captured at load (info script is "" in
+# callbacks), so it works regardless of the working directory.
+test assoc-3.3 {association_exe resolves the exe via the captured boot script} -setup {ui_reset} -body {
+    set saved $::els::boot_script
+    set ::els::boot_script {//zipfs:/app/main.tcl}                 ;# fused single-file exe
+    set fused [expr {[els::association_exe] eq [file normalize [info nameofexecutable]]}]
+    set d [file join $::ELS_TMP aetest] ; file mkdir $d            ;# dev: els.exe beside source
+    set fake [file join $d els.exe] ; close [open $fake w]
+    set ::els::boot_script [file join $d els.tcl]
+    set found [expr {[els::association_exe] eq [file normalize $fake]}]
+    set ::els::boot_script ""                                      ;# unknown -> "", no cwd guess
+    set empty [expr {[els::association_exe] eq ""}]
+    set ::els::boot_script $saved
+    catch {file delete -force $d}
+    list $fused $found $empty
+} -result {1 1 1}
+
 test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
     set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]
     set ::els::docPath($::els::active) $p
