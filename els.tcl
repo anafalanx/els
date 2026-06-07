@@ -68,8 +68,10 @@ namespace eval els {
     variable show_ws 0           ;# View ▸ Show Whitespace
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
     variable font_size 11        ;# document text size (points); the family is fixed
-    variable vs_shown -1         ;# scrollbar visibility (auto-hidden when content fits)
-    variable vs_after ""         ;# pending (idle) scrollbar-visibility update
+    variable vs_shown -1         ;# vertical scrollbar visibility (auto-hidden when content fits)
+    variable vs_after ""         ;# pending (idle) vertical scrollbar-visibility update
+    variable hs_shown -1         ;# horizontal scrollbar visibility (only when wrap off + long lines)
+    variable hs_after ""         ;# pending (idle) horizontal scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
     variable tab_tip_delay 1000  ;# tabs are crossed often; let their tips breathe
@@ -469,6 +471,8 @@ proc els::recent_manage {} {
     grid rowconfigure .recent.f 2 -weight 1
     bind .recent.f.list <<ListboxSelect>> els::recent_manage_select
     bind .recent.f.list <Double-Button-1> els::recent_manage_open
+    # re-elide the rows to the new width whenever the window is resized
+    bind .recent.f.list <Configure> els::recent_manage_refresh
     bind .recent <Escape> {destroy .recent}
     bind .recent <Delete> els::recent_manage_remove
     els::recent_manage_refresh
@@ -481,12 +485,27 @@ proc els::recent_manage {} {
     wm deiconify .recent
     focus .recent.f.list
 }
+# Pixel width available for a row of text inside the recent listbox (minus its
+# highlight border and a little breathing room).  Returns a huge value while the
+# widget is unrealized so the first fill shows full paths until the real width is
+# known (a <Configure> then re-elides).
+proc els::recent_manage_avail {} {
+    set lb .recent.f.list
+    if {![winfo exists $lb]} { return 100000 }
+    set w [expr {[winfo width $lb] - 12}]
+    return [expr {$w < 24 ? 100000 : $w}]
+}
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
     set lb .recent.f.list
     set old [lindex [$lb curselection] 0]
+    set avail [els::recent_manage_avail]
     $lb delete 0 end
-    foreach p $::els::recent { $lb insert end [file nativename $p] }
+    # elide too-long paths exactly like the status-bar name (keep the filename,
+    # drop leading dirs behind "…/"); the full native path still shows in the
+    # detail label below on selection.  Index->path mapping is unaffected because
+    # selection is read by row index, not by the displayed text.
+    foreach p $::els::recent { $lb insert end [els::elide_path $p $avail] }
     if {[llength $::els::recent]} {
         if {$old eq "" || $old >= [llength $::els::recent]} {
             set old 0
@@ -688,6 +707,12 @@ proc els::init_style {} {
         -background #BCBCBC -arrowcolor #4A4A4A -bordercolor #9A9A9A \
         -relief raised -borderwidth 1 -arrowsize 12p
     $s map Vertical.TScrollbar -background [list active #A4A4A4 disabled $::els::PAGE]
+    # the horizontal scrollbar matches the vertical one exactly (same clam default
+    # layout, chunky 12p arrows, colors) so the two read as one family
+    $s configure Horizontal.TScrollbar -troughcolor $::els::PAGE \
+        -background #BCBCBC -arrowcolor #4A4A4A -bordercolor #9A9A9A \
+        -relief raised -borderwidth 1 -arrowsize 12p
+    $s map Horizontal.TScrollbar -background [list active #A4A4A4 disabled $::els::PAGE]
 }
 
 # ---- build the UI -------------------------------------------------------
@@ -759,9 +784,11 @@ proc els::build {} {
         -width 40 -takefocus 0 -cursor arrow
     set ::els::gutter_px -1   ;# fresh canvas: force the next width configure
 
-    # the shared scrollbar (traditional: arrow buttons + a wide grabbable thumb;
-    # styled in init_style as Vertical.TScrollbar)
-    ttk::scrollbar .vs -orient vertical -command els::scroll -takefocus 0
+    # the shared scrollbars (traditional: arrow buttons + a wide grabbable thumb;
+    # styled in init_style).  The horizontal one is gridded only when word wrap is
+    # off and a line runs past the window edge (see els::update_hscroll).
+    ttk::scrollbar .vs -orient vertical   -command els::scroll  -takefocus 0
+    ttk::scrollbar .hs -orient horizontal -command els::hscroll -takefocus 0
 
     # the find / replace bar (hidden until Ctrl+F / Ctrl+H)
     els::build_findbar
@@ -800,11 +827,15 @@ proc els::build {} {
     bind .sb.update <Button-1> {els::tip_cancel ; els::open_url "https://github.com/anafalanx/els/releases/latest"}
     els::tooltip_for .sb.name els::name_tip
 
-    # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter · 3 status
+    # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter+vscroll ·
+    # 3 hscroll (shown on demand) · 4 status.  The gutter spans rows 2-3 so its
+    # quiet ground continues down beside the horizontal bar (no seam under the
+    # line numbers); the bottom-right cell stays an empty page-grey corner.
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
-    grid .ln   -row 2 -column 0 -sticky ns
+    grid .ln   -row 2 -column 0 -rowspan 2 -sticky ns
     grid .vs   -row 2 -column 2 -sticky ns
-    grid .sb   -row 3 -column 0 -columnspan 3 -sticky ew
+    grid .hs   -row 3 -column 1 -sticky ew
+    grid .sb   -row 4 -column 0 -columnspan 3 -sticky ew
     grid rowconfigure    . 2 -weight 1
     grid columnconfigure . 1 -weight 1
 
@@ -837,6 +868,7 @@ proc els::build {} {
     bind elsText <Control-minus>      { els::zoom -1;    break }
     bind elsText <Control-Key-0>      { els::zoom_reset; break }
     bind elsText <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
+    bind elsText <Shift-MouseWheel>   { els::hwheel %D; break }
     bind elsText <Key-F3>             { els::find_step 1;  break }
     bind elsText <Shift-Key-F3>       { els::find_step -1; break }
     # neutralize Tk's emacs-style Text defaults that surprise on a Windows editor
@@ -869,6 +901,7 @@ proc els::build {} {
 
     bind .ln <Button-1>   { focus [els::T]; break }
     bind .ln <MouseWheel> { els::wheel %D; break }
+    bind .ln <Shift-MouseWheel> { els::hwheel %D; break }
     bind .ln <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
     bind .ln <Button-4>   { els::scroll scroll -3 units; break }
     bind .ln <Button-5>   { els::scroll scroll  3 units; break }
@@ -893,7 +926,8 @@ proc els::new_doc {{path ""}} {
         -borderwidth 0 -highlightthickness 0 -padx 14 -pady 6 \
         -spacing1 $::els::LEAD -spacing3 $::els::LEAD \
         -tabstyle wordprocessor \
-        -yscrollcommand [list els::yscroll $id]
+        -yscrollcommand [list els::yscroll $id] \
+        -xscrollcommand [list els::xscroll $id]
     $w tag configure currentLine -background $::els::LINE
     $w tag configure wsSpace -background $::els::WSSPACE
     $w tag configure wsTab   -background $::els::WSTAB
@@ -961,6 +995,7 @@ proc els::switch_to {id} {
     els::refresh_view
     if {$::els::find_mode ne ""} { els::find_update }
     after idle els::update_vscroll
+    after idle els::update_hscroll
 }
 proc els::cycle {dir} {
     variable docs
@@ -1266,12 +1301,53 @@ proc els::wheel {delta} {
     $w yview scroll [expr {-$delta / 120}] units
     els::sync_scroll
 }
+# ---- horizontal scrolling (active only when word wrap is off) -----------
+# The text widget fires -xscrollcommand only on a view *change*; the show/hide
+# is deferred to idle (it calls `grid`, a geometry change) and coalesced, exactly
+# like the vertical bar.
+proc els::xscroll {id first last} {
+    variable active
+    variable hs_after
+    if {$id ne $active} { return }
+    .hs set $first $last
+    after cancel $hs_after
+    set hs_after [after idle els::update_hscroll]
+}
+# Show the horizontal bar only when wrap is off AND a line runs past the window
+# edge.  Under word wrap nothing scrolls sideways (xview is {0 1}), so the bar
+# stays hidden — which is exactly the requested behaviour.
+proc els::update_hscroll {} {
+    variable active
+    variable hs_shown
+    if {$active eq "" || ![winfo exists [els::W $active]]} { return }
+    if {$::els::word_wrap} {
+        set need 0
+    } else {
+        lassign [[els::W $active] xview] first last
+        set need [expr {$first > 0.0001 || $last < 0.9999}]
+    }
+    if {$need != $hs_shown} {
+        set hs_shown $need
+        if {$need} { grid .hs } else { grid remove .hs }
+    }
+}
+proc els::hscroll {args} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    $w xview {*}$args
+}
+proc els::hwheel {delta} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    $w xview scroll [expr {-$delta / 120}] units
+}
 proc els::refresh_view {} {
     if {[els::T] eq ""} { return }
     els::update_pos
     els::update_current_line
     els::draw_gutter
     els::update_vscroll
+    els::update_hscroll
     if {$::els::show_ws} { els::ws_refresh }
 }
 
@@ -2371,6 +2447,9 @@ proc els::set_wrap {{persist 1}} {
         if {[winfo exists [els::W $id]]} { [els::W $id] configure -wrap $mode }
     }
     els::refresh_view
+    # the reflow settles after this returns; re-check the horizontal bar at idle
+    # so it appears/disappears with the new wrap state
+    after idle els::update_hscroll
     if {$persist} { els::save_geometry }
 }
 

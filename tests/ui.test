@@ -655,6 +655,57 @@ test recent-1.8 {recent manager clear asks once and empties the list} -setup {ui
     set n
 } -result 0
 
+# A too-long path is elided the same way as the status bar (keep the filename,
+# drop leading dirs behind "…/"); a short path shows in full.  The window is
+# pinned narrow (and made transparent) so elision triggers regardless of DPI.
+test recent-2.1 {recent manager elides long paths but keeps the filename} -setup {ui_reset} -body {
+    set ::els::recent {
+        C:/short.txt
+        C:/Users/anafa/dev/els/a/very/deeply/nested/folder/structure/with/many/segments/notes.txt
+    }
+    els::recent_manage
+    catch {wm attributes .recent -alpha 0.0}
+    wm minsize .recent 1 1 ; wm geometry .recent 400x300
+    update ; update idletasks
+    els::recent_manage_refresh
+    set short [.recent.f.list get 0]
+    set long  [.recent.f.list get 1]
+    set fits  [expr {[font measure elsUI $long] <= [els::recent_manage_avail]}]
+    catch {destroy .recent}
+    list [expr {$short eq "C:/short.txt"}] [string match "…/*notes.txt" $long] $fits
+} -result {1 1 1}
+
+# Eliding the visible row is cosmetic: the detail label still shows the full
+# native path, and the row index still maps to the real (unabridged) path.
+test recent-2.2 {recent detail label and index map to the full path despite elision} -setup {ui_reset} -body {
+    set full C:/Users/anafa/dev/els/a/very/deeply/nested/folder/with/segments/notes.txt
+    set ::els::recent [list $full]
+    els::recent_manage
+    catch {wm attributes .recent -alpha 0.0}
+    wm minsize .recent 1 1 ; wm geometry .recent 360x300
+    update ; update idletasks
+    els::recent_manage_refresh
+    .recent.f.list selection clear 0 end
+    .recent.f.list selection set 0
+    els::recent_manage_select
+    set label [.recent.f.path cget -text]
+    set path  [els::recent_manage_path]
+    catch {destroy .recent}
+    list [expr {$label eq [file nativename $full]}] [expr {$path eq $full}]
+} -result {1 1}
+
+# The recent window's scrollbar is a ttk TScrollbar (the same traditional family
+# as the main editor bars), not the classic widget.
+test recent-2.3 {recent window uses the shared ttk scrollbar style} -setup {ui_reset} -body {
+    set ::els::recent {C:/a.txt C:/b.txt}
+    els::recent_manage
+    catch {wm attributes .recent -alpha 0.0}
+    update idletasks
+    set cls [winfo class .recent.f.vs]
+    catch {destroy .recent}
+    set cls
+} -result TScrollbar
+
 test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
     set ::els::word_wrap 1
     els::set_wrap
@@ -942,6 +993,45 @@ test ui-7.2 {the vertical scrollbar is shown with a real (chunky) width} -setup 
     # value scaled per-DPI, so use a low, DPI-agnostic floor rather than a px count
     list [winfo ismapped .vs] [expr {[winfo reqwidth .vs] >= 8}]
 } -result {1 1}
+
+# The horizontal bar appears only when wrap is OFF and a line runs past the edge:
+# short lines -> hidden; one very long line -> shown.
+test ui-7.3 {the horizontal scrollbar shows only when wrap is off and a line overflows} -setup {ui_reset} -body {
+    set ::els::word_wrap 0 ; els::set_wrap 0
+    set w [els::T]
+    $w insert end "short\nlines\nonly\n"
+    els::refresh_view ; ui_settle ; els::update_hscroll
+    set short $::els::hs_shown
+    $w insert end [string repeat "the quick brown fox " 80]
+    els::refresh_view ; ui_settle ; els::update_hscroll
+    list $short $::els::hs_shown
+} -result {0 1}
+
+# Word wrap removes the need to scroll sideways: turning it on hides the
+# horizontal bar, turning it off again brings it back for the same long line.
+test ui-7.4 {word wrap hides the horizontal bar; turning it off restores it} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end [string repeat "the quick brown fox " 80]
+    set ::els::word_wrap 0 ; els::set_wrap 0
+    els::refresh_view ; ui_settle ; els::update_hscroll
+    set off1 $::els::hs_shown
+    set ::els::word_wrap 1 ; els::set_wrap 0
+    ui_settle ; els::update_hscroll
+    set on $::els::hs_shown
+    set ::els::word_wrap 0 ; els::set_wrap 0
+    ui_settle ; els::update_hscroll
+    list $off1 $on $::els::hs_shown
+} -result {1 0 1}
+
+# The horizontal bar is a real (chunky) bar, and its thickness matches the
+# vertical one exactly (both styled with the same 12p arrows) so they read as one.
+test ui-7.5 {the horizontal scrollbar is chunky and matches the vertical thickness} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end [string repeat "the quick brown fox " 80]
+    els::refresh_view ; ui_settle ; els::update_hscroll
+    list [winfo ismapped .hs] [expr {[winfo reqheight .hs] >= 8}] \
+         [expr {[winfo reqheight .hs] == [winfo reqwidth .vs]}]
+} -result {1 1 1}
 
 # The find count area must fit a large "N of M" without clipping (the label was
 # 11 chars; a 20k-match file produced "15912 of 20631" and got truncated).
