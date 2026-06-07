@@ -600,19 +600,30 @@ test assoc-2.1 {File Associations dialog has checkboxes for recommended + option
     catch {wm withdraw .assoc}
     set allSel 1
     foreach {t e d} [els::assoc_types] { if {![info exists ::els::assoc_sel($e)]} { set allSel 0 } }
+    set nchk 0
+    foreach f {.assoc.f.rec .assoc.f.opt} {
+        foreach c [winfo children $f] { if {[winfo class $c] eq "Checkbutton"} { incr nchk } }
+    }
     list [winfo exists .assoc] \
-         [winfo exists .assoc.f.rec.ctxt] [winfo exists .assoc.f.opt.ccsv] \
+         [expr {$nchk == [expr {[llength [els::assoc_types]] / 3}]}] \
          [winfo exists .assoc.f.b.apply] \
          $::els::assoc_sel(txt) $::els::assoc_sel(csv) $allSel
-} -result {1 1 1 1 1 0 1}
+} -result {1 1 1 1 0 1}
 
-test assoc-3.1 {is_els_progid recognizes els's ProgIds (els.txt + Applications\\els.exe), rejects others} -setup {ui_reset} -body {
+test assoc-3.1 {is_els_progid recognizes els's named ProgIds, rejects unrelated/absent ones} -setup {ui_reset} -body {
     list [els::is_els_progid els.txt] \
          [els::is_els_progid {Applications\els.exe}] \
          [els::is_els_progid {APPLICATIONS\ELS.EXE}] \
-         [els::is_els_progid conf_auto_file] \
-         [els::is_els_progid {Applications\notepad.exe}]
+         [els::is_els_progid els_nonexistent_progid_zzz] \
+         [els::is_els_progid {}]
 } -result {1 1 1 0 0}
+
+test assoc-3.1b {command_is_els matches an els.exe launcher by basename, not other apps} -setup {ui_reset} -body {
+    list [els::command_is_els {"C:\a\b\els.exe" "%1"}] \
+         [els::command_is_els {C:\a\els.exe %1}] \
+         [els::command_is_els {"C:\Windows\notepad.exe" "%1"}] \
+         [els::command_is_els {}]
+} -result {1 1 0 0}
 
 test assoc-3.2 {userchoice delete targets BOTH UserChoiceLatest and UserChoice under FileExts} -setup {ui_reset} -body {
     set blob [join [lmap c [els::assoc_userchoice_delete_commands conf] {join $c " "}] "\n"]

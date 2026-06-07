@@ -766,66 +766,170 @@ proc els::assoc_run {cmd} {
     exec {*}$cmd
 }
 # Read a single registry value ("" = the key's default).  Returns "" if absent.
+# The value name is matched to its column (not as a substring), and reg.exe's
+# "(value not set)" sentinel for an empty default is normalized to "".
 proc els::reg_value {key {val ""}} {
     set q [expr {$val eq "" ? [list reg.exe query $key /ve] : [list reg.exe query $key /v $val]}]
     if {[catch {exec {*}$q} out]} { return "" }
-    set name [expr {$val eq "" ? {(Default)} : $val}]
+    set want [expr {$val eq "" ? {(Default)} : $val}]
     foreach ln [split $out \n] {
-        if {[regexp -- {REG_\w+\s+(.*)$} $ln -> data] && [string first $name $ln] >= 0} {
-            return [string trimright $data]
+        if {[regexp -- {^\s+(\S+)\s+REG_\w+\s+(.*)$} $ln -> nm data] && $nm eq $want} {
+            set data [string trimright $data]
+            return [expr {$data eq "(value not set)" ? "" : $data}]
         }
     }
     return ""
 }
-# Is a ProgId one of els's?  els can be referenced as the shared ProgID els.txt
-# or as the per-app entry Applications\els.exe (what Explorer's Open With uses).
-proc els::is_els_progid {pid} {
-    set p [string tolower [string trim $pid]]
-    if {$p eq "els.txt" || $p eq {applications\els.exe}} { return 1 }
-    set exe [els::association_exe]
-    if {$exe ne "" && $p eq "applications\\[string tolower [file tail $exe]]"} { return 1 }
-    return 0
+# The shell\open\command for a ProgID (its default value), or "".
+proc els::progid_command {progid} {
+    if {$progid eq ""} { return "" }
+    return [els::reg_value "HKCU\\Software\\Classes\\$progid\\shell\\open\\command" ""]
 }
-# The effective per-user default ProgId for an extension: Windows 11's
-# UserChoiceLatest first, then the classic UserChoice (both set by Settings or by
-# Explorer's "Open with > Always").
-proc els::assoc_default_progid {ext} {
+# The leading program of an open command ("…\app.exe" "%1" -> …\app.exe), or "".
+proc els::command_program {cmd} {
+    if {[regexp {^\s*"([^"]+)"} $cmd -> p]} { return $p }
+    if {[regexp {^\s*(\S+)} $cmd -> p]} { return $p }
+    return ""
+}
+# Does an open command launch SOME els.exe?  Basename match — for read-only
+# detection only (catches els under any ProgID: els.txt, Applications\els.exe,
+# and auto ProgIDs like conf_auto_file repointed to els.exe).
+proc els::command_is_els {cmd} {
+    set p [els::command_program $cmd]
+    return [expr {$p ne "" && [string equal -nocase [file tail $p] els.exe]}]
+}
+# Does an open command launch OUR els.exe specifically?  Path-identity, used to
+# gate destructive registry edits so a foreign vendor's els.exe is never touched.
+# (In a non-packaged/dev run association_exe is "" and we can only check basename.)
+proc els::command_is_our_els {cmd} {
+    set p [els::command_program $cmd]
+    if {$p eq "" || ![string equal -nocase [file tail $p] els.exe]} { return 0 }
+    set exe [els::association_exe]
+    if {$exe eq ""} { return 1 }
+    return [string equal -nocase [file normalize $p] [file normalize $exe]]
+}
+# Does a ProgId resolve to els?  els's own ProgIDs by name, plus any ProgID whose
+# open command is els.exe.
+proc els::is_els_progid {pid} {
+    set p [string trim $pid]
+    if {$p eq ""} { return 0 }
+    set lp [string tolower $p]
+    if {$lp eq "els.txt" || $lp eq {applications\els.exe}} { return 1 }
+    return [els::command_is_els [els::progid_command $p]]
+}
+# The per-user default ProgId set in FileExts (UserChoiceLatest, then classic
+# UserChoice), or "".  This is the highest-priority handler when present.
+proc els::userchoice_progid {ext} {
     set fe {HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts}
     set p [els::reg_value "$fe\\.$ext\\UserChoiceLatest\\ProgId" ProgId]
     if {$p ne ""} { return $p }
     return [els::reg_value "$fe\\.$ext\\UserChoice" ProgId]
 }
-# reg.exe commands to clear an extension's per-user default (both schemes).  Used
-# when unchecking a type whose current default is els, so it stops opening here.
+# The effective default ProgId Windows would use: the FileExts user choice, then
+# the classic Classes\.ext default.
+proc els::assoc_default_progid {ext} {
+    set p [els::userchoice_progid $ext]
+    if {$p ne ""} { return $p }
+    return [els::reg_value "HKCU\\Software\\Classes\\.$ext" ""]
+}
+# Does opening this extension currently launch els, by ANY mechanism?
+proc els::ext_opens_with_els {ext} {
+    return [els::is_els_progid [els::assoc_default_progid $ext]]
+}
+# reg.exe commands to clear an extension's per-user default (both schemes).
 proc els::assoc_userchoice_delete_commands {ext} {
     set fe {HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts}
     return [list \
         [list reg.exe delete "$fe\\.$ext\\UserChoiceLatest" /f] \
         [list reg.exe delete "$fe\\.$ext\\UserChoice" /f]]
 }
-# Extensions (from our curated set) currently associated with els — whether els
-# was registered as an option (Capabilities / the extension's OpenWithProgids) OR
-# is the current per-user default (including one set manually via Open With).
-proc els::assoc_registered_exts {} {
-    set progid els.txt
-    set capFA {HKCU\Software\anafalanx\els\Capabilities\FileAssociations}
+# Extensions els is registered for via its own Capabilities (one query).
+proc els::assoc_capability_exts {} {
     set out {}
-    foreach {t e d} [els::assoc_types] {
-        set hit 0
-        if {[els::reg_value $capFA ".$e"] ne ""} { set hit 1 }
-        if {!$hit && ![catch {exec reg.exe query "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid}]} { set hit 1 }
-        if {!$hit && [els::is_els_progid [els::assoc_default_progid $e]]} { set hit 1 }
-        if {$hit} { lappend out $e }
-    }
+    if {[catch {exec reg.exe query {HKCU\Software\anafalanx\els\Capabilities\FileAssociations}} txt]} { return {} }
+    foreach ln [split $txt \n] { if {[regexp {^\s+\.(\S+)\s+REG_} $ln -> e]} { lappend out [string tolower $e] } }
     return $out
+}
+# Every extension currently associated with els, by ANY mechanism — drives the
+# dialog dynamically so types set via Explorer's Open With (even ones not in our
+# curated list) show up.  We gather CANDIDATES cheaply from one recursive FileExts
+# query (exts with an els-pointing UserChoice, or an OpenWithProgids naming els.txt
+# or the per-extension <ext>_auto_file), then decide each candidate authoritatively
+# with ext_opens_with_els (which honors UserChoiceLatest > UserChoice > Classes).
+proc els::assoc_registered_exts {} {
+    set found {}
+    foreach e [els::assoc_capability_exts] { dict set found $e 1 }
+    set cands {}
+    set fe {HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts}
+    if {![catch {exec reg.exe query $fe /s} dump]} {
+        set ext "" ; set sub ""
+        foreach ln [split $dump \n] {
+            if {[string match "HKEY_*" $ln]} {
+                if {![regexp {\\FileExts\\(\.[^\\\r]+)} $ln -> ext]} { set ext "" }
+                if {[string match {*\UserChoice*} $ln]}        { set sub uc } \
+                elseif {[string match {*\OpenWithProgids} $ln]} { set sub owp } \
+                else                                            { set sub "" }
+                continue
+            }
+            if {$ext eq ""} continue
+            set e [string tolower [string range $ext 1 end]]
+            if {$sub eq "uc" && [regexp {^\s+ProgId\s+REG_\w+\s+(.*)$} $ln -> data]} {
+                if {[els::is_els_progid [string trim $data]]} { dict set cands $e 1 }
+            } elseif {$sub eq "owp" && [regexp {^\s+(\S+)\s+REG_} $ln -> pname]} {
+                set lpn [string tolower $pname]
+                if {$lpn eq "els.txt" || $lpn eq "${e}_auto_file"} { dict set cands $e 1 }
+            }
+        }
+    }
+    foreach e [dict keys $cands]          { if {[els::ext_opens_with_els $e]} { dict set found $e 1 } }
+    foreach {t e d} [els::assoc_types]    { if {[els::ext_opens_with_els $e]} { dict set found $e 1 } }
+    return [lsort [dict keys $found]]
 }
 proc els::open_default_apps {} {
     if {[catch {exec cmd.exe /c start "" ms-settings:defaultapps &}]} {
         els::open_url ms-settings:defaultapps
     }
 }
-# Apply the dialog's checkbox state: register the checked extensions, unregister
-# the unchecked ones, then send the user to Windows' Default-Apps settings.
+# Fully disassociate one extension from els, regardless of how it was associated:
+# els's option registration (OpenWithProgids / Capabilities / SupportedTypes), an
+# els-pointing per-user default (UserChoice / UserChoiceLatest), and an auto /
+# foreign ProgID whose command was repointed to els.exe (e.g. Explorer's
+# <ext>_auto_file) — but never the shared els.txt / Applications\els.exe entries,
+# which other types still use.  Best-effort (some shell keys are ACL-protected);
+# returns 1 if the extension still opens with els afterwards.
+proc els::assoc_remove_ext {ext} {
+    # 1. els's own option registration (OpenWithProgids / Capabilities / SupportedTypes)
+    foreach cmd [els::assoc_unregister_commands [list $ext]] { catch {els::assoc_run $cmd} }
+    # 2. an els-pointing per-user default (UserChoice / UserChoiceLatest) — try to
+    #    clear it.  If a UserChoice still names els afterwards Windows ACL-blocked
+    #    us: report stuck and do NOT mutate Classes keys off a surviving choice.
+    set uc [els::userchoice_progid $ext]
+    if {$uc ne "" && [els::is_els_progid $uc]} {
+        foreach cmd [els::assoc_userchoice_delete_commands $ext] { catch {els::assoc_run $cmd} }
+        set uc2 [els::userchoice_progid $ext]
+        if {$uc2 ne "" && [els::is_els_progid $uc2]} { return 1 }
+    }
+    # 3. the classic Classes\.ext default is now the effective handler
+    set pid [els::reg_value "HKCU\\Software\\Classes\\.$ext" ""]
+    if {$pid ne "" && [els::is_els_progid $pid]} {
+        set lp [string tolower $pid]
+        if {$lp eq "els.txt" || $lp eq {applications\els.exe}} {
+            # the .ext default names a SHARED els ProgID — drop the .ext default
+            # (never the shared ProgID's command, which other types rely on)
+            catch {els::assoc_run [list reg.exe delete "HKCU\\Software\\Classes\\.$ext" /ve /f]}
+        } elseif {$pid eq "${ext}_auto_file" && [els::command_is_our_els [els::progid_command $pid]]} {
+            # Windows' per-extension auto ProgID, repointed to OUR els.exe — safe to
+            # neutralize (named after this one extension, verified by path)
+            catch {els::assoc_run [list reg.exe delete "HKCU\\Software\\Classes\\$pid\\shell\\open\\command" /ve /f]}
+            catch {els::assoc_run [list reg.exe delete "HKCU\\Software\\Classes\\.$ext" /ve /f]}
+        }
+        # else: a foreign/shared ProgID we won't touch — extension may remain (stuck)
+    }
+    return [els::ext_opens_with_els $ext]
+}
+# Apply the dialog's checkbox state: register the checked extensions, fully
+# remove the unchecked ones, then (only if something new was added) send the user
+# to Windows' Default-Apps settings.
 proc els::assoc_apply {} {
     variable assoc_sel
     set exe [els::association_exe]
@@ -835,33 +939,30 @@ proc els::assoc_apply {} {
         return
     }
     set before [els::assoc_registered_exts]   ;# baseline, before we change anything
+    set curated {}
+    foreach {t e d} [els::assoc_types] { lappend curated $e }
     set reg {} ; set unreg {}
-    foreach {t e d} [els::assoc_types] {
-        if {[info exists assoc_sel($e)] && $assoc_sel($e)} { lappend reg $e } else { lappend unreg $e }
+    foreach e [array names assoc_sel] {       ;# curated AND any extra (Open-With) types
+        if {$assoc_sel($e)} { lappend reg $e } else { lappend unreg $e }
     }
     set added {}
     foreach e $reg { if {$e ni $before} { lappend added $e } }   ;# genuinely new
-    set err ""
-    if {[llength $reg]} {
-        foreach cmd [els::assoc_commands $exe $reg] {
-            if {[catch {els::assoc_run $cmd} e]} { set err $e }
+    # Register only CURATED checked types as options.  Extras left checked are
+    # already associated (e.g. via Open With); leave them exactly as they are
+    # rather than widening els's declared Capabilities to non-curated types.
+    set curatedReg {}
+    foreach e $reg { if {$e in $curated} { lappend curatedReg $e } }
+    set errs {}
+    if {[llength $curatedReg]} {
+        foreach cmd [els::assoc_commands $exe $curatedReg] {
+            if {[catch {els::assoc_run $cmd} cerr]} { lappend errs $cerr }
         }
     }
-    # remove the option registration for unchecked types, and if els is their
-    # current per-user default (e.g. set via Explorer's Open With), clear that too
-    # so they stop opening with els.  Some shell-set defaults are ACL-protected by
-    # Windows; record any we couldn't clear so we can be honest about it.
     set stuck {}
-    foreach e $unreg {
-        foreach cmd [els::assoc_unregister_commands [list $e]] { catch {els::assoc_run $cmd} }
-        if {[els::is_els_progid [els::assoc_default_progid $e]]} {
-            foreach cmd [els::assoc_userchoice_delete_commands $e] { catch {els::assoc_run $cmd} }
-            if {[els::is_els_progid [els::assoc_default_progid $e]]} { lappend stuck $e }
-        }
-    }
-    if {$err ne ""} {
+    foreach e $unreg { if {[els::assoc_remove_ext $e]} { lappend stuck $e } }
+    if {[llength $errs]} {
         tk_messageBox -parent .assoc -icon error -title els \
-            -message "Some associations could not be set:\n$err"
+            -message "Some associations could not be set:\n[join [lsort -unique $errs] \n]"
         return
     }
     catch {destroy .assoc}
@@ -870,11 +971,11 @@ proc els::assoc_apply {} {
     # need it.
     set msg ""
     if {[llength $added]} {
-        set msg "Windows Settings will open so you can pick els as the default for: [join [lmap e $added {string cat . $e}] {, }]."
+        set msg "Windows Settings will open so you can pick els as the default for: [join [lmap e [lsort $added] {string cat . $e}] {, }]."
     }
     if {[llength $stuck]} {
         append msg [expr {$msg eq "" ? "" : "\n\n"}] \
-            "Windows blocked clearing the default for [join [lmap e $stuck {string cat . $e}] {, }] — reset those under Settings > Default apps."
+            "Couldn't fully clear: [join [lmap e [lsort $stuck] {string cat . $e}] {, }]. Reset those under Settings > Default apps."
     }
     if {$msg eq ""} { set msg "els associations updated." }
     tk_messageBox -parent . -icon info -title els -message $msg
@@ -895,8 +996,12 @@ proc els::file_associations {} {
     set bg $::els::PAGE
     variable assoc_sel
     array unset assoc_sel
-    set pre [els::assoc_precheck [els::assoc_registered_exts]]
-    foreach {t e d} [els::assoc_types] { set assoc_sel($e) [expr {$e in $pre}] }
+    set scan [els::assoc_registered_exts]
+    set pre [els::assoc_precheck $scan]
+    set curated {}
+    foreach {t e d} [els::assoc_types] { lappend curated $e ; set assoc_sel($e) [expr {$e in $pre}] }
+    set extras {}
+    foreach e $scan { if {$e ni $curated} { lappend extras $e ; set assoc_sel($e) 1 } }
     frame .assoc.f -bg $bg
     pack  .assoc.f -padx 28 -pady 22
     label .assoc.f.title -text "File Associations" -font elsUIb -fg $::els::INK -bg $bg
@@ -912,23 +1017,46 @@ proc els::file_associations {} {
     label $oc.h -text "Optional"     -font elsUIb -fg $::els::INK -bg $bg
     grid $rc.h -row 0 -column 0 -columnspan 2 -sticky w -padx 12 -pady {8 5}
     grid $oc.h -row 0 -column 0 -columnspan 2 -sticky w -padx 12 -pady {8 5}
-    set rr 1 ; set orr 1
+    set rr 1 ; set orr 1 ; set i 0
     foreach {t e d} [els::assoc_types] {
         if {$t eq "rec"} { set par $rc ; set row $rr } else { set par $oc ; set row $orr }
-        checkbutton $par.c$e -text ".$e" -variable ::els::assoc_sel($e) \
+        checkbutton $par.c$i -text ".$e" -variable ::els::assoc_sel($e) \
             -font elsMonoHelp -fg $::els::INK -bg $bg -activebackground $bg \
             -activeforeground $::els::INK -selectcolor $bg -highlightthickness 0 -anchor w -padx 4
-        label $par.d$e -text $d -font elsUI -fg $::els::MUTED -bg $bg -anchor w
-        grid $par.c$e -row $row -column 0 -sticky w -padx {10 16} -pady 1
-        grid $par.d$e -row $row -column 1 -sticky w -padx {0 12} -pady 1
+        label $par.d$i -text $d -font elsUI -fg $::els::MUTED -bg $bg -anchor w
+        grid $par.c$i -row $row -column 0 -sticky w -padx {10 16} -pady 1
+        grid $par.d$i -row $row -column 1 -sticky w -padx {0 12} -pady 1
+        incr i
         if {$t eq "rec"} { incr rr } else { incr orr }
     }
     grid rowconfigure $rc 99 -minsize 8 ; grid rowconfigure $oc 99 -minsize 8
-    label .assoc.f.note -text "els registers as an option only; Windows still asks you to confirm the default per type." \
-        -font elsUI -fg $::els::MUTED -bg $bg -anchor w -justify left -wraplength 420
-    grid .assoc.f.note -row 3 -column 0 -columnspan 2 -sticky w -pady {14 12}
+    # Extra types currently opening with els that aren't in our curated list
+    # (e.g. set via Explorer's "Open with > Always") — shown so they can be seen
+    # and unchecked.  Only appears when there are any.
+    set noteRow 3
+    if {[llength $extras]} {
+        set xc [frame .assoc.f.extra -bg $bg -highlightthickness 1 -highlightbackground $::els::HAIR]
+        grid $xc -row 3 -column 0 -columnspan 2 -sticky new -pady {12 0}
+        label $xc.h -text "Also opening with els (set outside this dialog)" \
+            -font elsUIb -fg $::els::INK -bg $bg
+        grid $xc.h -row 0 -column 0 -columnspan 4 -sticky w -padx 12 -pady {8 5}
+        set i 0 ; set col 0 ; set rw 1
+        foreach e [lsort $extras] {
+            checkbutton $xc.c$i -text ".$e" -variable ::els::assoc_sel($e) \
+                -font elsMonoHelp -fg $::els::INK -bg $bg -activebackground $bg \
+                -activeforeground $::els::INK -selectcolor $bg -highlightthickness 0 -anchor w -padx 4
+            grid $xc.c$i -row $rw -column $col -sticky w -padx {10 16} -pady 1
+            incr i ; incr col
+            if {$col >= 4} { set col 0 ; incr rw }
+        }
+        grid rowconfigure $xc 99 -minsize 8
+        set noteRow 4
+    }
+    label .assoc.f.note -text "els registers as an option only; Windows still asks you to confirm the default per type. Unchecking a type removes every association, however it was set." \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor w -justify left -wraplength 480
+    grid .assoc.f.note -row $noteRow -column 0 -columnspan 2 -sticky w -pady {14 12}
     frame .assoc.f.b -bg $bg
-    grid .assoc.f.b -row 4 -column 0 -columnspan 2 -sticky ew
+    grid .assoc.f.b -row [expr {$noteRow + 1}] -column 0 -columnspan 2 -sticky ew
     ttk::button .assoc.f.b.apply -text Apply -style Dialog.TButton -command els::assoc_apply
     ttk::button .assoc.f.b.close -text Close -style Dialog.TButton -command {destroy .assoc}
     pack .assoc.f.b.close .assoc.f.b.apply -side right -padx {6 0}
