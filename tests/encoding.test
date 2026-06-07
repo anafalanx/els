@@ -158,6 +158,38 @@ test enc-3.5 {EOL override marks the doc saveable and rewrites line endings} -se
     read_raw $p
 } -result "a\r\nb\r\n"
 
+test enc-3.6 {set_eol changes the EOL and marks the doc dirty} -setup {els_reset} -body {
+    set p [write_raw eol6.txt "a\nb\n"]
+    els::open $p
+    set clean [els::doc_dirty $::els::active]
+    els::set_eol cr
+    list $clean $::els::docEol($::els::active) [els::doc_dirty $::els::active]
+} -result {0 cr 1}
+
+test enc-3.7 {set_eol to the current EOL is a no-op and does not dirty the doc} -setup {els_reset} -body {
+    set p [write_raw eol7.txt "a\nb\n"]
+    els::open $p
+    els::set_eol $::els::docEol($::els::active)   ;# same value -> early return
+    els::doc_dirty $::els::active
+} -result 0
+
+test enc-3.8 {set_eol cr rewrites the line endings to lone CR on save} -setup {els_reset} -body {
+    set p [write_raw eol8.txt "a\nb\nc\n"]
+    els::open $p
+    els::set_eol cr
+    els::save
+    read_raw $p
+} -result "a\rb\rc\r"
+
+test enc-3.9 {apply_enc dispatches reopen->reopen_with and save->save_with} -setup {els_reset} -body {
+    set p [write_raw applyenc.txt "x\n"]
+    els::open $p
+    els::apply_enc reopen utf-16be 0
+    set afterReopen $::els::docEnc($::els::active)
+    els::apply_enc save cp1252 0
+    list $afterReopen $::els::docEnc($::els::active) [els::doc_dirty $::els::active]
+} -result {utf-16be cp1252 1}
+
 # ---- picker menus -------------------------------------------------------
 test enc-4.1 {encoding & EOL picker menus build, "Other" lists every encoding} -setup {els_reset} -body {
     els::build_enc_popup
@@ -269,3 +301,28 @@ Central-European are the heuristic's hard cases)"
     # so assert the full count and catch any regression in save/detect/decode.
     expr {$total == 100 && $recovered == 100}
 } -result 1
+
+# ---- distilled from encoding_stress.tcl (headless, deterministic) --------
+# Reopen-with always re-decodes the PRESERVED original bytes (docRaw), never the
+# current mojibake buffer: so reopening under several wrong encodings and then
+# the right one fully restores the text.  This guards the docRaw-based reopen
+# design that the reg-1.x data-loss fixes depend on.
+test enc-5.1 {reopen under wrong encodings then back to the right one restores the text} -setup {els_reset} -body {
+    set text "Съешь же ещё этих мягких французских булок.\n"
+    set p [write_raw cyr_reopen.txt [encoding convertto cp1251 $text]]
+    els::open $p
+    els::reopen_with cp1252 0
+    set garbled [[els::T] get 1.0 "end - 1 char"]
+    foreach wrong {utf-16le big5 cp932 utf-8} { els::reopen_with $wrong 0 }
+    els::reopen_with cp1251 0
+    set restored [[els::T] get 1.0 "end - 1 char"]
+    list [expr {$garbled ne $text}] [expr {$restored eq $text}]
+} -result {1 1}
+
+# BOM-less UTF-16 BE (only LE was covered by enc-3.1 / reg-5.2).
+test enc-5.2 {a BOM-less UTF-16BE ASCII file is detected as wide (big-endian)} \
+        -constraints detect -setup {els_reset} -body {
+    set p [write_raw be_nobom.txt [encoding convertto utf-16be "Hello, wide world from big-endian UTF-16.\n"]]
+    els::open $p
+    list $::els::docEnc($::els::active) $::els::docBom($::els::active)
+} -result {utf-16be 0}
