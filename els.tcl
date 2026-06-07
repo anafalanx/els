@@ -84,6 +84,7 @@ namespace eval els {
     variable cfg_radio appdata   ;# first-run location dialog selection
     variable gutter_px -1        ;# last-set gutter canvas width (px); -1 = unset
     variable gutter_after ""     ;# coalesced gutter-redraw after token
+    variable recent_row_tip -1   ;# recent-list row whose hover tip is active
 }
 
 # ---- look: the els visual identity --------------------------------------
@@ -411,11 +412,29 @@ proc els::recent_open {p} {
     }
     els::open $p
 }
-# A compact menu label: the native path, trimmed from the middle when very long.
+# Elide a path to at most `max` characters in the SAME style as els::elide_path
+# (keep the filename, drop leading directories behind a leading "…/"), but by
+# character budget rather than pixel width — for places without a measurable
+# width, like a menu label.
+proc els::elide_path_chars {p max} {
+    if {[string length $p] <= $max} { return $p }
+    set parts [file split $p]
+    set best ""
+    for {set i [expr {[llength $parts] - 1}]} {$i >= 0} {incr i -1} {
+        set tail [file join {*}[lrange $parts $i end]]
+        set cand [expr {$i == 0 ? $tail : "…/$tail"}]
+        if {[string length $cand] <= $max} { set best $cand } else { break }
+    }
+    if {$best ne ""} { return $best }
+    # even the filename alone is too long — clip its head, keep the end
+    set s [file tail $p]
+    if {[string length $s] > $max - 1} { set s [string range $s end-[expr {$max - 2}] end] }
+    return "…$s"
+}
+# A compact Open-Recent menu label: same elision style as the status bar and the
+# recent-files window (filename kept, leading dirs dropped behind "…/").
 proc els::recent_label {p} {
-    set n [file nativename $p]
-    if {[string length $n] <= 64} { return $n }
-    return "[string range $n 0 30]…[string range $n end-30 end]"
+    return [els::elide_path_chars $p 64]
 }
 proc els::recent_rebuild {} {
     set m .menu.file.recent
@@ -475,7 +494,10 @@ proc els::recent_manage {} {
     bind .recent.f.list <Configure> els::recent_manage_refresh
     bind .recent <Escape> {destroy .recent}
     bind .recent <Delete> els::recent_manage_remove
-    # the selected entry's full native path, on hover (the detail label elides it)
+    # full native path on hover: per row in the list, and on the detail label
+    set ::els::recent_row_tip -1
+    bind .recent.f.list <Motion> {els::recent_row_motion %x %y %X %Y}
+    bind .recent.f.list <Leave>  {els::tip_cancel ; set ::els::recent_row_tip -1}
     els::tooltip_for .recent.f.path els::recent_detail_tip
 
     els::recent_manage_refresh
@@ -523,6 +545,24 @@ proc els::recent_detail_tip {} {
     if {$p eq ""} { return "" }
     if {[els::elide_path $p [els::recent_detail_avail]] eq $p} { return "" }
     return [file nativename $p]
+}
+# Per-row hover tooltip for the recent listbox: when the cursor is over a row
+# whose displayed path is elided, show the full native path near the cursor.
+proc els::recent_row_motion {x y rx ry} {
+    variable recent_row_tip
+    set lb .recent.f.list
+    if {![winfo exists $lb] || ![llength $::els::recent]} { return }
+    set i [$lb index @$x,$y]
+    if {$i eq "" || $i < 0 || $i >= [llength $::els::recent]} {
+        els::tip_cancel ; set recent_row_tip -1 ; return
+    }
+    if {$recent_row_tip == $i} { return }   ;# already handling this row
+    set recent_row_tip $i
+    els::tip_cancel
+    set p [lindex $::els::recent $i]
+    if {[$lb get $i] eq $p} { return }      ;# row not elided -> no tip
+    set ::els::tip_after [after 550 \
+        [list els::tip_pop_at [file nativename $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
 }
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
@@ -2104,13 +2144,15 @@ proc els::tip_pop {w text} {
     set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
     set x [expr {[winfo rootx $w] + [winfo width $w] / 2 - $tw / 2}]
     set below [expr {[winfo rooty $w] + [winfo height $w] + 5}]
-    # Prefer below the widget; flip above when needed, then clamp into the main
-    # window.  Tooltips are context for els, not little screen-global balloons.
+    # Prefer below the widget; flip above when needed, then clamp into the widget's
+    # own toplevel (the main window, or a dialog like the recent-files manager).
+    # Tooltips are context for that window, not little screen-global balloons.
+    set top [winfo toplevel $w]
     set margin 4
-    set winl [winfo rootx .]
-    set wint [winfo rooty .]
-    set winr [expr {$winl + [winfo width .]}]
-    set winb [expr {$wint + [winfo height .]}]
+    set winl [winfo rootx $top]
+    set wint [winfo rooty $top]
+    set winr [expr {$winl + [winfo width $top]}]
+    set winb [expr {$wint + [winfo height $top]}]
     set above [expr {[winfo rooty $w] - $th - 5}]
     if {$below + $th <= $winb - $margin} {
         set y $below
@@ -2125,6 +2167,24 @@ proc els::tip_pop {w text} {
         set x [expr {max($winl + $margin, $winr - $margin - $tw)}]
     }
     wm geometry .tip +$x+$y
+}
+# A tooltip anchored at explicit screen coordinates (e.g. near the cursor), used
+# for per-row tips in a list where one widget holds many hover targets.  Clamped
+# to the screen rather than a window.
+proc els::tip_pop_at {text rx ry} {
+    catch {destroy .tip}
+    if {$text eq ""} { return }
+    toplevel .tip -bd 0
+    wm overrideredirect .tip 1
+    catch {wm attributes .tip -topmost 1}
+    label .tip.l -text $text -bg "#2B2B2B" -fg "#F0F0F0" -font elsUI -padx 6 -pady 2
+    pack .tip.l
+    update idletasks
+    set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
+    set sw [winfo screenwidth .tip] ; set sh [winfo screenheight .tip]
+    if {$rx + $tw > $sw - 4} { set rx [expr {$sw - $tw - 4}] }
+    if {$ry + $th > $sh - 4} { set ry [expr {$ry - $th - 22}] }
+    wm geometry .tip +[expr {max($rx,0)}]+[expr {max($ry,0)}]
 }
 # A dynamic tooltip: `textcmd` is evaluated each time the tip is about to show,
 # so it tracks live state; an empty result suppresses the tip (e.g. a status

@@ -736,6 +736,54 @@ test recent-2.4 {a long selected path neither widens the dialog nor un-elides th
          [expr {[font measure elsUI $detail] <= $davail}]
 } -result {1 1 1 1}
 
+# The Open-Recent MENU label must use the shared elision style (filename kept,
+# leading dirs dropped behind a *leading* "…/"), not the old middle-trim.
+test recent-3.1 {Open Recent menu label elides like the status bar, not mid-path} -setup {ui_reset} -body {
+    set long "C:/a/very/deeply/nested/folder/structure/with/many/segments/that/keeps/going/and/going/until/it/is/very/long/notes.txt"
+    set lbl [els::recent_label $long]
+    list [expr {[string length $lbl] <= 64}] \
+         [string match "…/*notes.txt" $lbl] \
+         [expr {[string first "…" $lbl] == 0}]
+} -result {1 1 1}
+
+# Short paths that fit are shown in full (no ellipsis).
+test recent-3.1a {Open Recent menu label leaves a short path intact} -setup {ui_reset} -body {
+    els::recent_label "C:/proj/notes.txt"
+} -result "C:/proj/notes.txt"
+
+# Hovering a recent-list ROW that is elided schedules a full-path tooltip; a row
+# that fits does not.  (The tip widget itself is exercised by tip_pop_at.)
+test recent-3.2 {an elided recent row schedules a hover tooltip; a short one does not} -setup {ui_reset} -body {
+    set long "C:/a/very/deeply/nested/folder/structure/with/many/segments/that/keeps/going/until/very/long/notes.txt"
+    set ::els::recent [list "C:/short.txt" $long]
+    els::recent_manage
+    catch {wm attributes .recent -alpha 0.0}
+    wm minsize .recent 1 1 ; wm geometry .recent 360x300
+    update ; update idletasks
+    els::recent_manage_refresh
+    # elided long row -> a tip is scheduled
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    lassign [.recent.f.list bbox 1] bx by
+    els::recent_row_motion [expr {$bx+5}] [expr {$by+2}] 400 400
+    set schedLong [info exists ::els::tip_after]
+    # short row that fits -> no tip
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    lassign [.recent.f.list bbox 0] bx0 by0
+    els::recent_row_motion [expr {$bx0+5}] [expr {$by0+2}] 400 400
+    set schedShort [info exists ::els::tip_after]
+    els::tip_cancel
+    catch {destroy .recent}
+    list $schedLong $schedShort
+} -result {1 0}
+
+# tip_pop_at renders a tooltip with the given text at the requested anchor.
+test recent-3.3 {tip_pop_at creates a tooltip carrying the full text} -setup {ui_reset} -body {
+    els::tip_pop_at "C:\\a\\b\\c.txt" 200 200
+    set ok [expr {[winfo exists .tip] && [.tip.l cget -text] eq "C:\\a\\b\\c.txt"}]
+    els::tip_cancel ; catch {destroy .tip}
+    set ok
+} -result 1
+
 test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
     set ::els::word_wrap 1
     els::set_wrap
