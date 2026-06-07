@@ -3026,6 +3026,7 @@ proc els::selftest {tf {report ""}} {
         "theme=[ttk::style theme use] scaling=[format %.3f [tk scaling]]" \
         "docs=$ndocs active=$::els::active tabs_ok=$tabs_ok" \
         "detect=$::els::have_detect" \
+        "association_exe=[els::association_exe]" \
         "doc_dirty=[string trimright $dstate]" \
         "open=$openok"]
     set txt [join $lines \n]\n
