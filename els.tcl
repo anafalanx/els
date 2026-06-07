@@ -834,10 +834,13 @@ proc els::assoc_apply {} {
             -message "Associations can only be set from the built els.exe.\nBuild it (x build) and run that, then try again."
         return
     }
+    set before [els::assoc_registered_exts]   ;# baseline, before we change anything
     set reg {} ; set unreg {}
     foreach {t e d} [els::assoc_types] {
         if {[info exists assoc_sel($e)] && $assoc_sel($e)} { lappend reg $e } else { lappend unreg $e }
     }
+    set added {}
+    foreach e $reg { if {$e ni $before} { lappend added $e } }   ;# genuinely new
     set err ""
     if {[llength $reg]} {
         foreach cmd [els::assoc_commands $exe $reg] {
@@ -862,9 +865,12 @@ proc els::assoc_apply {} {
         return
     }
     catch {destroy .assoc}
+    # Only send the user to Windows' Default-Apps settings when something NEW was
+    # added (to confirm els as the default there).  Pure removals / no-ops don't
+    # need it.
     set msg ""
-    if {[llength $reg]} {
-        set msg "Windows Settings will open so you can pick els as the default for the types you chose."
+    if {[llength $added]} {
+        set msg "Windows Settings will open so you can pick els as the default for: [join [lmap e $added {string cat . $e}] {, }]."
     }
     if {[llength $stuck]} {
         append msg [expr {$msg eq "" ? "" : "\n\n"}] \
@@ -872,7 +878,7 @@ proc els::assoc_apply {} {
     }
     if {$msg eq ""} { set msg "els associations updated." }
     tk_messageBox -parent . -icon info -title els -message $msg
-    if {[llength $reg]} { els::open_default_apps }
+    if {[llength $added]} { els::open_default_apps }
 }
 proc els::file_associations {} {
     if {$::tcl_platform(platform) ne "windows"} {
