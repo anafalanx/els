@@ -879,6 +879,34 @@ test tip-1.2 {path_tip appends the path length and strips the extended prefix} -
          [els::path_tip {}]
 } -result {{C:\Users\me\notes.txt [21]} {C:\a\b\leaf.txt [15]} {}}
 
+# ---- Always on Top ------------------------------------------------------
+test aot-1.1 {Always on Top toggles the window's -topmost attribute} -setup {ui_reset} -body {
+    set off [wm attributes . -topmost]
+    set ::els::always_on_top 1 ; els::set_always_on_top 0
+    set on [wm attributes . -topmost]
+    set ::els::always_on_top 0 ; els::set_always_on_top 0
+    list $off $on [wm attributes . -topmost]
+} -result {0 1 0}
+
+test aot-1.2 {View menu exposes an Always on Top checkbutton bound to the setting} -setup {ui_reset} -body {
+    set found 0
+    for {set i 0} {$i <= [.menu.view index end]} {incr i} {
+        if {[.menu.view type $i] eq "checkbutton" && \
+            [.menu.view entrycget $i -label] eq "Always on Top"} {
+            set found [expr {[.menu.view entrycget $i -variable] eq "::els::always_on_top"}]
+        }
+    }
+    set found
+} -result 1
+
+test aot-1.3 {Always on Top survives a config save / load round-trip and re-applies} -setup {ui_reset} -body {
+    set ::els::always_on_top 1
+    els::set_always_on_top            ;# persists to the config
+    set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}
+    els::load_geometry
+    list $::els::always_on_top [wm attributes . -topmost]
+} -result {1 1}
+
 test cfg-0.1 {word wrap survives a config save / load round-trip} -setup {ui_reset} -body {
     set ::els::word_wrap 1
     els::set_wrap

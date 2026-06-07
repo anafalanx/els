@@ -67,6 +67,7 @@ namespace eval els {
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
+    variable always_on_top 0     ;# View ▸ Always on Top (wm -topmost)
     variable font_size 11        ;# document text size (points); the family is fixed
     variable vs_shown -1         ;# vertical scrollbar visibility (auto-hidden when content fits)
     variable vs_after ""         ;# pending (idle) vertical scrollbar-visibility update
@@ -291,6 +292,10 @@ proc els::load_geometry {} {
             catch {els::ws_refresh}
         }
     }
+    if {![catch {dict get $data always_on_top} t]} {
+        set ::els::always_on_top [expr {$t ? 1 : 0}]
+        catch {els::set_always_on_top 0}
+    }
     if {![catch {dict get $data restore_session} rs]} {
         set ::els::restore_session [expr {$rs ? 1 : 0}]
     }
@@ -312,6 +317,7 @@ proc els::save_geometry {} {
         set payload [dict create geometry [wm geometry .] \
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
+                         always_on_top $::els::always_on_top \
                          restore_session $::els::restore_session \
                          session_files [els::session_current_files] \
                          session_active [els::session_current_active]]
@@ -835,6 +841,8 @@ proc els::build {} {
         -command els::set_wrap
     .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
         -command els::set_show_ws
+    .menu.view add checkbutton -label "Always on Top" -variable ::els::always_on_top \
+        -command els::set_always_on_top
     .menu.view add separator
     .menu.view add command -label "Zoom In"    -accelerator Ctrl++ -command {els::zoom 1}
     .menu.view add command -label "Zoom Out"   -accelerator Ctrl+- -command {els::zoom -1}
@@ -2568,6 +2576,14 @@ proc els::ws_refresh {} {
 
 proc els::set_show_ws {{persist 1}} {
     els::ws_refresh
+    if {$persist} { els::save_geometry }
+}
+# Always on Top: keep the els window above other windows.  Tk maps this to the
+# Win32 WS_EX_TOPMOST style (SetWindowPos HWND_TOPMOST), so it is reliable for
+# normal windows; the only thing it cannot sit above is another app's exclusive-
+# fullscreen surface, which is inherent to how Windows topmost works.
+proc els::set_always_on_top {{persist 1}} {
+    catch {wm attributes . -topmost [expr {$::els::always_on_top ? 1 : 0}]}
     if {$persist} { els::save_geometry }
 }
 
