@@ -162,3 +162,38 @@ test gutter-1.4 {the gutter widens as the line count grows by an order of magnit
     els::draw_gutter ; update
     expr {[.ln cget -width] > $narrow}
 } -result 1
+
+# ---- UX polish ----------------------------------------------------------
+test goto-1.4 {go to line rejects hex (0x) and signed (+) input} -setup {els_reset} -body {
+    set w [els::T] ; $w insert end "L1\nL2\nL3\nL4\nL5\n"
+    $w mark set insert 3.0
+    els::goto_line ; .goto.f.e insert 0 "0x2" ; els::goto_do .goto
+    set afterHex [lindex [split [$w index insert] .] 0]
+    els::goto_line ; .goto.f.e insert 0 "+2"  ; els::goto_do .goto
+    set afterPlus [lindex [split [$w index insert] .] 0]
+    list $afterHex $afterPlus
+} -result {3 3}
+
+test ws-1.3 {Show Whitespace flags interior 2+ space runs mauve; single spaces stay grey} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "a   b c\n"   ;# 3-space interior run (1.1-1.3), then a single space (1.5)
+    set ::els::show_ws 1 ; els::ws_refresh
+    list [expr {[lsearch [$w tag names 1.1] wsTrail] >= 0}] \
+         [expr {[lsearch [$w tag names 1.5] wsTrail] >= 0}] \
+         [expr {[lsearch [$w tag names 1.5] wsSpace] >= 0}]
+} -result {1 0 1}
+
+test wrap-1.5 {current-line wash spans a wrapped logical line; gutter band at its first row} -setup {els_reset} -body {
+    set w [els::T]
+    wm geometry . 400x400 ; update
+    $w insert end "[string repeat {word } 40]\nsecond\n"
+    set ::els::word_wrap 1 ; els::set_wrap
+    $w mark set insert 1.0
+    els::refresh_view ; update
+    set r [$w tag ranges currentLine]
+    set di [$w dlineinfo 1.0]
+    set bandY ""
+    foreach id [.ln find all] { if {[.ln type $id] eq "rectangle"} { set bandY [lindex [.ln coords $id] 1] } }
+    list [expr {[lindex $r 0] eq "1.0" && [$w compare [lindex $r 1] >= "1.end"]}] \
+         [gutter_bands] [expr {$bandY == [lindex $di 1]}]
+} -result {1 1 1}

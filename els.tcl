@@ -796,7 +796,7 @@ proc els::build {} {
     bind .sb.eol  <Leave>     {els::status_link_leave .sb.eol}
     bind .sb.enc  <Leave>     {els::status_link_leave .sb.enc}
     bind .sb.name <Configure> {els::update_namelabel}
-    bind .sb.update <Button-1> {els::open_url "https://github.com/anafalanx/els/releases/latest"}
+    bind .sb.update <Button-1> {els::tip_cancel ; els::open_url "https://github.com/anafalanx/els/releases/latest"}
     els::tooltip_for .sb.name els::name_tip
 
     # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter · 3 status
@@ -836,6 +836,14 @@ proc els::build {} {
     bind elsText <Control-minus>      { els::zoom -1;    break }
     bind elsText <Control-Key-0>      { els::zoom_reset; break }
     bind elsText <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
+    bind elsText <Key-F3>             { els::find_step 1;  break }
+    bind elsText <Shift-Key-F3>       { els::find_step -1; break }
+    # neutralize Tk's emacs-style Text defaults that surprise on a Windows editor
+    # (Ctrl+K kill-to-end, Ctrl+D delete-next, Ctrl+T transpose); break pre-empts
+    # the default Text binding so these keys do nothing
+    bind elsText <Control-k> break
+    bind elsText <Control-d> break
+    bind elsText <Control-t> break
 
     # the same accelerators on the toplevel, for when focus is off the text
     bind . <Control-n> { els::new;       break }
@@ -855,6 +863,8 @@ proc els::build {} {
     bind . <Control-minus>      { els::zoom -1;    break }
     bind . <Control-Key-0>      { els::zoom_reset; break }
     bind . <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
+    bind . <Key-F3>             { els::find_step 1;  break }
+    bind . <Shift-Key-F3>       { els::find_step -1; break }
 
     bind .ln <Button-1>   { focus [els::T]; break }
     bind .ln <MouseWheel> { els::wheel %D; break }
@@ -934,6 +944,11 @@ proc els::switch_to {id} {
     variable active
     if {[lsearch -exact $docs $id] < 0} { return }
     if {$active ne "" && [winfo exists [els::W $active]]} {
+        # clear find highlights on the tab we are leaving so they don't linger as
+        # orphaned tints on an inactive document (the search re-applies to the new
+        # active doc below when the find bar is open)
+        [els::W $active] tag remove findAll 1.0 end
+        [els::W $active] tag remove findOne 1.0 end
         grid remove [els::W $active]
     }
     set active $id
@@ -2295,7 +2310,9 @@ proc els::goto_line {} {
 proc els::goto_do {top} {
     set w [els::T]
     set ln [string trim [$top.f.e get]]
-    if {$w ne "" && [string is integer -strict $ln] && $ln >= 1} {
+    # plain decimal only — reject hex (0x1F) and signed (+5), which Tcl's
+    # `string is integer` would otherwise accept; scan past leading zeros safely
+    if {$w ne "" && [regexp {^[0-9]+$} $ln] && [scan $ln %d ln] == 1 && $ln >= 1} {
         set ln [expr {min($ln, [els::line_count])}]
         $w mark set insert $ln.0
         $w see $ln.0
@@ -2319,8 +2336,10 @@ proc els::ws_refresh {} {
     if {!$::els::show_ws} { return }
     set top [$w index @0,0]
     set bot [$w index "@0,[winfo height $w] + 1 line"]
-    # spaces -> grey, tabs -> blue, trailing spaces -> mauve (overrides)
-    foreach {tag pat var} {wsSpace { +} wl1  wsTab {\t+} wl2  wsTrail { +$} wl3} {
+    # spaces -> grey; tabs -> blue; any trailing space OR a run of 2+ spaces ->
+    # mauve (flags trailing and accidental double-spaces, overriding the grey).
+    # Ordinary single inter-word spaces stay subtle grey.
+    foreach {tag pat var} {wsSpace { +} wl1  wsTab {\t+} wl2  wsTrail { +$} wl3  wsTrail {  +} wl4} {
         set i 0
         foreach s [$w search -all -regexp -count ::els::$var -- $pat $top $bot] {
             $w tag add $tag $s "$s + [lindex [set ::els::$var] $i] chars" ; incr i

@@ -888,3 +888,46 @@ test reg-7.1 {Whole Word + Regex alternation does not match inside larger words}
     els::find_update
     llength $::els::find_matches
 } -result 2
+
+# ---- UX polish ----------------------------------------------------------
+test ui-3.4 {Ctrl+K / Ctrl+D / Ctrl+T do nothing (Tk's emacs Text defaults neutralized)} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "hello world"
+    $w mark set insert 1.0
+    event generate $w <Control-k> ; event generate $w <Control-d> ; event generate $w <Control-t>
+    update
+    els_text
+} -result {hello world}
+
+test ui-4.14 {find highlights are cleared from a tab when you switch away} -setup {ui_reset} -body {
+    set a $::els::active
+    [els::W $a] insert end "match match match"
+    set ::els::find_q match ; set ::els::find_mode find ; els::find_update
+    set hadA [expr {[llength [[els::W $a] tag ranges findAll]] > 0}]
+    els::new_doc                ;# switch to a new tab
+    set orphanA [expr {[llength [[els::W $a] tag ranges findAll]] > 0}]
+    list $hadA $orphanA
+} -result {1 0}
+
+test ui-4.15 {F3 / Shift+F3 step to the next / previous match} -setup {ui_reset} -body {
+    set w [els::T] ; $w insert end "x x x x"
+    set ::els::find_q x ; els::find_update
+    set c0 $::els::find_current
+    event generate $w <Key-F3>       ; update ; set c1 $::els::find_current
+    event generate $w <Shift-Key-F3> ; update ; set c2 $::els::find_current
+    list $c0 $c1 $c2
+} -result {0 1 0}
+
+test update-1.3 {clicking the update notice dismisses its tooltip} -setup {
+    ui_reset
+    rename ::els::open_url ::els_test_real_open_url
+    set ::els_test_url ""
+    proc ::els::open_url {u} { set ::els_test_url $u }
+} -body {
+    els::tip_pop .sb.update "els 9.9 is available"
+    set shown [winfo exists .tip]
+    event generate .sb.update <Button-1> -x 2 -y 2
+    update
+    list $shown [winfo exists .tip] [expr {$::els_test_url ne ""}]
+} -cleanup {
+    rename ::els::open_url {} ; rename ::els_test_real_open_url ::els::open_url
+} -result {1 0 1}
