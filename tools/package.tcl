@@ -1,14 +1,17 @@
-# tools/package.tcl — build the single-file els.exe.
+# tools/package.tcl — append the els zipfs payload onto a wrapper exe.
 #
-# Runs under the STATIC tclsh90s selected by `x build`, so zipfs can append the
-# staged app payload to a Tk-capable wrapper.
+# Runs under the STATIC tclsh90s so zipfs can `lmkimg`-append the staged app
+# payload — main.tcl (= els.tcl), resources/, tcl_library/, tk_library/ at the
+# archive root (+ build/*.dll with --with-ext) — onto a Tk-capable wrapper, AFTER
+# the PE image so a baked-in icon/manifest survives.  The wrapper is `--wrapper`:
+#   * native build (`x build`):       build/els-bare.exe (our custom C WinMain)
+#   * legacy build (`x build-wish`):  an icon-stamped copy of wish90s.exe
 #
-#   tclsh90s.exe tools/package.tcl [out.exe] [--with-ext]
+#   tclsh90s.exe tools/package.tcl [out.exe] [--wrapper W] [--with-ext]
 #
-# Reproduces the proven layout — main.tcl, resources/, tcl_library/, tk_library/
-# at the archive root — fused into a copy of the wish90s wrapper.  The staged
-# libraries come from the static zipfs image when available, or from the
-# portable appfull payload used by the launcher.
+# tk_library is extracted from wish90s.exe's own appended archive (present
+# regardless of the mkimg wrapper) or the portable appfull payload; tcl_library
+# from the static interp's //zipfs:/app or appfull.
 
 proc script_root {} {
     set s [info script]

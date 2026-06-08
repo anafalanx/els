@@ -21,6 +21,13 @@ exists only because PATH has to be set *before* Tcl is reachable (a
 chicken-and-egg the shell must solve). It is deliberately tiny; all real logic
 lives in Tcl.
 
+The native `els.exe` needs Windows PE resources — an icon, an application
+manifest, and version info — which are normally `.rc`/`.ico`/`.manifest` files.
+els keeps them **out of the committed source**: they are *generated from Tcl* at
+build time (`tools/genres.tcl`, `tools/mkico.tcl`) into the gitignored `build/`,
+and compiled by the already-vendored `windres`. So the policy holds — the repo
+is Tcl + C + one `.cmd`, with no new languages or dependencies.
+
 To audit compliance:
 
 ```
@@ -36,7 +43,7 @@ machine-built), so it travels by *copy-paste of the folder*, not by `git clone`.
 | Path | What | Version |
 |---|---|---|
 | `.toolchain/tcl9/` | Tcl/Tk 9 **shared** build: `tclsh90.exe`, `wish90.exe`, stubs (`lib/libtclstub.a`), headers (`include/tcl.h`, `tk.h`) | 9.0.3 |
-| `.toolchain/tcl9s/` | Tcl/Tk 9 **static**, DLL-free: `tclsh90s.exe`, `wish90s.exe` (the single-exe wrapper) | 9.0.3 |
+| `.toolchain/tcl9s/` | Tcl/Tk 9 **static**, DLL-free: the link libs `lib/libtcl90.a` + `libtcl9tk90.a` (the native `x build` links these into els.exe), plus `tclsh90s.exe` and `wish90s.exe` (the legacy wrapper build) | 9.0.3 |
 | `.toolchain/msys64/ucrt64/` | gcc (C23), binutils, gdb (MSYS2 UCRT64) | gcc 16.1.0 |
 | `.toolchain/msys64/usr/bin/` | `curl.exe` etc. (used by the fetch tasks) | n/a |
 | `.toolchain/twapi-dl/` | twapi: Windows API extension for the GUI tooling | 5.2.0 |
@@ -85,7 +92,8 @@ All tooling. Run `x help`:
 x test               in-process test suite (tcltest + Tk event generate)
 x run [file ...]     launch the editor (wish + els.tcl)
 x shot <out> [file]  screenshot the editor (twapi, all-Tcl)
-x build [--with-ext] fuse the single-file els.exe (--with-ext embeds build/*.dll)
+x build              build the native els.exe (custom C23 WinMain, static Tcl+Tk+icudet)
+x build-wish [--with-ext]  legacy: fuse els.exe onto wish90s (--with-ext embeds DLLs)
 x build-ext          compile src/*.c C23 extensions -> build/*.dll
 x fetch-twapi        vendor twapi into .toolchain/
 x fetch-git          vendor MinGit into .toolchain/git/
@@ -120,16 +128,19 @@ as text, never as a GUI dialog.
 
 ## C23 ↔ Tcl extensions
 
-els can drop into C23 for hot paths or to bind a C library, exposed to Tcl as
-ordinary commands. Extensions are built against the Tcl **stubs** (a
-compiler-independent ABI), so the resulting `.dll`:
+els drops into C23 for hot paths or to bind a C library, exposed to Tcl as
+ordinary commands. The native `els.exe` **statically links its product extension
+in** (see the build below); during development every `src/*.c` also builds as a
+standalone `.dll` against the Tcl **stubs** (a compiler-independent ABI), so a dev
+`.dll`:
 
 - imports **only `KERNEL32` + the UCRT** (`api-ms-win-crt-*`), present on every
-  Windows 11; it is **not** linked against `tcl90.dll` and loads with only
-  `System32` on PATH (fully self-contained);
+  Windows 11; it is **not** linked against `tcl90.dll`;
 - is built with `-static-libgcc`, so it needs no gcc runtime DLLs.
 
-`src/elsx.c` is the template. The build (run by `x build-ext`) is:
+`src/elsx.c` is the template. `x build-ext` compiles every `src/*.c` →
+`build/<name>.dll` + `build/pkgIndex.tcl`, so `load`/`package require <name>`
+finds it (init proc = Titlecased filename, e.g. `Icudet_Init` for `icudet.c`):
 
 ```
 gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS \
@@ -137,55 +148,68 @@ gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS \
     -o build/elsx.dll -L.toolchain/tcl9/lib -ltclstub -static-libgcc
 ```
 
-`x build-ext` compiles every `src/*.c` and writes `build/pkgIndex.tcl`, so a
-`load`/`package require <name>` finds it (init proc = Titlecased filename, e.g.
-`Elsx_Init` for `elsx.c`). Tests live in `tests/elsx.test` (gated on the DLL
-being built, so the suite is green with or without a compiler run).
+The product ships only what it needs: `src/icudet.c` (charset detection) is
+**compiled straight into the native `els.exe`** (no DLL); `cap.c` (the screenshot
+capture used by `tools/shot.tcl`) and `elsx.c` (a demo) stay dev-only `.dll`s.
+Tests live in `tests/elsx.test` (gated on the DLL being built, so the suite is
+green with or without a compiler run).
 
-Two integration modes:
+## Build: `x build` (native els.exe)
 
-1. **Dynamic:** `package require elsx` during dev.
-2. **Embedded in the single-exe:** see below; the DLL rides inside `els.exe`'s
-   zipfs image and loads from there.
+`x build` produces one self-contained **native** `els.exe` (~5.1 MB, **zero
+non-system DLLs**) from our own C23 entry point — a real Windows PE, not a stock
+interpreter with scripts bolted on. `WinMain` is ours; Tcl, Tk, and the icudet
+detector are statically linked in; the Tcl/Tk script libraries + `els.tcl` ride
+inside an appended zipfs image. `els.tcl` is unchanged by any of this. Steps
+(`tools/x.tcl` `task_build`):
 
-## Single-file build: `x build`, `tools/package.tcl`
+1. `tools/genres.tcl` generates `build/els.rc` + `build/els.exe.manifest` from
+   Tcl (the version comes straight from `els.tcl`'s `variable version`), and
+   `tools/mkico.tcl` packs `resources/icon*.png` into `build/els.ico`. These are
+   gitignored build artifacts, so the committed repo stays Tcl + C + one `.cmd`
+   (no `.rc`/`.manifest`/`.ico` source — the same way `els.ico` was always made).
+2. `windres` compiles `build/els.rc` (icon + manifest + VERSIONINFO) →
+   `build/els.res`.
+3. gcc compiles `src/els_main.c` (a minimal fork of Tk's `winMain.c`, built
+   `-municode -DUNICODE -DSTATIC_BUILD -DELS_STATIC_ICUDET`) and `src/icudet.c`.
+4. gcc links them + `els.res` against the **static** libs in `.toolchain/tcl9s/lib`
+   (`libtcl9tk90.a`, `libtcl90.a`, `libtclstub.a`) + the Win32 system libs
+   (`tkConfig.sh`'s `TK_LIBS`), with `-mwindows` (GUI subsystem) and
+   `--gc-sections`; then `strip`. Headers come from `.toolchain/tcl9/include`
+   (the static tree ships none; they are ABI-identical 9.0.3).
+5. `package.tcl` (under static `tclsh90s`) appends the zipfs payload onto our exe
+   — `main.tcl` (= els.tcl), `resources/`, `tcl_library/`, `tk_library/`. **No
+   DLL is embedded**; icudet is compiled in. At boot, `TclZipfs_AppHook`
+   self-mounts the appended zip at `//zipfs:/app` and runs `main.tcl`.
 
-`x build` fuses one self-contained `els.exe` (~5.7 MB, **zero non-system DLLs**).
-`package.tcl` runs under the static `tclsh90s` so zipfs can append the staged
-payload to the Tk-capable wrapper.  The recipe reproduces the proven archive
-layout (everything at the archive root):
+The PE **icon + manifest** (system-DPI-aware, common-controls v6, UTF-8 code page,
+long-path aware) **+ version info** (`FileDescription`/`ProductName` = `els`) are
+baked at link time by windres. They survive the zipfs append because the zip lands
+*after* the PE image. `/els.exe` and `/build/` are gitignored (so is the generated
+`src/els.ico`); rebuild them, ship the exe via releases. The full rationale and the
+proven link recipe are in `docs/native-port-study.md`.
 
-```
-main.tcl        <- els.tcl
-resources/      <- resources/
-tcl_library/    <- copied from //zipfs:/app when mounted, otherwise .toolchain/appfull
-tk_library/     <- copied from `zipfs mount wish90s.exe`, otherwise .toolchain/appfull
-[elsx.dll …]    <- with --with-ext: build/*.dll + pkgIndex.tcl
-```
+### Legacy wrapper build: `x build-wish`
 
-then `zipfs lmkimg els.exe <explicit staged-file list> {} wish90s.exe`, so files
-land at the root and `main.tcl` is auto-sourced at startup. `x build --with-ext`
-also embeds the compiled extensions, which then `load //zipfs:/app/elsx.dll`
-from inside the exe (Tcl auto-extracts the DLL to a temp file before
-`LoadLibrary`). `/els.exe` and `/build/` are gitignored. Rebuild them; ship the
-exe via releases.
+Before the native port, `els.exe` was a byte-copy of `wish90s.exe` (the stock
+static Tk shell) with the same zipfs payload appended and the icon post-stamped
+via `tools/exeicon.tcl` (twapi `UpdateResource`). `x build-wish [--with-ext]`
+still produces that (icudet rides inside as a `.dll` and `load`s from zipfs).
+**Order is critical there:** editing PE resources DROPS anything appended after
+the PE image (the whole zipfs payload), so the icon goes into a *copy of the
+wrapper first* and `mkimg` appends the zip after (`package.tcl --wrapper`);
+`exeicon.tcl` refuses to edit an already-packaged exe as a guard. The native
+`x build` supersedes this; it is kept one cycle as a rollback path.
 
-**The .exe file icon** (the awl, shown in Explorer/taskbar) is the binary's PE
-icon resource, separate from the runtime *window* icon (which `els.tcl` sets via
-`wm iconphoto`).  `x build` stamps it via `tools/exeicon.tcl` (twapi
-`UpdateResource`, RT_GROUP_ICON + RT_ICON at 16–256 px).  **Order is critical:**
-editing PE resources rewrites the executable and DROPS anything appended after
-the PE image, i.e. the whole zipfs payload.  So the icon goes into a *copy of
-the wrapper FIRST*, and `mkimg` appends the zip after that (`package.tcl
---wrapper`).  `exeicon.tcl` refuses outright to edit a packaged exe (one with
-`main.tcl` at the zip root) as a guard against that footgun.
+### Testing the exe safely
 
-**Testing the single-exe safely:** els requires Tk, which only `wish90s` has (no
-Tk-capable `tclsh`), so a startup failure pops a modal dialog. Therefore: build,
-then **verify the exe's zipfs structure matches the proven layout** (`main.tcl`,
-`tcl_library/init.tcl`, `tk_library/tk.tcl`, `resources/icon.png` all present)
-*before* running `els.exe --selftest [file] [report.txt]` (a headless mode that
-writes a result file and exits).
+`els.exe --selftest [report.txt]` is a headless mode that boots the full app,
+writes a result file, and exits (a GUI-subsystem exe has no stderr). `x probe-exe`
+drives the first-run prompt + session restore in a temp config home. Verify the
+appended zipfs structure (`main.tcl`, `tcl_library/init.tcl`, `tk_library/tk.tcl`,
+`resources/icon.png`) is intact. **NEVER debug by running a GUI build directly on
+a failure** — it rains modal dialogs on the user; read the file-report selftest,
+or build a console-subsystem twin (gcc without `-mwindows`) whose stderr is text.
 
 ## Tests: `tests/`
 

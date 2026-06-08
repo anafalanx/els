@@ -49,7 +49,7 @@ set ::COMPONENTS {
     {key gcc   name "gcc / C23 (UCRT64)" probe {msys64 ucrt64 bin gcc.exe}         kind core want 16.1.0           prep {manual "vendor the MSYS2 UCRT64 toolchain (gcc/binutils/gdb)"}}
     {key twapi name "twapi"              probe {twapi-dl twapi-5.2.0 pkgIndex.tcl} kind core want 5.2.0            prep {auto fetch-twapi}}
     {key git   name "Git (MinGit)"       probe {git cmd git.exe}                   kind core want 2.54.0.windows.1 prep {auto fetch-git}}
-    {key tcls  name "Tcl/Tk 9 (static)"  probe {tcl9s bin tclsh90s.exe}            kind opt  want 9.0.3            prep {manual "static build (--disable-shared); only for single-exe packaging"}}
+    {key tcls  name "Tcl/Tk 9 (static)"  probe {tcl9s bin tclsh90s.exe}            kind core want 9.0.3            prep {manual "static build (--disable-shared); its libs (libtcl90.a/libtcl9tk90.a) link into the native els.exe via `x build`"}}
     {key curl  name "curl"               probe {msys64 usr bin curl.exe}           kind opt  want {}               prep {manual "ships with MSYS2; used by the fetch tasks"}}
 }
 

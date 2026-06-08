@@ -68,6 +68,9 @@ proc TCp {args} { return [file join $::TC {*}$args] }
 proc tclsh {} { return [TCp tcl9 bin tclsh90.exe] }
 proc wish  {} { return [TCp tcl9 bin wish90.exe] }
 proc gcc   {} { return [TCp msys64 ucrt64 bin gcc.exe] }
+proc windres {} { return [TCp msys64 ucrt64 bin windres.exe] }
+proc strip-exe {} { return [TCp msys64 ucrt64 bin strip.exe] }
+proc tclshs {} { return [TCp tcl9s bin tclsh90s.exe] }
 
 # Stream a child's stdout/stderr through to ours.  A non-zero exit from the
 # child is a NORMAL signal here (a failing test, a missing tool), so propagate
@@ -120,7 +123,11 @@ proc task_help {args} {
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
   shot <out> [file]  screenshot the editor to <out> (twapi)
   readme-shots       regenerate docs/img screenshots used by README.md
-  build [--with-ext] fuse the single-file els.exe (--with-ext embeds build/*.dll)
+  build [out]        build the native els.exe — a custom C23 WinMain with Tcl+Tk
+                     +icudet statically linked in and PE icon/manifest/version
+                     baked via windres (see docs/native-port-study.md)
+  build-wish [--with-ext]  legacy fallback: fuse els.exe onto a copy of wish90s
+                     (--with-ext embeds build/*.dll); superseded by `build`
   probe-exe [exe]    launch the fused exe in a temp config home and verify
                      first-run prompt + session restore startup
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
@@ -151,9 +158,11 @@ proc task_toolcheck {args} {
     stream [tclsh] [P tools toolcheck.tcl] {*}$args
 }
 
-# Build the single-file els.exe.  Runs package.tcl under the STATIC tclsh90s so
-# zipfs can append the staged app payload to the Tk-capable wrapper.
-proc task_build {args} {
+# LEGACY fallback build: fuse els.exe onto a copy of wish90s (the stock static Tk
+# shell) by stamping the icon then appending the zipfs payload.  Superseded by the
+# native `x build` (task_build below); kept one cycle as a rollback path.  Runs
+# package.tcl under the STATIC tclsh90s so zipfs can append the payload.
+proc task_build-wish {args} {
     set tclshs [TCp tcl9s bin tclsh90s.exe]
     if {![file exists $tclshs]} {
         error "static interpreter missing (.toolchain/tcl9s) — needed for `x build`; see `x toolcheck`"
@@ -274,6 +283,57 @@ proc task_build-ext {args} {
     }
     close $idx
     puts "built [llength $sources] extension(s); wrote build/pkgIndex.tcl"
+}
+
+# Build the native els.exe (THE canonical build): a custom C23 WinMain
+# (src/els_main.c) statically linked against Tcl+Tk (.toolchain/tcl9s) with icudet
+# compiled in and the PE resources (icon + manifest + version) baked via windres,
+# then the same zipfs payload (tcl_library/tk_library/main.tcl/resources) appended.
+# See docs/native-port-study.md.  Headers come from the SHARED tree (tcl9/include —
+# tcl9s has none); libs from the STATIC tree (tcl9s/lib).  The legacy wish-wrapper
+# build is `x build-wish` (task_build-wish above).
+proc task_build {args} {
+    need gcc tclsh
+    if {![file exists [tclshs]]} { error "static tclsh missing (.toolchain/tcl9s) — run `x toolcheck`" }
+    set out [lindex $args 0] ; if {$out eq ""} { set out [P els.exe] }
+    set inc [TCp tcl9 include]
+    set libd [TCp tcl9s lib]
+    file mkdir [P build]
+    # the Win32 system libraries Tk needs (= tkConfig.sh TK_LIBS, proven set)
+    set syslibs {
+        -lnetapi32 -lkernel32 -luser32 -ladvapi32 -luserenv -lws2_32
+        -lgdi32 -lcomdlg32 -limm32 -lcomctl32 -lshell32 -luuid -lole32
+        -loleaut32 -lwinspool
+    }
+    # 1. generate the PE resource inputs from Tcl into build/ (gitignored), so the
+    #    committed repo stays Tcl + C + one .cmd: the .rc + manifest (version from
+    #    els.tcl) and the .ico packed from the awl PNGs.
+    puts "gen  build/els.rc + els.exe.manifest + els.ico"
+    stream [tclsh] [P tools genres.tcl] [P build]
+    stream [tclsh] [P tools mkico.tcl] [P build els.ico] \
+        [P resources icon16.png] [P resources icon32.png] [P resources icon.png]
+    # 2. compile resources (icon + manifest + VERSIONINFO) -> COFF object
+    puts "windres build/els.rc -> build/els.res"
+    stream [windres] --include-dir [P build] --include-dir $inc \
+        [P build els.rc] -O coff -o [P build els.res]
+    # 3. compile the entry point (UNICODE + STATIC + static icudet) and icudet
+    puts "cc  els_main.c + icudet.c"
+    stream [gcc] -std=c23 -O2 -municode -DUNICODE -D_UNICODE -DSTATIC_BUILD=1 \
+        -DELS_STATIC_ICUDET -ffunction-sections -fdata-sections \
+        -c [P src els_main.c] -o [P build els_main.o] -I$inc
+    stream [gcc] -std=c23 -O2 -DSTATIC_BUILD=1 -ffunction-sections -fdata-sections \
+        -c [P src icudet.c] -o [P build icudet.o] -I$inc
+    # 4. link: GUI subsystem; Tk before Tcl before stub; system libs last
+    puts "ld  -> build/els-bare.exe"
+    set bare [P build els-bare.exe]
+    stream [gcc] -municode -mwindows -static-libgcc -Wl,--gc-sections \
+        [P build els_main.o] [P build icudet.o] [P build els.res] \
+        [file join $libd libtcl9tk90.a] [file join $libd libtcl90.a] \
+        [file join $libd libtclstub.a] {*}$syslibs -o $bare
+    catch {stream [strip-exe] $bare}      ;# shrink before the payload append
+    # 5. append the zipfs payload (tcl_library/tk_library/main.tcl/resources) onto
+    #    OUR exe.  No --with-ext: icudet is compiled in, so no DLL is embedded.
+    stream [tclshs] [P tools package.tcl] --wrapper $bare $out
 }
 
 proc task_fetch-twapi {args} {

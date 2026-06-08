@@ -1,0 +1,332 @@
+<!--
+  Study + action plan produced 2026-06-08 by a multi-agent investigation of the
+  live repo and the vendored Tcl/Tk 9 toolchain, including an EMPIRICAL static-link
+  spike (a real C23 program compiled and run against the vendored static libs).
+  Every load-bearing claim was adversarially verified against tclConfig.sh/
+  tkConfig.sh, nm/ar on the .a libs, and docs/tcl-tk-9-manual/. Line numbers are
+  as of els 0.30 and are indicative.
+-->
+
+# Native els.exe — Custom C23 Main Static Port: Study & Action Plan
+
+## 1. Executive Summary & Verdict
+
+**The blunt truth first: Tcl and Tk are *already* statically linked into the shipped exe.** Today's `dist/els.exe` (5,744,031 B) is a byte-copy of the static Tk shell `.toolchain/tcl9s/bin/wish90s.exe` (5,591,049 B) with a 152,982 B zipfs payload appended. `wish90s.exe` is built from `libtcl90.a` (3.27 MB) + `libtcl9tk90.a` (2.42 MB) and imports **no** `tcl90.dll`/`tk` DLL — only Windows system DLLs. The only dynamic library in the product is `icudet.dll`, loaded from zipfs at runtime (and even that has no link-time deps — it `LoadLibraryA("icu.dll")` against the system ICU).
+
+So the framing — "make it a real native app that statically links Tcl+Tk" — describes something that **is already true**. The exe is already a self-contained native PE with Tcl+Tk compiled in. The entry point being stock `Tk_MainExW` vs. a hand-written `main()` is invisible to users.
+
+**What a custom-C23-main rewrite actually buys** (honest accounting):
+
+| Benefit | Real? | Needs custom main? |
+|---|---|---|
+| Correct PE VERSIONINFO (today: `FileDescription="Wish Application"`, `OriginalFilename="wish90s.exe"`, `LegalCopyright="Regents of UC"`) | **Yes, real** (Explorer Details tab, taskbar tooltip, AV heuristics) | **No** — can be stamped onto the wrapper, or baked via windres |
+| Application manifest (today: wish90s has NO embedded RT_MANIFEST — verified) for DPI/comctl6/UTF-8 | **Yes, polish** | **No** — windres or resource-stamp |
+| Statically compile-in `icudet` (drop the DLL from the zip) | Marginal (~tens of KB moved, not removed) | **Yes** — this is the *only* benefit that genuinely requires `Tcl_AppInit` |
+| "It's a real C app" / clean bespoke startup | Intangible | Yes, by definition |
+| Single-instance / file-association launch | Already handled in `els.tcl`; single-instance explicitly *not wanted* | No |
+
+**The Open-With FriendlyAppName is already correct** — `els.tcl` writes `FriendlyAppName=els` to the registry via `reg.exe` (the file-association feature), independent of PE VERSIONINFO. So the user-facing Open-With label does *not* regress today and does *not* depend on this work.
+
+**Verdict — phased recommendation:**
+
+- **80/20 (recommended first, ~1 session):** Bake correct `RT_VERSION` + `RT_MANIFEST` onto the wrapper in the existing `exeicon`-before-`mkimg` slot. Fixes the only *real* defects (PE metadata; optional DPI manifest) with trivial rollback and zero new C entry point.
+- **Full custom-main port (do it because you asked, and only if static-in-`icudet` or a bespoke startup becomes a genuine requirement):** Feasible, no hard blockers, **empirically proven to link and run** (Section 3). But it is ~3.5–4 focused sessions plus multi-DPI testing, trades wish's battle-tested startup for code you maintain, and is debugged blind (GUI subsystem = no console).
+
+The full plan follows in Section 4 because you asked for "the works." It is real and achievable. It is just not the 80/20.
+
+---
+
+## 2. Where els Is Today vs. The Target (architecture delta)
+
+**Today (`x build` → `tools/x.tcl task_build`):**
+
+1. `tools/exeicon.tcl` copies `wish90s.exe` → a temp `_iconwrap.exe` and stamps the app icon into its PE `.rsrc` (RT_ICON/RT_GROUP_ICON) via twapi `update_resource`.
+2. `tools/package.tcl` runs under static `tclsh90s.exe` and `zipfs lmkimg $out $entries {} $mkimgWrapper` (package.tcl:141) appends a zip **after** the PE image. The `--wrapper` override already exists (package.tcl:48,52,64) and feeds the icon-stamped wrapper in as `mkimgWrapper`.
+3. Archive root holds: `main.tcl` (= `els.tcl`), `resources/` (icon.png), `tcl_library/`, `tk_library/`, and `icudet.dll`. `PRODUCT_EXTS {icudet}` (package.tcl:109) drives a lean pkgIndex.
+4. At boot, stock `wish90s` entry (`_tWinMain` in `.toolchain/tclsrc/tk9.0.3/win/winMain.c`) calls `TclZipfs_AppHook(&argc,&argv)` → self-mounts the appended zip at `//zipfs:/app`, sets `tcl_library`, registers `//zipfs:/app/main.tcl` as the startup script → `Tk_Main(argc,argv,Tcl_AppInit)` sources it. `els.tcl` detects packaged mode via `[string match "//zipfs:*" [info script]]` (els.tcl:179, 675) and runs `els::main` because `[file normalize [info script]] eq [file normalize $::argv0]` (els.tcl:2972).
+
+**Target:**
+
+Replace **only the wrapper binary** with one *we* compile from `src/els_main.c` (a near-verbatim re-implementation of the vendored `winMain.c`), with:
+- `icudet` compiled in and registered in `Tcl_AppInit` (no DLL, no pkgIndex entry).
+- PE `VERSIONINFO` + manifest + icon baked at link time via `windres` (replaces the twapi `exeicon` stamp for this path).
+- The **same** `zipfs lmkimg` append step, now fed *our* exe as `--wrapper`.
+
+The delta is surgical: the boot mechanism (`TclZipfs_AppHook` self-mount → `Tk_Main` → source `main.tcl`) and the entire payload (minus `icudet.dll`) are unchanged. `els.tcl` needs **zero changes** (its `package require icudet` is satisfied because `Icudet_Init` `PkgProvide`s it).
+
+---
+
+## 3. Feasibility — The Empirical Link-Spike Result
+
+**Proven end-to-end.** A minimal C23 program (`Tcl_FindExecutable` → `Tcl_CreateInterp` → `Tcl_Init` → `Tcl_Eval` → `Tk_Init`) **links cleanly and runs** against the vendored static libs with the vendored MSYS2 UCRT64 gcc 16.1.0:
+
+- `Tcl_CreateInterp` returns an interp reporting patchlevel **9.0.3** from the static lib (no DLL).
+- `Tcl_Eval` of `expr 6*7` returns **42** — the statically linked bytecode engine executes.
+- `objdump -p` on the produced exe shows **zero** Tcl/Tk/zlib/tommath DLL imports — only Windows system DLLs + the UCRT `api-ms-win-crt-*` forwarder set.
+- Produced exe: 5,113,096 B (bare spike, console subsystem).
+
+**The proven gcc link command** (bash; `INC=.toolchain/tcl9/include`, `LIBDIR=.toolchain/tcl9s/lib`):
+
+```bash
+# PREREQ: prepend the gcc bin dir to PATH or the driver aborts rc=1 with NO output:
+export PATH=/c/Users/anafa/dev/els/.toolchain/msys64/ucrt64/bin:$PATH
+
+gcc -std=c23 -O2 -Wall -DSTATIC_BUILD=1 -I$INC spike.c \
+    $LIBDIR/libtcl9tk90.a $LIBDIR/libtcl90.a $LIBDIR/libtclstub.a \
+    -lnetapi32 -lkernel32 -luser32 -ladvapi32 -luserenv -lws2_32 \
+    -lgdi32 -lcomdlg32 -limm32 -lcomctl32 -lshell32 -luuid -lole32 \
+    -loleaut32 -lwinspool -static-libgcc -o els.exe
+```
+
+> **Header path correction (verified):** the `.toolchain/tcl9s/` tree has **no `include/`** with `tcl.h`/`tk.h` (it holds `X11/`, `itcl.h`, etc.). The public headers are vendored only under **`.toolchain/tcl9/include`** (the shared tree). They are ABI-compatible (same 9.0.3). So compile with **`-I.toolchain/tcl9/include`** and link against `.toolchain/tcl9s/lib` — do **not** also pull the shared import libs (`libtcl90.dll.a`).
+
+**Key proven findings:**
+
+- **Link order matters:** Tk `.a` **before** Tcl `.a` **before** `libtclstub.a`; system import libs **last**. GNU ld resolves left-to-right.
+- **`libtclstub.a` is required** even though els is not a stubs extension. Tk's static objects (`tkWindow.o`, `tkConsole.o`) reference `Tcl_InitStubs`/`tclStubsPtr`, resolved only by the stub lib. Omitting it = 3 undefined references. This is the single non-obvious required lib.
+- **`-DSTATIC_BUILD=1` is mandatory** so `tcl.h`/`tk.h` do not mark symbols `__declspec(dllimport)`. Confirmed `STATIC_BUILD=1`, `TCL_WITH_INTERNAL_ZLIB=1`, `ZIPFS_BUILD=2` are in `TCL_DEFS` (tclConfig.sh:24).
+- **No `-lz`, `-ltommath`, `-lzlib1`:** zlib (`inflate`/`deflate`/`zlibVersion`) and libtommath (`TclBN_mp_init` et al.) are baked into `libtcl90.a` (verified via `nm` — defined `T` symbols). Eliminates the open question about tommath linkage.
+- **System libs = exactly `TK_LIBS` from `tkConfig.sh`** (tkConfig.sh:36): `-lnetapi32 -lkernel32 -luser32 -ladvapi32 -luserenv -lws2_32 -lgdi32 -lcomdlg32 -limm32 -lcomctl32 -lshell32 -luuid -lole32 -loleaut32 -lwinspool`. `uxtheme`/`gdiplus`/`dwmapi` were **not** needed for this 9.0.3 build.
+
+**What the spike did NOT exercise** (honest caveat): the full GUI path — `-mwindows`/`_tWinMain` + `TclZipfs_AppHook` self-mount of an *appended* zip + `Tk_MainLoop` bringing up a real window. `Tcl_Init`/`Tk_Init` returned non-OK in the spike *only* because no script library was on disk — **expected**, and exactly what the appended zipfs provides. That is not a link or C-load failure. The constituent pieces are all proven; the assembled GUI loop is the first thing to validate in Phase 1.
+
+---
+
+## 4. The Action Plan — Ordered Phases
+
+> Migration safety throughout: **do not touch the working wrapper build.** Add a *parallel* `task_build-native` in `tools/x.tcl` and a skip-icudet flag in `package.tcl`. Flip the default only after `x probe-exe` + `x test` pass on the native exe. Rollback = keep building the old path behind `x build --wish` for one or two releases.
+
+### Phase 0 — 80/20 first (optional but recommended, ~1 session)
+
+If you want the real defects fixed before committing to the rewrite: stamp `RT_VERSION` + `RT_MANIFEST` onto the existing wrapper in the `exeicon`-before-`mkimg` slot.
+- **Manifest (easy, flat XML):** `twapi::update_resource $h 24 1 1033 $xml` (type 24 = RT_MANIFEST, name 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID).
+- **VERSIONINFO (fiddly — binary blob, NOT text):** simplest robust route is to compile `src/els.rc` with `windres` and inject the resulting RT_VERSION bytes, or relink (which is Phase 3 anyway). A malformed blob makes Explorer show *no* version info.
+- **Must run on the wrapper before `mkimg`**, never on the finished exe — `exeicon.tcl` already refuses to edit a packaged exe (it detects `main.tcl` at zip root and exits), because a post-`mkimg` PE edit strips the appended zipfs payload.
+
+Skip Phase 0 if you're going straight to the full port (Phase 3 produces correct PE metadata at link time, cleaner).
+
+### Phase 1 — Custom C23 entry point + boot (`src/els_main.c`) — ~1–2 sessions
+
+Copy `.toolchain/tclsrc/tk9.0.3/win/winMain.c` verbatim (it *is* the source of `wish90s.exe`) and modify minimally. Verified structure: `#undef USE_TCL_STUBS` (line 33), `_tWinMain` (131), `argc=__argc; argv=__targv;` (164–165), `TclZipfs_AppHook(&argc,&argv)` (181), `Tk_Main(...)` (184), `Tcl_StaticLibrary(interp,"Tk",...)` (228), console block guarded by `consoleRequired` (235), `tcl_rcFileName ... wishrc.tcl` (272).
+
+Changes to make:
+1. **Keep `#undef USE_TCL_STUBS`** (critical — line 33). With stubs, `Tk_Main`/`Tcl_Main` become TIP#596 thunks that `LoadLibrary` the Tcl/Tk DLL at runtime and crash in a static exe with no DLL.
+2. **Build `-municode -DUNICODE -D_UNICODE`** — mandatory. On Windows `TclZipfs_AppHook` uses the WCHAR signature and `Tcl_MainEx`→`Tcl_MainExW` only under UNICODE. Without it, the zipfs self-mount silently does not happen and `main.tcl` is never found.
+3. **Set `consoleRequired = FALSE`** (drop the `Tk_CreateConsoleWindow` block and the `wishrc.tcl` line). els is a GUI editor, not a shell.
+4. **In `Tcl_AppInit`:** `Tcl_Init` → `Tk_Init` + `Tcl_StaticLibrary(interp,"Tk",Tk_Init,Tk_SafeInit)` → register icudet (Phase 2). Order is strict: `Tcl_Init` before `Tk_Init` before `Icudet_Init`.
+5. **`Registry_Init`/`Dde_Init`** (winMain.c 218, 223): present in the static lib and registered by stock wish, but els does no `package require registry/dde`. Drop them to shave a little size, or keep them to match wish exactly. Low stakes.
+
+Do **not** hand-roll an event loop or `source main.tcl` yourself. `TclZipfs_AppHook` + `Tk_MainEx` do it. Hand-sourcing would break the run-guard, because `els.tcl:2972` requires `[file normalize [info script]] eq [file normalize $::argv0]` and `els.tcl:179/675` require `info script` to match `//zipfs:*` — both are set correctly *only* by the AppHook startup-script mechanism. **Do not double-mount** (don't also call `TclZipfs_Mount` on the exe path).
+
+**Files:** new `src/els_main.c`. `els.tcl` unchanged.
+
+### Phase 2 — Static icudet — ~0.5 session
+
+The stubs question is settled by the header (`tcl.h:2335-2357`): compiled **without** `-DUSE_TCL_STUBS` against Tcl 9, `Tcl_InitStubs(ip,"9.0",0)` expands to `Tcl_PkgInitStubsCheck(...)`, a real exported function in `libtcl90.a` that just verifies the version and returns non-NULL. So `Icudet_Init`'s existing body (src/icudet.c) compiles and runs **unchanged**.
+
+```bash
+# compile icudet as a plain object — NO -shared, NO -DUSE_TCL_STUBS, NO -ltclstub
+gcc -std=c23 -O2 -Wall -DSTATIC_BUILD=1 -c -I.toolchain/tcl9/include \
+    src/icudet.c -o build/icudet.o
+```
+
+In `Tcl_AppInit`, after `Tk_Init`:
+```c
+extern int Icudet_Init(Tcl_Interp *);          /* icudet.c has no header */
+if (Icudet_Init(interp) != TCL_OK) return TCL_ERROR;
+Tcl_StaticLibrary(interp, "Icudet", Icudet_Init, NULL);
+```
+
+This makes both `package require icudet` and `load {} Icudet` resolve in-process and seeds `::elsdet::detect` immediately. `els.tcl`'s `package require icudet` succeeds because `Icudet_Init` already `PkgProvide`s it — **no els.tcl change**. The runtime `LoadLibraryA("icu.dll")` is unaffected (on pre-1903 machines `detect` returns `""` and els falls back to BOM/UTF-8/cp1252 exactly as today).
+
+**Pitfall:** do NOT both compile icudet `-DUSE_TCL_STUBS` *and* call `Tcl_StaticLibrary` on it — `Tcl_StaticLibrary` is explicitly forbidden for stub-enabled extensions. The non-stubs-object + `Tcl_StaticLibrary` combo above is the correct, documented path.
+
+`cap.c`/`elsx.c` stay dev-only stub DLLs (`PRODUCT_EXTS {icudet}`); no change. Keep building `icudet.dll` in `task_build-ext` for dev/test parity; just add the `.o` build for the exe link.
+
+**Files:** new build path for `build/icudet.o`. `els.tcl` unchanged.
+
+### Phase 3 — PE resources: VERSIONINFO + manifest + icon — ~0.5 session
+
+Three new source files under `src/`:
+
+1. **`src/els.rc`** (model on `.toolchain/tclsrc/tk9.0.3/win/rc/`): `els ICON "els.ico"`; `VS_VERSION_INFO` with `FILEVERSION 0,30,0,0` (keep in sync with els.tcl version, ideally generate the .rc), `FILETYPE VFT_APP`; `StringFileInfo` block `040904b0` with `FileDescription=els`, `ProductName=els`, `OriginalFilename=els.exe`, `CompanyName=anafalanx`, `LegalCopyright=…`, `FileVersion/ProductVersion=0.30`; `VarFileInfo Translation 0x409 1200`; then `1 RT_MANIFEST "els.exe.manifest"` (RT_MANIFEST = 24, name 1).
+2. **`src/els.exe.manifest`** — copy `wish.exe.manifest` (verified contents: `asInvoker`; supportedOS Win7–10; **`<dpiAware>true</dpiAware>`**; Common-Controls 6.0.0.0, token `6595b64144ccf1df`, AMD64). Rename `assemblyIdentity` to `els`. **Add** `<activeCodePage>UTF-8</activeCodePage>` and `<longPathAware>true</longPathAware>`. Keep `dpiAware=true` to match today's rendering — do **not** jump to PerMonitorV2 until multi-monitor tested (see Section 5).
+3. **`src/els.ico`** — `windres` ICON needs a real `.ico`, but `resources/` has only PNGs. Synthesize a multi-size `.ico` reusing the GRPICONDIR/RT_ICON byte format already in `tools/exeicon.tcl` (double-check the standalone-`.ico` `ICONDIRENTRY` field widths are 4-byte LE size+offset).
+
+Compile and link:
+```bash
+windres -I.toolchain/tcl9/include src/els.rc -O coff -o build/els.res   # run from rc dir or pass --include-dir
+```
+Resources are in the PE from the start, so no post-`mkimg` strip hazard.
+
+**Files:** new `src/els.rc`, `src/els.exe.manifest`, generated `els.ico`.
+
+### Phase 4 — Build-system rework — ~1 session
+
+New `task_build-native {out}` in `tools/x.tcl`, beside `task_build-ext`, reusing the `gcc`/`TCp` helpers. **Note:** there is no `tcl9s/include`; use `-I[TCp tcl9 include]` (shared headers) but link `[TCp tcl9s lib ...]`.
+
+```bash
+# (i) entry point  — UNICODE + STATIC + GUI subsystem
+gcc -std=c23 -O2 -municode -DUNICODE -D_UNICODE -DSTATIC_BUILD=1 \
+    -ffunction-sections -fdata-sections -c src/els_main.c -o build/els_main.o \
+    -I.toolchain/tcl9/include
+# (ii) icudet object  (Phase 2)
+gcc -std=c23 -O2 -DSTATIC_BUILD=1 -ffunction-sections -fdata-sections \
+    -c src/icudet.c -o build/icudet.o -I.toolchain/tcl9/include
+# (iii) resources  (Phase 3)
+windres -I.toolchain/tcl9/include src/els.rc -O coff -o build/els.res
+# (iv) link  — Tk before Tcl before stub; system libs last; GUI subsystem; gc-sections
+gcc -municode -mwindows -static-libgcc -Wl,--gc-sections \
+    build/els_main.o build/icudet.o build/els.res \
+    .toolchain/tcl9s/lib/libtcl9tk90.a \
+    .toolchain/tcl9s/lib/libtcl90.a \
+    .toolchain/tcl9s/lib/libtclstub.a \
+    -lnetapi32 -lkernel32 -luser32 -ladvapi32 -luserenv -lws2_32 \
+    -lgdi32 -lcomdlg32 -limm32 -lcomctl32 -lshell32 -luuid -lole32 \
+    -loleaut32 -lwinspool \
+    -o build/els-bare.exe
+strip build/els-bare.exe   # BEFORE mkimg, never after
+```
+
+Then append the payload onto **our** exe with the existing mechanism:
+```
+tclsh90s.exe tools/package.tcl --wrapper build/els-bare.exe --skip-icudet  dist/els.exe
+```
+`package.tcl:64` already routes `--wrapper` into `mkimgWrapper`; `zipfs lmkimg` (package.tcl:141) appends the zip after the PE so icon/manifest/version survive. Add a `--skip-icudet`/`--native` flag that bypasses the `PRODUCT_EXTS` icudet embed block (package.tcl:112–135) — the staged payload becomes `tcl_library/` + `tk_library/` + `main.tcl` + `resources/` only. `tk_library` is still extracted from the wish90s wrapper's own zip (package.tcl:83–89) or the appfull fallback.
+
+`exeicon.tcl` is **not** called on the native path (icon now via windres); leave it for the legacy build.
+
+**Files changed:** `tools/x.tcl` (new `task_build-native`), `tools/package.tcl` (new `--skip-icudet` flag). Both additive.
+
+### Phase 5 — Tests / selftest — ~0.5 session (folded into Phase 4 gate)
+
+The test harness is **packaging-independent** — `tests/run.tcl` sources `els.tcl` in-process under `tclsh90.exe`, so `x test` is unaffected. The two regression gates for the *exe*:
+- **`x probe-exe build/els.exe`** — exercises first-run prompt, session restore, explicit-arg open via `tools/probe_exe.tcl` (file-report channel).
+- **`--selftest`** — `els.tcl` writes a report file (GUI subsystem = no console/stderr). This is the *only* verification channel for the native exe and it keeps working because `main.tcl` runs identically under our `Tk_Main`.
+
+Probe under `tclsh90`, never under `wish90`; GUI startup errors "rain" modal dialogs you can't read, so the file-report selftest is mandatory. Flip the `task_build` default to native only after both `x probe-exe` and `x test` pass; rename the old one `task_build-wrapper`. Promote the static-Tcl component in `tools/toolcheck.tcl` from opt to core, and add a deep check that trial-links a 3-line Tk stub against the static libs.
+
+---
+
+## 5. Pitfalls & Caveats
+
+- **UNICODE is mandatory, not optional.** Without `-DUNICODE -municode`, `TclZipfs_AppHook` gets the wrong signature, the zipfs self-mount silently no-ops, and `main.tcl` is never found. Symptom: a window that never appears, no error.
+- **Init order is strict and unforgiving.** `TclZipfs_AppHook` before `Tk_Main`/interp creation; inside `Tcl_AppInit`: `Tcl_Init` → `Tk_Init` → `Icudet_Init`. Wrong order = "can't find package" or half-initialized Tk.
+- **DPI manifest is a double-edged sword.** Declaring `dpiAware`/PerMonitorV2 **opts out** of Windows' automatic bitmap scaling. els never sets `tk scaling` (the 2.667 value is Tk-derived; els uses bare pixel sizes). Tk 9 self-manages win32 scaling, so today's blur is largely mitigated *without* a manifest. If you add PerMonitorV2 and Tk 9.0.3 ignores `WM_DPICHANGED` (it does), a second monitor renders **crisp but mis-sized** — a *regression* from "slightly blurry but correctly laid out." **Keep `dpiAware=true` (matching today), test on a real multi-DPI rig before any PerMonitorV2 switch.** This is the #1 rendering risk and is identical for the 80/20 and full paths.
+- **`activeCodePage=UTF-8` flips `CP_ACP` process-wide.** Audit `A`-suffixed Win32 calls. icudet's `LoadLibraryA("icu.dll")` is pure-ASCII, safe. Low risk but real.
+- **GUI-subsystem debugging is blind.** No stdout/stderr. A crash in `els_main.c` yields no diagnostics and may rain modal dialogs. The file-based `--selftest` is your only channel; iteration is slow. Copy `winMain.c` semantics exactly — do not improvise locale/encoding/zipfs setup.
+- **`RT_VERSION` is binary, not text** (relevant to the 80/20 twapi route). `twapi::update_resource` takes raw bytes; inject a correctly-encoded `VS_VERSIONINFO` blob (build via windres, read it back). Malformed = Explorer shows no version info.
+- **Never PE-edit after `mkimg`.** Any resource stamp or `strip` after the zip append strips the payload. Your native path strips `els-bare.exe` *before* append.
+- **windres paths are rc-relative** — run from the `.rc` dir or pass `--include-dir`.
+- **Name the icon resource `els`** (an app-named ICON), so Explorer doesn't show Tk's feather group icon.
+- **Size is not a win.** Static icudet just moves ~tens of KB from zip into `.text`; the rc/manifest add a few KB. Use `-ffunction-sections -fdata-sections -Wl,--gc-sections -O2` + `strip` to hold parity near wish90s's 5.59 MB pre-zip; **measure `els-bare.exe`** before declaring success.
+
+---
+
+## 6. Blocking Factors
+
+**No hard blockers.** Confirmed:
+- `Tk_MainEx`/`Tk_MainExW`, `TclZipfs_AppHook`, `Tcl_StaticLibrary`, `Tcl_FindExecutable`, `Tk_Init`, `Tk_MainLoop`, `Tcl_InitSubsystems` all present in the static libs (via `nm`).
+- Full Tcl/Tk 9.0.3 source vendored (`.toolchain/tclsrc/tk9.0.3/win/winMain.c` is the literal source of `wish90s.exe`).
+- `tclConfig.sh`/`tkConfig.sh` encode exact link flags; gcc supports `-std=c23`.
+- The static link **provably links and runs** (Section 3).
+
+**Eliminated by the static libs / spike:**
+- ~~zlib/tommath as separate link deps~~ — baked into `libtcl90.a` (`TCL_WITH_INTERNAL_ZLIB=1`, `ZIPFS_BUILD=2`; `nm` confirms `inflate`/`deflate`/`TclBN_mp_init`). No `-lz`/`-ltommath`/`-lzlib1`.
+- ~~Missing `libtclstub.a` symbol~~ — identified; just add the lib.
+- ~~`tommath` linkage unknown~~ — resolved (baked in).
+
+**Residual unknowns (not blockers, must validate):**
+- The full GUI loop under `-mwindows` with the appended-zip self-mount was not run end-to-end (constituent pieces proven). **This is the first Phase-1 validation.**
+- Size parity is predicted, not measured.
+
+---
+
+## 7. Advantages vs. Disadvantages
+
+| Advantages | Disadvantages |
+|---|---|
+| Correct PE VERSIONINFO (Details tab, taskbar, AV heuristics) | Most benefits don't actually require a custom main (80/20 gets them) |
+| App manifest baked at link time (DPI/comctl6/UTF-8/longPath) — cleaner than twapi stamp | DPI manifest can *regress* rendering on multi-DPI if you over-reach to PerMonitorV2 |
+| icudet compiled in — one fewer embedded file, no pkgIndex juggling | Static icudet saves no meaningful size (DLL → `.text` is a wash) |
+| Bespoke startup you fully control; "a real C app" | Diverges from wish's battle-tested startup; you now own boot/encoding/zipfs correctness |
+| Resources fall out of the normal link (retire post-hoc twapi stamp for this path) | GUI-subsystem debugging is blind; slow iteration via file-report selftest only |
+| Foundation for any future native feature (custom WinMain hooks) | ~3.5–4 sessions + multi-DPI testing for benefits that are ~90% cosmetic today |
+| Proven to link & run; no hard blockers | The Open-With FriendlyAppName — possibly the thing you care most about — is *already correct* and unaffected |
+
+---
+
+## 8. Risks, Rollback, Effort
+
+**Rough effort (one engineer fluent in this toolchain; "session" = 2–4 h focused block):**
+
+| Phase | Work | Effort |
+|---|---|---|
+| 0 | 80/20 manifest + VERSIONINFO stamp on wrapper | ~1 session |
+| 1 | `src/els_main.c` + boot, first GUI bring-up | ~1–2 sessions |
+| 2 | Static icudet | ~0.5 session |
+| 3 | rc/manifest/ico via windres | ~0.5 session |
+| 4 | `task_build-native` + `package.tcl --skip-icudet`, link, size-measure | ~1 session |
+| 5 | probe-exe + selftest gate, toolcheck promotion | ~0.5 session (folded in) |
+| **Full A–E total** | | **~3.5–4 sessions + multi-DPI testing** |
+
+**Top risks → mitigations:**
+1. *DPI regression* → keep `dpiAware=true`, defer PerMonitorV2 until multi-monitor tested; capture selftest geometry + a 250%-scale screenshot before/after.
+2. *Boot/encoding divergence breaks charset detection or zipfs mount* → copy `winMain.c` verbatim, change only console/icudet/wishrc lines; gate on probe-exe + selftest.
+3. *Size regression* → `--gc-sections` + strip-before-append; **measure** `els-bare.exe`.
+4. *Blind GUI crash* → never probe under wish; file-report selftest only.
+
+**Rollback story:** The native path is purely additive (`task_build-native`, `--skip-icudet`). Keep the wish90s-wrapper build behind `x build --wish` for one or two releases. A regression in the custom main ships the old path immediately. Per-phase rollback = revert the additive `tools/x.tcl`/`package.tcl` change; the legacy pipeline is untouched throughout.
+
+---
+
+## 9. Open Questions to Resolve Before/While Implementing
+
+1. **Does els observe HiDPI blur today?** If Tk 9's self-scaling already renders crisply on your monitors, the manifest's DPI benefit evaporates and the *only* real defect is the PE VERSIONINFO strings — which strengthens the 80/20 case. **Decide before committing to the full port.**
+2. **Is dropping `icudet.dll`-from-zip a real goal or aesthetic?** It is the *only* benefit that requires a custom main. If aesthetic, there is no functional reason to write `els_main.c`.
+3. **VERSIONINFO route for the 80/20:** windres-via-.rc (cleanest) vs. pure-twapi blob (keeps the zero-compile wrapper build)?
+4. **`els.ico`: generate at build time or commit it to `resources/`?**
+5. **PerMonitorV2 or match today's `dpiAware=true`?** Resolve only after a real multi-DPI test.
+6. **Confirm x64-only.** The manifest/rc are AMD64; arm64 needs arch changes.
+7. **Does the full GUI loop come up under `-mwindows` with the appended-zip self-mount?** The next spike — run it before building out Phases 2–5.
+8. **Does `task_build` default flip immediately once native passes, or keep `--wish` indefinitely?**
+
+---
+
+## 10. Cross-check against general Tcl/Tk-embedding guidance
+
+A separate, more general discussion of "build a real C app with Tcl/Tk built in" was reviewed against this study. All of its points are covered here; the notable items:
+
+- **CRT / build-option consistency (the classic "#1 Windows footgun": mixing `/MT` and `/MD` → heap corruption).** *Empirically confirmed safe.* `wish90s.exe` — built from the very static libs we link — imports the **UCRT** (`api-ms-win-crt-*-l1-1-0.dll`), not `msvcrt.dll`/`vcruntime`; `tclConfig.sh` shows `TCL_CC='gcc'`, `TCL_SHARED_BUILD=0`; our compiler is `x86_64-w64-mingw32` (MSYS2 **UCRT64**). So `els_main.o`, `icudet.o`, and `libtcl90.a`/`libtcl9tk90.a` all use the **same single CRT (the system UCRT) and the same toolchain** — there is no second C runtime to mismatch. The link-spike linked *and ran* (heap-crossing `malloc`/`free` succeeded), which is the empirical proof. **Action:** keep all C compiled with the vendored UCRT64 gcc; never introduce an MSVC-built object.
+- **DPI — we deliberately differ from the generic advice.** The general guidance says "request per-monitor DPI awareness." This study instead keeps `<dpiAware>true</dpiAware>` (system DPI, matching today) and defers PerMonitorV2 until a real multi-monitor test, because **Tk 9.0.3 ignores `WM_DPICHANGED`**: PerMonitorV2 would render *crisp but mis-sized* on a second monitor — a regression from today's "slightly soft but correctly laid out." This is the #1 rendering risk (Section 5); the tested position supersedes the generic one.
+- **Sourcing `main.tcl` — use the AppHook startup-script mechanism, NOT a manual `Tcl_Eval(interp, "source //zipfs:/app/main.tcl")`.** The general example sources it by hand inside `Tcl_AppInit`; for els that **breaks the run-guard** (`els.tcl` requires `info script` to be `//zipfs:*` AND equal `argv0`). Stock wish (and therefore our `els_main.c`) lets `TclZipfs_AppHook` register `main.tcl` as the startup script, which sets both correctly — zero `els.tcl` changes.
+- **System libraries.** The exact set the general advice gestures at (`user32 gdi32 comctl32 comdlg32 ole32 oleaut32 imm32 ws2_32 …`) is pinned and proven here: it equals `wish90s.exe`'s own import table and `tkConfig.sh`'s `TK_LIBS` (Section 3) — no guessing.
+- **License.** els is MIT (`LICENSE`); Tcl/Tk is BSD-style. Static linking carries no copyleft obligation; bundle the Tcl/Tk license text with the product, which the appended `tcl_library`/`tk_library` already include.
+- Everything else (own `main`/`WinMain`, static libs, zipfs-before-`Tk_Init`, `/SUBSYSTEM:WINDOWS`, common-controls v6, "start from `winMain.c`", "a few-MB binary") matches this study's plan — with this study additionally pinning the *empirical* link recipe, the **UNICODE requirement** for the zipfs self-mount, and the strict init order.
+
+## 11. Transition validation (post-build)
+
+The port was implemented and a transition-risk pass run. Results:
+
+- **Encoding (the headline worry): non-issue, empirically.** A standalone probe linked with and without the `els.res` manifest showed `GetACP` 1252 → **65001** with the manifest, but Tcl 9's **`[encoding system]` is `utf-8` in *both* cases** — Tcl 9 fixes its system encoding to utf-8 on Windows (wide APIs internally) regardless of the OS ANSI codepage. So the native exe and the wish-wrapper exe decode `reg.exe` output (the file-association path) identically; there is no transition delta. The manifest's `activeCodePage=UTF-8` actually *aligns* the OS ANSI codepage with Tcl's utf-8 model (the wrapper has a latent 1252-vs-utf8 mismatch), and els makes no direct narrow Win32 calls (icudet's `LoadLibraryA("icu.dll")` is pure ASCII). **Kept.**
+- **Dropped `Registry_Init`/`Dde_Init`: safe.** `grep` confirms els.tcl uses neither the `registry` nor `dde` package (it shells out to `reg.exe`).
+- **Promoted to the default build.** What the plan calls `task_build-native` shipped as the canonical **`x build`**; the old wish-wrapper build was renamed **`x build-wish`** (kept one cycle as a rollback path). `x build dist/els.exe` works (5.11 MB; selftest `version=0.30 scaling=2.667 detect=1`); same "can't overwrite a running exe" constraint as before.
+- **Validated:** boots the full GUI from the appended zipfs; `objdump` shows no tcl/tk/zlib/icudet DLL imports; `probe-exe` (first-run + session restore) passes; command-line file-open works (a screenshot opened README.md); the 268-test suite stays green (packaging-independent). `els.tcl` is byte-for-byte unchanged.
+- **Project swept for consistency:** `toolchain.md`, `README.md`, `AGENTS.md`, and `tools/x.tcl` help now describe the native build; `toolcheck.tcl` promotes the static Tcl/Tk to a core component.
+- **Closed open questions:** §9.1 (DPI blur) — kept `dpiAware=true`, scaling matches today, no PerMonitorV2 yet; §9.2 (static icudet) — done; §9.7 (does the GUI loop come up) — yes; §3 spike header-path correction — used `tcl9/include`.
+- **Language policy preserved (§9.4 resolved).** The PE resource inputs (`els.rc`, `els.exe.manifest`, `els.ico`) are **generated from Tcl** at build time (`tools/genres.tcl`, `tools/mkico.tcl`) into gitignored `build/`, *not* committed — so the repo stays Tcl + C + one `.cmd`, with no new languages and no new dependency (`windres` was already vendored). The version flows from `els.tcl`'s `variable version` (one source of truth; no `FILEVERSION` to keep in sync).
+
+## Appendix — Relevant repo files
+
+- `els.tcl` — app; boot guard ~2972, packaged detect ~179/675, FriendlyAppName (assoc_commands), icudet `package require`, selftest report writer, version line 17.
+- `tools/x.tcl` — `task_build` (native, the canonical `x build`); `task_build-wish` (legacy wrapper).
+- `tools/package.tcl` — `--wrapper`, `zipfs lmkimg`; appends the payload onto `build/els-bare.exe` (native) or a wish90s copy (legacy).
+- `tools/exeicon.tcl` — legacy icon stamp (used only by `x build-wish`).
+- `src/icudet.c` — compiled to `build/icudet.o` without `-DUSE_TCL_STUBS`.
+- `.toolchain/tclsrc/tk9.0.3/win/winMain.c` — template for `src/els_main.c`.
+- `.toolchain/tclsrc/tk9.0.3/win/wish.exe.manifest` — template for the generated manifest.
+- `.toolchain/tcl9s/lib/{libtcl9tk90.a,libtcl90.a,libtclstub.a,tkConfig.sh,tclConfig.sh}` — static link inputs.
+- `.toolchain/tcl9/include/` — public Tcl/Tk headers (the correct `-I`).
+- `.toolchain/msys64/ucrt64/bin/{gcc.exe,windres.exe}` — toolchain (prepend to PATH).
+- **Committed (source):** `src/els_main.c`, `tools/genres.tcl` (emits the `.rc`+`.manifest`), `tools/mkico.tcl` (emits the `.ico`).
+- **Generated at build time (gitignored, in `build/`):** `els.rc`, `els.exe.manifest`, `els.ico`, `els.res`, `els-bare.exe`.
