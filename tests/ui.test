@@ -509,7 +509,7 @@ test ui-9.3 {Help exposes Keyboard Shortcuts; Save As is bound to Ctrl+Shift+S} 
          [expr {[bind . <Control-Shift-S>] ne ""}]
 } -result {{Keyboard Shortcuts} 1 1}
 
-test ui-9.4 {file association registration is per-user and does not take over .txt} -setup {ui_reset} -body {
+test ui-9.4 {app registration is per-user, declares text types, never takes a default or touches UserChoice} -setup {ui_reset} -body {
     set cmds [els::assoc_commands [file join $::ELS_TMP els.exe]]
     set blob [join [lmap cmd $cmds {join $cmd "\n"}] "\n"]
     set takesDefault 0
@@ -522,8 +522,8 @@ test ui-9.4 {file association registration is per-user and does not take over .t
             set touchesUserChoice 1
         }
     }
-    list [expr {[string first {HKCU\Software\Classes\els.txt} $blob] >= 0}] \
-         [expr {[string first {HKCU\Software\Classes\.txt\OpenWithProgids} $blob] >= 0}] \
+    list [expr {[string first {HKCU\Software\Classes\Applications\els.exe\shell\open\command} $blob] >= 0}] \
+         [expr {[string first {FriendlyAppName} $blob] >= 0}] \
          [expr {[string first {HKCU\Software\RegisteredApplications} $blob] >= 0}] \
          [expr {[string first {HKCU\Software\anafalanx\els\Capabilities\FileAssociations} $blob] >= 0}] \
          [expr {[string first {HKLM} $blob] < 0}] \
@@ -531,105 +531,89 @@ test ui-9.4 {file association registration is per-user and does not take over .t
          [expr {!$touchesUserChoice}]
 } -result {1 1 1 1 1 1 1}
 
-test ui-9.5 {File Associations: opening shows the dialog, Apply registers the checked types + opens Default Apps} -setup {
+test ui-9.5 {File Associations: opening shows the dialog; Register issues the app registration; no per-type or UserChoice writes} -setup {
     ui_reset
     set ::els_test_assoc_exe [raw_write assoc_els.exe ""]
     set ::els_test_assoc_commands {}
-    set ::els_test_default_apps 0
     rename ::els::association_exe ::els::association_exe_real
     proc ::els::association_exe {} { return $::els_test_assoc_exe }
     rename ::els::assoc_run ::els::assoc_run_real
     proc ::els::assoc_run {cmd} { lappend ::els_test_assoc_commands $cmd }
-    rename ::els::open_default_apps ::els::open_default_apps_real
-    proc ::els::open_default_apps {} { set ::els_test_default_apps 1 }
-    rename ::els::assoc_registered_exts ::els::assoc_registered_exts_real
-    proc ::els::assoc_registered_exts {} { return {} }
 } -cleanup {
     rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
     rename ::els::assoc_run {} ; rename ::els::assoc_run_real ::els::assoc_run
-    rename ::els::open_default_apps {} ; rename ::els::open_default_apps_real ::els::open_default_apps
-    rename ::els::assoc_registered_exts {} ; rename ::els::assoc_registered_exts_real ::els::assoc_registered_exts
     catch {destroy .assoc}
 } -body {
     .menu.help invoke "File Associations..."          ;# opens the dialog
     set isWin [winfo exists .assoc]
-    foreach {t e d} [els::assoc_types] { set ::els::assoc_sel($e) [expr {$e in {txt log}}] }
-    els::assoc_apply
+    els::assoc_register
     set blob [join [lmap cmd $::els_test_assoc_commands {join $cmd " "}] "\n"]
     list $isWin \
-         [expr {[string first {\.txt\OpenWithProgids} $blob] >= 0}] \
-         [expr {[string first {\.log\OpenWithProgids} $blob] >= 0}] \
+         [expr {[string first {FriendlyAppName} $blob] >= 0}] \
          [expr {[string first [file nativename $::els_test_assoc_exe] $blob] >= 0}] \
-         $::els_test_default_apps
+         [expr {[string first {OpenWithProgids} $blob] >= 0}] \
+         [expr {[string first {UserChoice} $blob] < 0}]
 } -result {1 1 1 1 1}
 
-test assoc-1.1 {assoc_commands registers only the chosen extensions, per-user, as options} -setup {ui_reset} -body {
-    set blob [join [lmap c [els::assoc_commands [file join $::ELS_TMP els.exe] {log csv}] {join $c " "}] "\n"]
-    list [expr {[string first {\.log\OpenWithProgids} $blob] >= 0}] \
-         [expr {[string first {\.csv\OpenWithProgids} $blob] >= 0}] \
-         [expr {[string first {\.txt\OpenWithProgids} $blob] < 0}] \
-         [expr {[string first {FileAssociations} $blob] >= 0}] \
+test assoc-1.1 {assoc_commands registers els as an app + Open-with option for the curated types; sets no default} -setup {ui_reset} -body {
+    set blob [join [lmap c [els::assoc_commands [file join $::ELS_TMP els.exe]] {join $c " "}] "\n"]
+    list [expr {[string first {\Applications\els.exe\shell\open\command} $blob] >= 0}] \
+         [expr {[string first {\.txt\OpenWithProgids /v els.txt} $blob] >= 0}] \
+         [expr {[string first {SupportedTypes /v .txt} $blob] >= 0}] \
+         [expr {[string first {FileAssociations /v .csv} $blob] >= 0}] \
          [expr {[string first HKLM $blob] < 0}] \
          [expr {[string first UserChoice $blob] < 0}]
 } -result {1 1 1 1 1 1}
 
-test assoc-1.2 {assoc_unregister_commands removes the option for the given extensions} -setup {ui_reset} -body {
-    set blob [join [lmap c [els::assoc_unregister_commands {log}] {join $c " "}] "\n"]
+test assoc-1.2 {assoc_unregister_commands removes the whole app registration, per-user} -setup {ui_reset} -body {
+    set blob [join [lmap c [els::assoc_unregister_commands [file join $::ELS_TMP els.exe]] {join $c " "}] "\n"]
     list [expr {[string first {reg.exe delete} $blob] >= 0}] \
-         [expr {[string first {\.log\OpenWithProgids} $blob] >= 0}]
-} -result {1 1}
+         [expr {[string first {\Classes\Applications\els.exe} $blob] >= 0}] \
+         [expr {[string first {\Classes\els.txt} $blob] >= 0}] \
+         [expr {[string first {anafalanx\els\Capabilities} $blob] >= 0}] \
+         [expr {[string first {RegisteredApplications /v els} $blob] >= 0}] \
+         [expr {[string first {\.txt\OpenWithProgids /v els.txt} $blob] >= 0}]
+} -result {1 1 1 1 1 1}
 
-test assoc-1.3 {curated set: recommended is the plain-text core; no markdown or code; precheck logic} -setup {ui_reset} -body {
-    set exts {} ; foreach {t e d} [els::assoc_types] { lappend exts $e }
-    list [els::assoc_recommended] \
+test assoc-1.3 {curated set is the plain-text core; no markdown or code types} -setup {ui_reset} -body {
+    set exts [els::assoc_exts]
+    list $exts \
          [expr {"md" ni $exts && "markdown" ni $exts}] \
-         [expr {"json" ni $exts && "js" ni $exts && "py" ni $exts && "html" ni $exts}] \
-         [els::assoc_precheck {}] \
-         [els::assoc_precheck {csv yml}]
-} -result {{txt log ini conf cfg nfo text} 1 1 {txt log ini conf cfg nfo text} {csv yml}}
+         [expr {"json" ni $exts && "js" ni $exts && "py" ni $exts && "html" ni $exts}]
+} -result {{txt log ini conf cfg nfo text toml yaml yml csv tsv env properties srt} 1 1}
 
-test assoc-2.1 {File Associations dialog has checkboxes for recommended + optional types} -setup {
+test assoc-2.1 {dialog shows a Register button + status when els is NOT registered; no checkboxes} -setup {
     ui_reset
-    rename ::els::assoc_registered_exts ::els::assoc_registered_exts_real
-    proc ::els::assoc_registered_exts {} { return {} }
+    rename ::els::assoc_registered ::els::assoc_registered_real
+    proc ::els::assoc_registered {} { return 0 }
 } -cleanup {
-    rename ::els::assoc_registered_exts {} ; rename ::els::assoc_registered_exts_real ::els::assoc_registered_exts
+    rename ::els::assoc_registered {} ; rename ::els::assoc_registered_real ::els::assoc_registered
     catch {destroy .assoc}
 } -body {
     els::file_associations
     catch {wm withdraw .assoc}
-    set allSel 1
-    foreach {t e d} [els::assoc_types] { if {![info exists ::els::assoc_sel($e)]} { set allSel 0 } }
     set nchk 0
-    foreach f {.assoc.f.rec .assoc.f.opt} {
-        foreach c [winfo children $f] { if {[winfo class $c] eq "Checkbutton"} { incr nchk } }
-    }
+    foreach c [winfo children .assoc.f] { if {[winfo class $c] eq "Checkbutton"} { incr nchk } }
     list [winfo exists .assoc] \
-         [expr {$nchk == [expr {[llength [els::assoc_types]] / 3}]}] \
-         [winfo exists .assoc.f.b.apply] \
-         $::els::assoc_sel(txt) $::els::assoc_sel(csv) $allSel
-} -result {1 1 1 1 0 1}
+         [winfo exists .assoc.f.b.reg] \
+         [expr {![winfo exists .assoc.f.b.un]}] \
+         [winfo exists .assoc.f.status] \
+         $nchk
+} -result {1 1 1 1 0}
 
-test assoc-3.1 {is_els_progid recognizes els's named ProgIds, rejects unrelated/absent ones} -setup {ui_reset} -body {
-    list [els::is_els_progid els.txt] \
-         [els::is_els_progid {Applications\els.exe}] \
-         [els::is_els_progid {APPLICATIONS\ELS.EXE}] \
-         [els::is_els_progid els_nonexistent_progid_zzz] \
-         [els::is_els_progid {}]
-} -result {1 1 1 0 0}
-
-test assoc-3.1b {command_is_els matches an els.exe launcher by basename, not other apps} -setup {ui_reset} -body {
-    list [els::command_is_els {"C:\a\b\els.exe" "%1"}] \
-         [els::command_is_els {C:\a\els.exe %1}] \
-         [els::command_is_els {"C:\Windows\notepad.exe" "%1"}] \
-         [els::command_is_els {}]
-} -result {1 1 0 0}
-
-test assoc-3.2 {userchoice delete targets BOTH UserChoiceLatest and UserChoice under FileExts} -setup {ui_reset} -body {
-    set blob [join [lmap c [els::assoc_userchoice_delete_commands conf] {join $c " "}] "\n"]
-    list [expr {[string first {reg.exe delete} $blob] >= 0}] \
-         [expr {[string first {Explorer\FileExts\.conf\UserChoiceLatest} $blob] >= 0}] \
-         [expr {[string first {Explorer\FileExts\.conf\UserChoice /f} $blob] >= 0}]
+test assoc-2.2 {dialog shows Remove + Open Default Apps (and no Register) when els IS registered} -setup {
+    ui_reset
+    rename ::els::assoc_registered ::els::assoc_registered_real
+    proc ::els::assoc_registered {} { return 1 }
+} -cleanup {
+    rename ::els::assoc_registered {} ; rename ::els::assoc_registered_real ::els::assoc_registered
+    catch {destroy .assoc}
+} -body {
+    els::file_associations
+    catch {wm withdraw .assoc}
+    list [winfo exists .assoc.f.b.un] \
+         [winfo exists .assoc.f.b.def] \
+         [expr {![winfo exists .assoc.f.b.reg]}]
 } -result {1 1 1}
 
 # Regression for the "can only set from the built els.exe" intermittency: the exe
@@ -650,49 +634,37 @@ test assoc-3.3 {association_exe resolves the exe via the captured boot script} -
     list $fused $found $empty
 } -result {1 1 1}
 
-test assoc-3.4 {Apply opens Default Apps only when a NEW type is added, not on removals} -setup {
+test assoc-3.4 {assoc_registered is false when els's Applications launcher is absent} -setup {
     ui_reset
-    set ::els_test_assoc_exe [raw_write assoc_els2.exe ""]
-    set ::els_test_default_apps 0
+    rename ::els::association_exe ::els::association_exe_real
+    proc ::els::association_exe {} { return [file join $::ELS_TMP els_unregistered_zzq.exe] }
+} -cleanup {
+    rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
+} -body {
+    els::assoc_registered
+} -result 0
+
+test assoc-3.5 {assoc_unregister issues exactly the app-registration deletes, against the real exe's app key} -setup {
+    ui_reset
+    set ::els_test_assoc_exe [raw_write assoc_els.exe ""]
+    set ::els_test_assoc_commands {}
     rename ::els::association_exe ::els::association_exe_real
     proc ::els::association_exe {} { return $::els_test_assoc_exe }
     rename ::els::assoc_run ::els::assoc_run_real
-    proc ::els::assoc_run {cmd} {}                                  ;# swallow: no real registry writes
-    rename ::els::open_default_apps ::els::open_default_apps_real
-    proc ::els::open_default_apps {} { incr ::els_test_default_apps }
-    rename ::els::assoc_registered_exts ::els::assoc_registered_exts_real
-    proc ::els::assoc_registered_exts {} { return {txt log} }       ;# baseline already registered
-    rename ::els::assoc_default_progid ::els::assoc_default_progid_real
-    proc ::els::assoc_default_progid {ext} { return "" }            ;# nothing is els-default
+    proc ::els::assoc_run {cmd} { lappend ::els_test_assoc_commands $cmd }
 } -cleanup {
     rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
     rename ::els::assoc_run {} ; rename ::els::assoc_run_real ::els::assoc_run
-    rename ::els::open_default_apps {} ; rename ::els::open_default_apps_real ::els::open_default_apps
-    rename ::els::assoc_registered_exts {} ; rename ::els::assoc_registered_exts_real ::els::assoc_registered_exts
-    rename ::els::assoc_default_progid {} ; rename ::els::assoc_default_progid_real ::els::assoc_default_progid
+    catch {destroy .assoc}
 } -body {
-    foreach {t e d} [els::assoc_types] { set ::els::assoc_sel($e) [expr {$e eq "txt"}] }   ;# drop log, add nothing
-    els::assoc_apply
-    set afterRemoval $::els_test_default_apps
-    foreach {t e d} [els::assoc_types] { set ::els::assoc_sel($e) [expr {$e in {txt log csv}}] }  ;# add csv
-    els::assoc_apply
-    set afterAdd $::els_test_default_apps
-    list $afterRemoval $afterAdd
-} -result {0 1}
-
-test assoc-3.5 {assoc_registered_exts discovers a NON-curated type set via Explorer's Classes auto ProgID (Open-With)} -setup {
-    ui_reset
-    set ::els_t_ext elsz9probe
-    set ::els_t_C   {HKCU\Software\Classes}
-    catch {exec reg.exe add "$::els_t_C\\.$::els_t_ext" /ve /d ${::els_t_ext}_auto_file /f}
-    catch {exec reg.exe add "$::els_t_C\\${::els_t_ext}_auto_file\\shell\\open\\command" /ve /d {"C:\x\els.exe" "%1"} /f}
-} -cleanup {
-    catch {exec reg.exe delete "$::els_t_C\\.$::els_t_ext" /f}
-    catch {exec reg.exe delete "$::els_t_C\\${::els_t_ext}_auto_file" /f}
-} -body {
-    list [els::ext_opens_with_els $::els_t_ext] \
-         [expr {$::els_t_ext in [els::assoc_registered_exts]}]
-} -result {1 1}
+    els::assoc_unregister                              ;# action proc (re-render is caught harmlessly)
+    set blob [join [lmap cmd $::els_test_assoc_commands {join $cmd " "}] "\n"]
+    list [expr {[string first {reg.exe delete} $blob] >= 0}] \
+         [expr {[string first {\Classes\Applications\assoc_els.exe} $blob] >= 0}] \
+         [expr {[string first {\Classes\els.txt} $blob] >= 0}] \
+         [expr {[string first {anafalanx\els\Capabilities} $blob] >= 0}] \
+         [expr {[string first {RegisteredApplications /v els} $blob] >= 0}]
+} -result {1 1 1 1 1}
 
 test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
     set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]

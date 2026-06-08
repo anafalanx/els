@@ -24,10 +24,12 @@ Grab the latest **`els.exe`** from the [Releases](../../releases) page. It's one
 file, nothing to install. It's unsigned, so Windows SmartScreen may warn on
 first launch: choose **More info → Run anyway**.
 
-To make els open `.txt` and other plain-text files, use **Help > File
-Associations...**. els registers as an option, and the dialog reflects every
-type currently opening with els — however it was set, including Explorer's "Open
-with" — so you can add or remove them; Windows still confirms any new default.
+To make els open `.txt` and other plain-text files, open **Help > File
+Associations...** and click **Register els with Windows**. That puts els in
+Explorer's **Open with** menu (and in Settings > Default apps) without ever
+seizing a default. Then right-click a file, pick **Open with > els**, and tick
+**Always** to make it the default for that type. Manage or reset defaults anytime
+in **Settings > Default apps**.
 
 ## Features
 
@@ -48,10 +50,10 @@ with" — so you can add or remove them; Windows still confirms any new default.
   reopen-on-start, on by default.
 - **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel, remembered
   across sessions (the font family is fixed: no picker, by design).
-- **File associations**: register els as an opener for plain-text types via
-  **Help > File Associations...**; the dialog reflects what currently opens with
-  els (including choices made through Explorer's "Open with") and removes them
-  cleanly, by whatever mechanism they were set.
+- **File associations**: **Help > File Associations...** registers els with
+  Windows as an app that can open files (it never seizes a type's default). els
+  then appears in Explorer's **Open with** menu — point any type at it with
+  **Open with > Always**, and manage defaults in **Settings > Default apps**.
 - **Go to line**, **Always on Top**, window- and zoom-level persistence,
   portable/profile `els.conf`, the els look and the awl icon.
 
@@ -114,7 +116,7 @@ basis of els's encoding auto-detection.
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.29**: a working editor, evolving.
+it, or build it yourself. Currently **v0.30**: a working editor, evolving.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).
