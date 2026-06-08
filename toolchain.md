@@ -21,6 +21,13 @@ exists only because PATH has to be set *before* Tcl is reachable (a
 chicken-and-egg the shell must solve). It is deliberately tiny; all real logic
 lives in Tcl.
 
+The native `els.exe` needs Windows PE resources — an icon, an application
+manifest, and version info — which are normally `.rc`/`.ico`/`.manifest` files.
+els keeps them **out of the committed source**: they are *generated from Tcl* at
+build time (`tools/genres.tcl`, `tools/mkico.tcl`) into the gitignored `build/`,
+and compiled by the already-vendored `windres`. So the policy holds — the repo
+is Tcl + C + one `.cmd`, with no new languages or dependencies.
+
 To audit compliance:
 
 ```
@@ -156,9 +163,13 @@ detector are statically linked in; the Tcl/Tk script libraries + `els.tcl` ride
 inside an appended zipfs image. `els.tcl` is unchanged by any of this. Steps
 (`tools/x.tcl` `task_build`):
 
-1. `tools/mkico.tcl` packs `resources/icon*.png` into `src/els.ico`.
-2. `windres` compiles `src/els.rc` (icon + `src/els.exe.manifest` + VERSIONINFO)
-   → `build/els.res`.
+1. `tools/genres.tcl` generates `build/els.rc` + `build/els.exe.manifest` from
+   Tcl (the version comes straight from `els.tcl`'s `variable version`), and
+   `tools/mkico.tcl` packs `resources/icon*.png` into `build/els.ico`. These are
+   gitignored build artifacts, so the committed repo stays Tcl + C + one `.cmd`
+   (no `.rc`/`.manifest`/`.ico` source — the same way `els.ico` was always made).
+2. `windres` compiles `build/els.rc` (icon + manifest + VERSIONINFO) →
+   `build/els.res`.
 3. gcc compiles `src/els_main.c` (a minimal fork of Tk's `winMain.c`, built
    `-municode -DUNICODE -DSTATIC_BUILD -DELS_STATIC_ICUDET`) and `src/icudet.c`.
 4. gcc links them + `els.res` against the **static** libs in `.toolchain/tcl9s/lib`

@@ -305,14 +305,17 @@ proc task_build {args} {
         -lgdi32 -lcomdlg32 -limm32 -lcomctl32 -lshell32 -luuid -lole32
         -loleaut32 -lwinspool
     }
-    # 1. app icon: pack the awl PNGs into a standalone .ico for windres
-    puts "ico resources/*.png -> src/els.ico"
-    stream [tclsh] [P tools mkico.tcl] [P src els.ico] \
+    # 1. generate the PE resource inputs from Tcl into build/ (gitignored), so the
+    #    committed repo stays Tcl + C + one .cmd: the .rc + manifest (version from
+    #    els.tcl) and the .ico packed from the awl PNGs.
+    puts "gen  build/els.rc + els.exe.manifest + els.ico"
+    stream [tclsh] [P tools genres.tcl] [P build]
+    stream [tclsh] [P tools mkico.tcl] [P build els.ico] \
         [P resources icon16.png] [P resources icon32.png] [P resources icon.png]
-    # 2. resources (icon + manifest + VERSIONINFO) -> COFF object
-    puts "windres src/els.rc -> build/els.res"
-    stream [windres] --include-dir [P src] --include-dir $inc \
-        [P src els.rc] -O coff -o [P build els.res]
+    # 2. compile resources (icon + manifest + VERSIONINFO) -> COFF object
+    puts "windres build/els.rc -> build/els.res"
+    stream [windres] --include-dir [P build] --include-dir $inc \
+        [P build els.rc] -O coff -o [P build els.res]
     # 3. compile the entry point (UNICODE + STATIC + static icudet) and icudet
     puts "cc  els_main.c + icudet.c"
     stream [gcc] -std=c23 -O2 -municode -DUNICODE -D_UNICODE -DSTATIC_BUILD=1 \

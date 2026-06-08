@@ -314,17 +314,19 @@ The port was implemented and a transition-risk pass run. Results:
 - **Validated:** boots the full GUI from the appended zipfs; `objdump` shows no tcl/tk/zlib/icudet DLL imports; `probe-exe` (first-run + session restore) passes; command-line file-open works (a screenshot opened README.md); the 268-test suite stays green (packaging-independent). `els.tcl` is byte-for-byte unchanged.
 - **Project swept for consistency:** `toolchain.md`, `README.md`, `AGENTS.md`, and `tools/x.tcl` help now describe the native build; `toolcheck.tcl` promotes the static Tcl/Tk to a core component.
 - **Closed open questions:** §9.1 (DPI blur) — kept `dpiAware=true`, scaling matches today, no PerMonitorV2 yet; §9.2 (static icudet) — done; §9.7 (does the GUI loop come up) — yes; §3 spike header-path correction — used `tcl9/include`.
+- **Language policy preserved (§9.4 resolved).** The PE resource inputs (`els.rc`, `els.exe.manifest`, `els.ico`) are **generated from Tcl** at build time (`tools/genres.tcl`, `tools/mkico.tcl`) into gitignored `build/`, *not* committed — so the repo stays Tcl + C + one `.cmd`, with no new languages and no new dependency (`windres` was already vendored). The version flows from `els.tcl`'s `variable version` (one source of truth; no `FILEVERSION` to keep in sync).
 
 ## Appendix — Relevant repo files
 
 - `els.tcl` — app; boot guard ~2972, packaged detect ~179/675, FriendlyAppName (assoc_commands), icudet `package require`, selftest report writer, version line 17.
-- `tools/x.tcl` — add `task_build-native`.
-- `tools/package.tcl` — `--wrapper` (52/64), `PRODUCT_EXTS` (109), `zipfs lmkimg` (141); add `--skip-icudet`.
-- `tools/exeicon.tcl` — legacy icon stamp (untouched on native path).
-- `src/icudet.c` — compile to `build/icudet.o` without `-DUSE_TCL_STUBS`.
-- `.toolchain/tclsrc/tk9.0.3/win/winMain.c` — template for new `src/els_main.c`.
-- `.toolchain/tclsrc/tk9.0.3/win/wish.exe.manifest` — template for new `src/els.exe.manifest`.
+- `tools/x.tcl` — `task_build` (native, the canonical `x build`); `task_build-wish` (legacy wrapper).
+- `tools/package.tcl` — `--wrapper`, `zipfs lmkimg`; appends the payload onto `build/els-bare.exe` (native) or a wish90s copy (legacy).
+- `tools/exeicon.tcl` — legacy icon stamp (used only by `x build-wish`).
+- `src/icudet.c` — compiled to `build/icudet.o` without `-DUSE_TCL_STUBS`.
+- `.toolchain/tclsrc/tk9.0.3/win/winMain.c` — template for `src/els_main.c`.
+- `.toolchain/tclsrc/tk9.0.3/win/wish.exe.manifest` — template for the generated manifest.
 - `.toolchain/tcl9s/lib/{libtcl9tk90.a,libtcl90.a,libtclstub.a,tkConfig.sh,tclConfig.sh}` — static link inputs.
 - `.toolchain/tcl9/include/` — public Tcl/Tk headers (the correct `-I`).
 - `.toolchain/msys64/ucrt64/bin/{gcc.exe,windres.exe}` — toolchain (prepend to PATH).
-- New files to create: `src/els_main.c`, `src/els.rc`, `src/els.exe.manifest`, generated `els.ico`.
+- **Committed (source):** `src/els_main.c`, `tools/genres.tcl` (emits the `.rc`+`.manifest`), `tools/mkico.tcl` (emits the `.ico`).
+- **Generated at build time (gitignored, in `build/`):** `els.rc`, `els.exe.manifest`, `els.ico`, `els.res`, `els-bare.exe`.

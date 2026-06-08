@@ -14,12 +14,10 @@
 # large generated sample files for manual testing (regenerate via tools/gen_sample.tcl)
 /samples/
 
-# compiled C extensions / build output (rebuilt via `x build-ext`)
+# compiled C extensions / build output (rebuilt via `x build-ext` / `x build`).
+# The native build's generated PE resource inputs (els.rc, els.exe.manifest,
+# els.ico — emitted from Tcl by tools/genres.tcl + tools/mkico.tcl) land here too.
 /build/
-
-# native-build app icon, generated from resources/icon*.png by tools/mkico.tcl
-# during `x build-native` (the .rc references it)
-/src/els.ico
 
 # the fused single-file exe (rebuilt via `x build`; ship via releases)
 /els.exe
