@@ -18,6 +18,28 @@ Tcl 8.x behavior.
 - The pages are generated from the vendored nroff by `tools/man2md.tcl`; to
   refresh them, rerun `tclsh90 tools/man2md.tcl` (do not hand-edit the output).
 
+## The build is native (custom C entry point)
+
+`els.exe` is a **real native Windows PE**: a custom C23 `WinMain`
+(`src/els_main.c`, a minimal fork of Tk's `winMain.c`) with Tcl, Tk, and the
+icudet charset detector **statically linked in**, plus the Tcl/Tk script libraries
+and `els.tcl` riding inside an appended zipfs image. `els.tcl` is ordinary Tcl,
+unchanged by the C entry point.
+
+- **`x build`** builds it (compile `src/els_main.c` + `src/icudet.c`; `windres`
+  `src/els.rc` for icon/manifest/version; link the static `.toolchain/tcl9s` libs;
+  append the zipfs payload). **`x build-wish`** is the legacy wrapper build (fuse
+  onto `wish90s.exe`), kept as a fallback.
+- The architecture, the proven static-link recipe, and the pitfalls are in
+  [`docs/native-port-study.md`](docs/native-port-study.md); a robustness audit +
+  hardening roadmap is in
+  [`docs/robustness-hardening-study.md`](docs/robustness-hardening-study.md).
+- Verify the exe headlessly: `els.exe --selftest [report.txt]` writes a report
+  file (GUI subsystem = no stderr); `x probe-exe` checks first-run + session
+  restore; `x test` runs the packaging-independent suite. **Never** debug a GUI
+  build by running it on a failure — it rains modal dialogs; read the file-report
+  selftest, or build a console-subsystem twin (gcc without `-mwindows`).
+
 ## General
 
 - Use Tcl as much as possible for project tooling in this repo.

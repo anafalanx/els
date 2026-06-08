@@ -8,8 +8,8 @@ els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset
 auto-detection across 95 encodings. The look is deliberately quiet: a calm grey
 page, flat chrome, and a single precise caret. It ships as a self-contained
-**`els.exe`** (~5.8 MB, zero non-system dependencies), built on Tcl/Tk 9 with a
-C23 extension or two for the parts that need them.
+native **`els.exe`** (~5.1 MB, zero non-system dependencies): a real Windows
+executable with Tcl/Tk 9 and its C23 extension compiled in.
 
 The design is opinionated to the point of having few knobs: settings exist only
 where they protect flow, such as wrap, recents, session restore, and where to
@@ -74,19 +74,23 @@ x run [file...] # launch the editor
 x test          # in-process test suite (tcltest + Tk event generate)
 x shot out.png  # screenshot the editor (twapi, all-Tcl, no AutoIt)
 x readme-shots  # regenerate the README screenshots
-x probe-exe     # process-level startup checks for the fused exe
-x build         # fuse the single-file els.exe (--with-ext embeds build/*.dll)
+x probe-exe     # process-level startup checks for the built exe
+x build         # build the native els.exe (custom C WinMain, static Tcl+Tk+icudet)
+x build-wish    # legacy fallback: fuse els.exe onto wish90s (--with-ext embeds DLLs)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
 x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
 x shell         # a shell with the vendored toolchain on PATH
 x env           # show the resolved toolchain
 ```
 
-`x build` produces one self-contained `els.exe` (~5.8 MB, zero non-system DLLs)
-by fusing `els.tcl` + Tcl/Tk into a `zipfs` image on a static interpreter;
-`x build --with-ext` also embeds any compiled C extension so it loads from
-inside the exe. Users only need the resulting `els.exe`; developers can move the
-whole repo folder around because the vendored `.toolchain/` is relocatable.
+`x build` produces one self-contained native `els.exe` (~5.1 MB, zero non-system
+DLLs): a real Windows PE with our own C23 `WinMain`, Tcl + Tk + the charset
+detector statically linked in, and `els.tcl` + the Tcl/Tk script libraries riding
+inside an appended `zipfs` image (`els.tcl` itself is unchanged). The PE icon,
+manifest, and version info are baked in via `windres`. Users only need the
+resulting `els.exe`; developers can move the whole repo folder around because the
+vendored `.toolchain/` is relocatable. (`x build-wish` is the pre-native wrapper
+build, kept as a fallback.)
 
 The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
 (`x.cmd`): no bash, PowerShell, or Python. See
@@ -102,13 +106,12 @@ need, so they stay instant.
 ## C extensions (C23)
 
 els can drop into **C23** for hot paths or to bind a C library, exposed to Tcl
-as ordinary commands. Extensions build against the Tcl *stubs* (compiler-
-independent, system-DLL-only) with the vendored gcc; see `src/elsx.c`. They can
-load dynamically (`package require`) or be embedded in the single-file `els.exe`
-via its `zipfs` image. `x build-ext` compiles them; tests live in
-`tests/elsx.test`. A real example, **`src/icudet.c`**, dynamically loads the
-Windows system ICU (`icu.dll`) to expose its charset detector to Tcl: the
-basis of els's encoding auto-detection.
+as ordinary commands. The native `els.exe` **statically links its extension in**
+(via the `Tcl_AppInit` in `src/els_main.c`); in development each `src/*.c` also
+builds as a stubs `.dll` (`x build-ext`; see `src/elsx.c`). A real example,
+**`src/icudet.c`**, dynamically loads the Windows system ICU (`icu.dll`) to expose
+its charset detector to Tcl — the basis of els's encoding auto-detection — and is
+the one extension compiled into the shipped exe. Tests live in `tests/elsx.test`.
 
 ## About
 

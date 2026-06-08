@@ -123,9 +123,11 @@ proc task_help {args} {
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
   shot <out> [file]  screenshot the editor to <out> (twapi)
   readme-shots       regenerate docs/img screenshots used by README.md
-  build [--with-ext] fuse the single-file els.exe onto wish90s (--with-ext embeds build/*.dll)
-  build-native [out] build els.exe from a custom C23 WinMain, static Tcl+Tk+icudet
-                     + PE icon/manifest/version (windres); see docs/native-port-study.md
+  build [out]        build the native els.exe — a custom C23 WinMain with Tcl+Tk
+                     +icudet statically linked in and PE icon/manifest/version
+                     baked via windres (see docs/native-port-study.md)
+  build-wish [--with-ext]  legacy fallback: fuse els.exe onto a copy of wish90s
+                     (--with-ext embeds build/*.dll); superseded by `build`
   probe-exe [exe]    launch the fused exe in a temp config home and verify
                      first-run prompt + session restore startup
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
@@ -156,9 +158,11 @@ proc task_toolcheck {args} {
     stream [tclsh] [P tools toolcheck.tcl] {*}$args
 }
 
-# Build the single-file els.exe.  Runs package.tcl under the STATIC tclsh90s so
-# zipfs can append the staged app payload to the Tk-capable wrapper.
-proc task_build {args} {
+# LEGACY fallback build: fuse els.exe onto a copy of wish90s (the stock static Tk
+# shell) by stamping the icon then appending the zipfs payload.  Superseded by the
+# native `x build` (task_build below); kept one cycle as a rollback path.  Runs
+# package.tcl under the STATIC tclsh90s so zipfs can append the payload.
+proc task_build-wish {args} {
     set tclshs [TCp tcl9s bin tclsh90s.exe]
     if {![file exists $tclshs]} {
         error "static interpreter missing (.toolchain/tcl9s) — needed for `x build`; see `x toolcheck`"
@@ -281,13 +285,14 @@ proc task_build-ext {args} {
     puts "built [llength $sources] extension(s); wrote build/pkgIndex.tcl"
 }
 
-# Build the NATIVE els.exe: a custom C23 WinMain (src/els_main.c) statically
-# linked against Tcl+Tk (.toolchain/tcl9s) with icudet compiled in and the PE
-# resources (icon + manifest + version) baked via windres — then the same zipfs
-# payload appended as the wrapper build does.  Parallel to `x build` (which fuses
-# onto wish90s); see docs/native-port-study.md.  Headers come from the SHARED
-# tree (tcl9/include — tcl9s has none); libs from the STATIC tree (tcl9s/lib).
-proc task_build-native {args} {
+# Build the native els.exe (THE canonical build): a custom C23 WinMain
+# (src/els_main.c) statically linked against Tcl+Tk (.toolchain/tcl9s) with icudet
+# compiled in and the PE resources (icon + manifest + version) baked via windres,
+# then the same zipfs payload (tcl_library/tk_library/main.tcl/resources) appended.
+# See docs/native-port-study.md.  Headers come from the SHARED tree (tcl9/include —
+# tcl9s has none); libs from the STATIC tree (tcl9s/lib).  The legacy wish-wrapper
+# build is `x build-wish` (task_build-wish above).
+proc task_build {args} {
     need gcc tclsh
     if {![file exists [tclshs]]} { error "static tclsh missing (.toolchain/tcl9s) — run `x toolcheck`" }
     set out [lindex $args 0] ; if {$out eq ""} { set out [P els.exe] }
