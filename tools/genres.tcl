@@ -30,7 +30,7 @@ if {![regexp {variable version "([0-9][0-9.]*)"} $src -> ver]} {
 set parts [split $ver .]
 while {[llength $parts] < 4} { lappend parts 0 }
 set fv4  [join [lrange $parts 0 3] ,]     ;# FILEVERSION    0,30,0,0
-set vdot [join [lrange $parts 0 3] .]     ;# manifest "version"  0.30.0.0
+set vdot [join [lrange $parts 0 3] .]     ;# manifest "version"  0.50.0.0
 
 proc emit {path text} {
     set fh [open $path w] ; fconfigure $fh -translation lf
