@@ -148,11 +148,13 @@ gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS \
     -o build/elsx.dll -L.toolchain/tcl9/lib -ltclstub -static-libgcc
 ```
 
-The product ships only what it needs: `src/icudet.c` (charset detection) is
+The product ships only what it needs: `src/icudet.c` (charset detection) and
+`src/winfs.c` (`els::win_replace_file`, the atomic metadata-preserving save) are
 **compiled straight into the native `els.exe`** (no DLL); `cap.c` (the screenshot
 capture used by `tools/shot.tcl`) and `elsx.c` (a demo) stay dev-only `.dll`s.
-Tests live in `tests/elsx.test` (gated on the DLL being built, so the suite is
-green with or without a compiler run).
+(`els_main.c` is the exe entry point, not a loadable extension — `x build-ext`
+skips it.) Tests live in `tests/elsx.test` / `tests/winfs.test`, gated on the DLL
+being built so the suite is green with or without a compiler run.
 
 ## Build: `x build` (native els.exe)
 

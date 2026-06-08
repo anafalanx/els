@@ -1954,9 +1954,12 @@ proc els::_save_emit {chan bytes} {
 # intact and the temp is cleaned up.  Refuses a read-only target, matching the
 # old behavior.
 #
-# Caveat: a rename-replace does not carry the target's NTFS ACLs, alternate data
-# streams (e.g. mark-of-the-web), or hardlink identity.  Acceptable for now; a
-# future ReplaceFileW path (via the native build) can preserve them.
+# Metadata: the native build prefers Win32 ReplaceFileW (src/winfs.c,
+# els::win_replace_file) for the replace, which DOES preserve the target's ACLs,
+# alternate data streams (e.g. the mark-of-the-web), and attributes.  When that
+# command is absent (a dev/tclsh run) the plain `file rename -force` below is used,
+# which does not carry those; a >260-char or locked target falls back to an
+# in-place write (non-atomic only for those rare cases).
 proc els::write_atomic {path bytes} {
     if {[file exists $path] && ![catch {file attributes $path -readonly} ro] && $ro} {
         return "the file is read-only"
@@ -1976,14 +1979,23 @@ proc els::write_atomic {path bytes} {
         return $e   ;# temp write failed; original untouched — do NOT fall back to
                     ;# an in-place truncate (it could also fail and lose the file)
     }
-    if {![catch {file rename -force $tmp $path}]} {
-        return ""   ;# atomic replace — the common path
+    # Prefer ReplaceFileW (native build, src/winfs.c) when replacing an existing
+    # file: it is atomic AND preserves the target's ACLs, alternate data streams
+    # (e.g. the mark-of-the-web), and attributes — which a rename-replace drops.
+    if {[file exists $path] && [llength [info commands ::els::win_replace_file]]} {
+        if {[els::win_replace_file [file nativename $path] [file nativename $tmp]] eq ""} {
+            return ""
+        }
+        # ReplaceFileW failed — fall through; the temp is still present.
     }
-    # The atomic replace failed: `file rename -force` cannot overwrite an existing
-    # target on a >260-char path (and a locked target also blocks it).  The temp
-    # holds a full new copy and the original is still intact, so fall back to a
-    # direct in-place write — saving never regresses to "can't save where it used
-    # to", and this path is non-atomic only for those rare cases.
+    if {![catch {file rename -force $tmp $path}]} {
+        return ""   ;# plain atomic rename — the common path without the C helper
+    }
+    # `file rename -force` cannot overwrite a target on a >260-char path (a locked
+    # target also blocks it).  The temp holds a full new copy and the original is
+    # still intact, so fall back to a direct in-place write — saving never
+    # regresses to "can't save where it used to" (non-atomic only for these rare
+    # cases).
     catch {file delete -force $tmp}
     return [els::_write_inplace $path $bytes]
 }

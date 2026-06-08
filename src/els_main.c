@@ -38,6 +38,9 @@ int _CRT_glob = 0;          /* keep the mingw CRT from glob-expanding argv */
 #ifdef ELS_STATIC_ICUDET
 extern int Icudet_Init(Tcl_Interp *interp);   /* src/icudet.c (no public header) */
 #endif
+#ifdef ELS_STATIC_WINFS
+extern int Winfs_Init(Tcl_Interp *interp);    /* src/winfs.c -- els::win_replace_file */
+#endif
 
 static int Els_AppInit(Tcl_Interp *interp);
 
@@ -115,6 +118,15 @@ Els_AppInit(
         return TCL_ERROR;
     }
     Tcl_StaticLibrary(interp, "Icudet", Icudet_Init, NULL);
+#endif
+
+#ifdef ELS_STATIC_WINFS
+    /* els::win_replace_file -- atomic, metadata-preserving file replace (used by
+     * els::write_atomic; harmless if absent — Tcl falls back to temp+rename). */
+    if (Winfs_Init(interp) == TCL_ERROR) {
+        return TCL_ERROR;
+    }
+    Tcl_StaticLibrary(interp, "Winfs", Winfs_Init, NULL);
 #endif
 
     return TCL_OK;

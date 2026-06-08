@@ -1,0 +1,48 @@
+# tests/winfs.test -- els::win_replace_file (Win32 ReplaceFileW): an atomic,
+# metadata-preserving file replace used by els::write_atomic in the native build
+# (preserves ACLs / alternate data streams / attributes that a rename drops).
+# Gated on build/winfs.dll (`x build-ext`); skipped otherwise, so the suite is
+# green with or without a compiler run.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test ::tcltest::testConstraint
+
+set ::WINFS_DLL [file join $::ELS_ROOT build winfs.dll]
+testConstraint winfsBuilt [file exists $::WINFS_DLL]
+proc load_winfs {} {
+    if {[llength [info commands ::els::win_replace_file]] == 0} {
+        load $::WINFS_DLL Winfs
+    }
+}
+
+test winfs-1.1 {win_replace_file swaps the target's content for the temp's, consuming the temp} -constraints winfsBuilt -setup {load_winfs} -body {
+    set tgt [file join $::ELS_TMP wfs_a.txt] ; set tmp [file join $::ELS_TMP wfs_a.tmp]
+    set f [open $tgt w] ; puts -nonewline $f "OLD" ; close $f
+    set f [open $tmp w] ; puts -nonewline $f "NEW CONTENT" ; close $f
+    set err [els::win_replace_file [file nativename $tgt] [file nativename $tmp]]
+    set f [open $tgt r] ; set got [read $f] ; close $f
+    list $err $got [file exists $tmp]
+} -result {{} {NEW CONTENT} 0}
+
+test winfs-1.2 {win_replace_file preserves an alternate data stream (mark-of-the-web)} -constraints winfsBuilt -setup {load_winfs} -body {
+    set tgt [file join $::ELS_TMP wfs_b.txt] ; set tmp [file join $::ELS_TMP wfs_b.tmp]
+    set f [open $tgt w] ; puts -nonewline $f "OLD" ; close $f
+    set f [open "$tgt:Zone.Identifier" w] ; puts -nonewline $f "\[ZoneTransfer\]\nZoneId=3\n" ; close $f
+    set f [open $tmp w] ; puts -nonewline $f "EDITED" ; close $f
+    set err [els::win_replace_file [file nativename $tgt] [file nativename $tmp]]
+    set f [open $tgt r] ; set got [read $f] ; close $f
+    set ads [expr {![catch {set h [open "$tgt:Zone.Identifier" r] ; set z [read $h] ; close $h}] && [string match "*ZoneId=3*" $z]}]
+    list $err $got $ads
+} -result {{} EDITED 1}
+
+test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; ui_reset} -body {
+    set p [file join $::ELS_TMP wfs_save.txt]
+    set f [open $p w] ; puts -nonewline $f "downloaded content\n" ; close $f
+    set f [open "$p:Zone.Identifier" w] ; puts -nonewline $f "\[ZoneTransfer\]\nZoneId=3\n" ; close $f
+    els::open $p
+    [els::W $::els::active] insert end "EDIT"
+    set rc [els::save]
+    set ads [expr {![catch {set h [open "$p:Zone.Identifier" r] ; set z [read $h] ; close $h}] && [string match "*ZoneId=3*" $z]}]
+    set residue [glob -nocomplain -directory $::ELS_TMP .els-save-*.tmp]
+    list $rc $ads [llength $residue]
+} -result {1 1 0}
