@@ -304,6 +304,16 @@ A separate, more general discussion of "build a real C app with Tcl/Tk built in"
 - **License.** els is MIT (`LICENSE`); Tcl/Tk is BSD-style. Static linking carries no copyleft obligation; bundle the Tcl/Tk license text with the product, which the appended `tcl_library`/`tk_library` already include.
 - Everything else (own `main`/`WinMain`, static libs, zipfs-before-`Tk_Init`, `/SUBSYSTEM:WINDOWS`, common-controls v6, "start from `winMain.c`", "a few-MB binary") matches this study's plan — with this study additionally pinning the *empirical* link recipe, the **UNICODE requirement** for the zipfs self-mount, and the strict init order.
 
+## 11. Transition validation (post-build)
+
+The port was implemented and a transition-risk pass run. Results:
+
+- **Encoding (the headline worry): non-issue, empirically.** A standalone probe linked with and without the `els.res` manifest showed `GetACP` 1252 → **65001** with the manifest, but Tcl 9's **`[encoding system]` is `utf-8` in *both* cases** — Tcl 9 fixes its system encoding to utf-8 on Windows (wide APIs internally) regardless of the OS ANSI codepage. So the native exe and the wish-wrapper exe decode `reg.exe` output (the file-association path) identically; there is no transition delta. The manifest's `activeCodePage=UTF-8` actually *aligns* the OS ANSI codepage with Tcl's utf-8 model (the wrapper has a latent 1252-vs-utf8 mismatch), and els makes no direct narrow Win32 calls (icudet's `LoadLibraryA("icu.dll")` is pure ASCII). **Kept.**
+- **Dropped `Registry_Init`/`Dde_Init`: safe.** `grep` confirms els.tcl uses neither the `registry` nor `dde` package (it shells out to `reg.exe`).
+- **`x build-native dist/els.exe` works** (5.11 MB; selftest `version=0.30 scaling=2.667 detect=1`); same "can't overwrite a running exe" constraint as `x build`.
+- **Validated:** boots the full GUI from the appended zipfs; `objdump` shows no tcl/tk/zlib/icudet DLL imports; `probe-exe` (first-run + session restore) passes; command-line file-open works (a screenshot opened README.md); the 268-test suite stays green (packaging-independent). `els.tcl` is byte-for-byte unchanged.
+- **Closed open questions:** §9.1 (DPI blur) — kept `dpiAware=true`, scaling matches today, no PerMonitorV2 yet; §9.2 (static icudet) — done; §9.7 (does the GUI loop come up) — yes; §3 spike header-path correction — used `tcl9/include`.
+
 ## Appendix — Relevant repo files
 
 - `els.tcl` — app; boot guard ~2972, packaged detect ~179/675, FriendlyAppName (assoc_commands), icudet `package require`, selftest report writer, version line 17.
