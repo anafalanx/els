@@ -1940,6 +1940,69 @@ proc els::open {{p ""} {quiet 0}} {
     els::recent_add $p
     return $id
 }
+# Emit the bytes to the (temp) save channel.  A one-line seam so a test can force
+# a mid-write failure and prove the atomic temp never touches the real file.
+proc els::_save_emit {chan bytes} {
+    puts -nonewline $chan $bytes
+}
+# Atomically replace $path's contents with $bytes: write a same-directory temp,
+# then rename it over the target.  On Windows `file rename -force` is a single
+# MoveFileEx(REPLACE_EXISTING) — atomic on the same NTFS volume — so a crash,
+# disk-full, or I/O error mid-write can NEVER truncate or corrupt the existing
+# file (the old in-place `open w` truncated it the instant it opened).  Returns
+# "" on success, else an error message; on any failure the original is left
+# intact and the temp is cleaned up.  Refuses a read-only target, matching the
+# old behavior.
+#
+# Caveat: a rename-replace does not carry the target's NTFS ACLs, alternate data
+# streams (e.g. mark-of-the-web), or hardlink identity.  Acceptable for now; a
+# future ReplaceFileW path (via the native build) can preserve them.
+proc els::write_atomic {path bytes} {
+    if {[file exists $path] && ![catch {file attributes $path -readonly} ro] && $ro} {
+        return "the file is read-only"
+    }
+    set tmp [file join [file dirname $path] \
+                 [format ".els-save-%d-%d.tmp" [pid] [clock clicks]]]
+    set fh ""
+    if {[catch {
+        set fh [::open $tmp {WRONLY CREAT TRUNC}]
+        fconfigure $fh -translation binary
+        els::_save_emit $fh $bytes
+        close $fh
+        set fh ""
+    } e]} {
+        if {$fh ne ""} { catch {close $fh} }
+        catch {file delete -force $tmp}
+        return $e   ;# temp write failed; original untouched — do NOT fall back to
+                    ;# an in-place truncate (it could also fail and lose the file)
+    }
+    if {![catch {file rename -force $tmp $path}]} {
+        return ""   ;# atomic replace — the common path
+    }
+    # The atomic replace failed: `file rename -force` cannot overwrite an existing
+    # target on a >260-char path (and a locked target also blocks it).  The temp
+    # holds a full new copy and the original is still intact, so fall back to a
+    # direct in-place write — saving never regresses to "can't save where it used
+    # to", and this path is non-atomic only for those rare cases.
+    catch {file delete -force $tmp}
+    return [els::_write_inplace $path $bytes]
+}
+# Direct in-place write (the pre-atomic behavior): only a fallback for when an
+# atomic rename is impossible (very long path / locked target).
+proc els::_write_inplace {path bytes} {
+    set fh ""
+    if {[catch {
+        set fh [::open $path {WRONLY CREAT TRUNC}]
+        fconfigure $fh -translation binary
+        els::_save_emit $fh $bytes
+        close $fh
+        set fh ""
+    } e]} {
+        if {$fh ne ""} { catch {close $fh} }
+        return $e
+    }
+    return ""
+}
 proc els::save {} {
     variable active
     variable docPath
@@ -1963,12 +2026,7 @@ proc els::save {} {
             utf-32be { set bytes "\x00\x00\xFE\xFF$bytes" }
         }
     }
-    if {[catch {
-        set fh [::open $docPath($active) w]
-        fconfigure $fh -translation binary
-        puts -nonewline $fh $bytes
-        close $fh
-    } err]} {
+    if {[set err [els::write_atomic $docPath($active) $bytes]] ne ""} {
         tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
         return 0
     }
