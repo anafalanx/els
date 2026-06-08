@@ -17,6 +17,10 @@
 # compiled C extensions / build output (rebuilt via `x build-ext`)
 /build/
 
+# native-build app icon, generated from resources/icon*.png by tools/mkico.tcl
+# during `x build-native` (the .rc references it)
+/src/els.ico
+
 # the fused single-file exe (rebuilt via `x build`; ship via releases)
 /els.exe
 
