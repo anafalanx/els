@@ -116,6 +116,10 @@ namespace eval els {
     variable restore_session 1   ;# reopen file-backed tabs from the previous run
     variable session_files {}     ;# file-backed tabs saved from the previous run
     variable session_active ""    ;# active file path saved from the previous run
+    variable session_owned 0      ;# 1 once THIS run adopted the saved session: an
+                                  ;# explicit-file-arg launch never adopted it, so
+                                  ;# persisting its own doc list would destroy the
+                                  ;# stored multi-tab session
     variable config_path ""      ;# resolved els.conf path ("" until resolved)
     variable cfg_radio appdata   ;# first-run location dialog selection
     variable gutter_px -1        ;# last-set gutter canvas width (px); -1 = unset
@@ -219,7 +223,9 @@ proc els::config_roots {} {
     if {[info exists ::env(LOCALAPPDATA)] && $::env(LOCALAPPDATA) ne ""} {
         set la $::env(LOCALAPPDATA)
     } else {
-        set la [file join [file normalize ~] AppData Local]
+        # Tcl 9 removed tilde expansion (TIP 602): `file normalize ~` returns a
+        # literal cwd-relative "~" path.  `file home` is the replacement.
+        set la [file join [file home] AppData Local]
     }
     return [list $progdir [file join $la els]]
 }
@@ -324,40 +330,44 @@ proc els::load_geometry {} {
         set data [read $fh]
         close $fh
     }]} { return }
+    # Per-VALUE validation, not just per-key fetch guards: els.conf is a plain
+    # text file (hand-editable, sync-corruptible), and an invalid value used to
+    # throw out of build before any widget existed — els could not start again
+    # until the user found and deleted the config.  Readers tolerate anything.
     if {![catch {dict get $data geometry} g] && \
-        [regexp {^[0-9]+x[0-9]+([+-][0-9]+){0,2}$} $g]} {
-        wm geometry . $g
+        [regexp {^[0-9]+x[0-9]+([+-][0-9]+[+-][0-9]+)?$} $g]} {
+        catch {wm geometry . $g}
     }
     if {![catch {dict get $data recent} r]} {
-        set ::els::recent [els::recent_sanitize $r]
+        catch {set ::els::recent [els::recent_sanitize $r]}
     }
-    if {![catch {dict get $data word_wrap} w]} {
+    if {![catch {dict get $data word_wrap} w] && [string is boolean -strict $w]} {
         set ::els::word_wrap [expr {$w ? 1 : 0}]
         if {[info exists ::els::docs] && [llength $::els::docs]} {
             catch {els::set_wrap 0}
         }
     }
-    if {![catch {dict get $data show_whitespace} ws]} {
+    if {![catch {dict get $data show_whitespace} ws] && [string is boolean -strict $ws]} {
         set ::els::show_ws [expr {$ws ? 1 : 0}]
         if {[info exists ::els::docs] && [llength $::els::docs]} {
             catch {els::ws_refresh}
         }
     }
-    if {![catch {dict get $data always_on_top} t]} {
+    if {![catch {dict get $data always_on_top} t] && [string is boolean -strict $t]} {
         set ::els::always_on_top [expr {$t ? 1 : 0}]
         catch {els::set_always_on_top 0}
     }
     if {![catch {dict get $data font_size} fs] && [string is integer -strict $fs]} {
         catch {els::set_font_size $fs 0}   ;# apply the saved zoom (no re-persist)
     }
-    if {![catch {dict get $data restore_session} rs]} {
+    if {![catch {dict get $data restore_session} rs] && [string is boolean -strict $rs]} {
         set ::els::restore_session [expr {$rs ? 1 : 0}]
     }
     if {![catch {dict get $data session_files} sf]} {
-        set ::els::session_files [els::session_sanitize $sf]
+        catch {set ::els::session_files [els::session_sanitize $sf]}
     }
     if {![catch {dict get $data session_active} sa]} {
-        set ::els::session_active [els::session_path $sa]
+        catch {set ::els::session_active [els::session_path $sa]}
     }
 }
 proc els::save_geometry {} {
@@ -368,18 +378,31 @@ proc els::save_geometry {} {
     # command (e.g. `wm geometry .` on a window being torn down at quit) must not
     # leave a truncated, empty config behind.
     if {[catch {
+        if {$::els::session_owned} {
+            set sf [els::session_current_files]
+            set sa [els::session_current_active]
+        } else {
+            # this run never adopted the saved session (an explicit-file-arg
+            # launch skips session restore): write the STORED session back —
+            # persisting this run's doc list would destroy the user's
+            # multi-tab session just by double-clicking one file
+            set sf $::els::session_files
+            set sa $::els::session_active
+        }
         set payload [dict create geometry [wm geometry .] \
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
                          always_on_top $::els::always_on_top \
                          font_size $::els::font_size \
                          restore_session $::els::restore_session \
-                         session_files [els::session_current_files] \
-                         session_active [els::session_current_active]]
+                         session_files $sf \
+                         session_active $sa]
     }]} { return }
     # Write to a temp file then atomically rename, so a crash mid-write cannot
-    # corrupt the existing config either.
-    set tmp $f.tmp
+    # corrupt the existing config either.  pid-tagged temp: concurrent els
+    # instances sharing the config dir must not publish each other's
+    # half-written file through a fixed temp name.
+    set tmp "$f.[pid].tmp"
     if {[catch {
         file mkdir [file dirname $f]
         set fh [::open $tmp w]
@@ -986,7 +1009,7 @@ proc els::build {} {
     . configure -background $::els::PAGE
     els::load_icon
     if {$::els::config_path eq ""} { els::config_resolve_existing }
-    els::load_geometry
+    catch {els::load_geometry}   ;# backstop: NO config content may abort build
     wm minsize . 360 240
     wm protocol . WM_DELETE_WINDOW els::quit
 
@@ -1234,7 +1257,11 @@ proc els::doc_dirty {id} {
 proc els::doc_name {id} {
     variable docPath
     set p $docPath($id)
-    return [expr {$p eq "" ? "untitled" : [file tail $p]}]
+    # NOT an expr ternary: expr canonicalizes operands that look like numbers,
+    # so a file named "007" displayed (and Save-As-prefilled!) as "7", and one
+    # named "nan" THREW here — i.e. on every keystroke via update_tab.
+    if {$p eq ""} { return "untitled" }
+    return [file tail $p]
 }
 proc els::pristine {id} {
     # a fresh, untouched untitled document — safe to reuse on Open
@@ -2018,10 +2045,13 @@ proc els::open {{p ""} {quiet 0}} {
             return $id
         }
     }
+    set prevActive $active
+    set created 0
     if {[els::pristine $active]} {
         set id $active
     } else {
         set id [els::new_doc]
+        set created 1
     }
     set w [els::W $id]
     if {[catch {
@@ -2033,7 +2063,13 @@ proc els::open {{p ""} {quiet 0}} {
         if {!$quiet} {
             tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
         }
-        if {[els::pristine $id] && [llength $::els::docs] > 1} { els::close_doc $id }
+        # discard only a doc WE created for this open — a reused pre-existing
+        # pristine tab is the user's; and return focus to the tab that was
+        # active before (close_doc's neighbor pick lands on an arbitrary one)
+        if {$created && [llength $::els::docs] > 1} { els::close_doc $id }
+        if {$prevActive ne "" && $prevActive in $::els::docs} {
+            els::switch_to $prevActive
+        }
         return ""
     }
     # detect encoding + EOL, decode, normalise the buffer to LF internally
@@ -2649,7 +2685,12 @@ proc els::recover_apply {plan decision} {
 # ---- startup orchestration + the consolidated dialog ----------------------
 proc els::recover_boot {openedArgs} {
     catch {els::swap_sweep}
-    if {!$openedArgs && $::els::restore_session} { catch {els::session_restore} }
+    if {!$openedArgs} {
+        # a plain start owns the stored session from here on (whether or not
+        # restoring is enabled or anything was restorable)
+        set ::els::session_owned 1
+        if {$::els::restore_session} { catch {els::session_restore} }
+    }
     set recs {}
     catch {set recs [els::recover_scan]}
     set ::els::last_recover [llength $recs]
@@ -2657,7 +2698,9 @@ proc els::recover_boot {openedArgs} {
 }
 proc els::recover_label {rec branch} {
     set path [dict get $rec path]
-    set name [expr {$path eq "" ? "untitled" : [file tail $path]}]
+    # no expr ternary on path data: a file named "nan" threw out of expr here,
+    # and the swallowed throw silently suppressed the WHOLE recovery dialog
+    if {$path eq ""} { set name "untitled" } else { set name [file tail $path] }
     set when ""
     catch {set when [clock format [dict get $rec mtime] -format "%Y-%m-%d %H:%M"]}
     switch -- $branch {
@@ -2811,6 +2854,7 @@ proc els::saveas {} {
 }
 proc els::session_restore {} {
     if {!$::els::restore_session} { return 0 }
+    set ::els::session_owned 1   ;# restoring IS adopting the stored session
     set restored {}
     foreach p [els::session_sanitize $::els::session_files] {
         if {![file exists $p]} { continue }
@@ -3765,9 +3809,20 @@ proc els::main {} {
     } else {
         set envProbe [expr {[info exists ::env(ELS_STARTUP_PROBE)] && $::env(ELS_STARTUP_PROBE) ne ""}]
         set startupProbe [expr {$envProbe || $a0 eq "--startup-probe"}]
-        set startupReport [expr {$envProbe ? $::env(ELS_STARTUP_PROBE) : \
-                                 ($startupProbe ? [lindex $::argv 1] : "")}]
-        set fileArgs [expr {!$envProbe && $startupProbe ? [lrange $::argv 2 end] : $::argv}]
+        # plain if/else, no expr ternaries: paths/args routed through expr get
+        # numerically canonicalized (`els.exe 007` would open the file "7")
+        if {$envProbe} {
+            set startupReport $::env(ELS_STARTUP_PROBE)
+        } elseif {$startupProbe} {
+            set startupReport [lindex $::argv 1]
+        } else {
+            set startupReport ""
+        }
+        if {!$envProbe && $startupProbe} {
+            set fileArgs [lrange $::argv 2 end]
+        } else {
+            set fileArgs $::argv
+        }
         if {$startupProbe} {
             # Headless probe: keep the window off the user's screen (alpha 0 still
             # counts as mapped, so the probe's assertions hold) and route any

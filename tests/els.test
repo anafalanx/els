@@ -90,6 +90,42 @@ test dirty-1.1 {an edit marks the document dirty and bullets the tab} -setup {el
     list $clean [els::doc_dirty $::els::active] [els::tab_text $::els::active]
 } -result {0 1 {• untitled}}
 
+# ---- bug-hunt wave 4: numeric-looking names + failed-open behavior --------
+
+test name-4.1 {numeric-looking file names are not canonicalized (007 stays 007, nan does not throw)} -setup {els_reset} -body {
+    set d [els::new_doc]
+    set ::els::docPath($d) [file join $::ELS_TMP 007]
+    set a [els::doc_name $d]
+    set ::els::docPath($d) [file join $::ELS_TMP nan]
+    set b [els::doc_name $d]
+    list $a $b
+} -result {007 nan}
+
+test name-4.2 {a doc named nan survives the full edit/update path (no bgerror storm)} -setup {els_reset} -body {
+    set d [els::new_doc]
+    set ::els::docPath($d) [file join $::ELS_TMP nan]
+    [els::W $d] insert end "x"      ;# fires on_modified -> update_tab -> doc_name
+    update
+    list [els::tab_text $d] [llength $::els_test_bgerrors]
+} -result {{• nan} 0}
+
+test openfail-4.1 {a failed open keeps a pre-existing pristine tab} -setup {els_reset} -body {
+    els::open [els_tmpfile of1.txt "data\n"]
+    set d1 [els::new_doc]                        ;# the user's fresh empty tab
+    set before $::els::docs
+    els::open [file join $::ELS_TMP no_such_dir_xyz missing.txt] 1
+    list [expr {$::els::docs eq $before}] [expr {$::els::active eq $d1}]
+} -result {1 1}
+
+test openfail-4.2 {a failed open closes only the doc it created and restores focus} -setup {els_reset} -body {
+    els::open [els_tmpfile of2a.txt "A\n"] ; set da $::els::active
+    els::open [els_tmpfile of2b.txt "B\n"]
+    els::switch_to $da
+    set before $::els::docs
+    els::open [file join $::ELS_TMP no_such_dir_xyz missing.txt] 1
+    list [expr {$::els::docs eq $before}] [expr {$::els::active eq $da}]
+} -result {1 1}
+
 # ---- per-document undo independence -------------------------------------
 test undo-1.1 {undo in one document does not affect another} -setup {els_reset} -body {
     set d0 $::els::active

@@ -1180,6 +1180,51 @@ test cfg-1.4 {legacy config.tcl is migrated to els.conf} -setup {els_reset} -bod
     list $found $migrated $picked
 } -result {1 1 1}
 
+# ---- bug-hunt wave 4: config + session robustness ------------------------
+
+test cfg-2.1 {corrupt config VALUES cannot abort startup (load_geometry tolerates anything)} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w]
+    puts $fh {geometry 100x100+50 word_wrap maybe recent {a "b} session_files {x "y} always_on_top 7 font_size huge restore_session perhaps show_whitespace blah}
+    close $fh
+    set rc [catch {els::load_geometry} err]
+    catch {file delete -force $f}
+    list $rc $::els::word_wrap $::els::show_ws
+} -result {0 0 0}
+
+test cfg-2.2 {a config that is not a dict at all is ignored, not fatal} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w] ; puts $fh "this is \{unbalanced and not a dict" ; close $fh
+    set rc [catch {els::load_geometry}]
+    catch {file delete -force $f}
+    set rc
+} -result 0
+
+test cfg-2.3 {LOCALAPPDATA-unset fallback resolves a real home dir (no literal ~)} -setup {ui_reset} -body {
+    set saved $::env(LOCALAPPDATA)
+    unset ::env(LOCALAPPDATA)
+    lassign [els::config_roots] near appdata
+    set ::env(LOCALAPPDATA) $saved
+    list [string match "*~*" $appdata] [string match -nocase "*AppData*" $appdata]
+} -result {0 1}
+
+test session-4.1 {an explicit-file-arg launch does not destroy the stored session} -setup {ui_reset} -body {
+    set ::els::session_files [list C:/saved/a.txt C:/saved/b.txt]
+    set ::els::session_active C:/saved/a.txt
+    set ::els::session_owned 0                ;# arg launch: session never adopted
+    els::open [els_tmpfile sw4.txt "x\n"]      ;# recent_add -> save_geometry
+    set fh [open $::els::config_path r] ; set data [read $fh] ; close $fh
+    set ::els::session_owned 1
+    dict get $data session_files
+} -result {C:/saved/a.txt C:/saved/b.txt}
+
+test session-4.2 {a session-owning run persists its open docs as the session} -setup {ui_reset} -body {
+    set p [els_tmpfile sw5.txt "y\n"]
+    els::open $p                               ;# owned (els_reset default) -> persists
+    set fh [open $::els::config_path r] ; set data [read $fh] ; close $fh
+    expr {[dict get $data session_files] eq [list [file normalize $p]]}
+} -result 1
+
 # ---- regression: bug-hunt fixes (data loss / corruption) ----------------
 test reg-1.1 {Reopen-with-Encoding keeps edits saved since open (docRaw refreshed on save)} -setup {ui_reset} -body {
     set p [els_tmpfile reg11.txt "original line\n"]

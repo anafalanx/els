@@ -141,6 +141,7 @@ proc els_reset {} {
     set ::els::restore_session 1
     set ::els::session_files {}
     set ::els::session_active ""
+    set ::els::session_owned 1   ;# tests act as a plain (session-adopting) run
     # Per-test hygiene: restore the dialog stubs to their defaults and clear the
     # captured background errors, so one test's answer can't leak into the next.
     set ::els_test_openfile "" ; set ::els_test_savefile ""
