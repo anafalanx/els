@@ -63,11 +63,94 @@ static int ReplaceFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     return TCL_OK;
 }
 
+/* ---- session liveness via a held byte-range lock --------------------------
+ * els::win_lock_file <path>  : open <path> and hold an exclusive byte-range lock
+ *   for the process lifetime -> "" on success (lock held), else an error string.
+ *   The OS releases the lock when the process dies (crash, kill, BSOD, reboot),
+ *   so the lock is a crash- and PID-reuse-proof "this session is alive" token.
+ * els::win_unlock_file       : release + close the held lock (clean quit).
+ * els::win_try_lock <path>   : non-blocking probe -> "1" if the lock is FREE
+ *   (no live owner -> the session that wrote this lock is dead) or "0" if HELD
+ *   (a live instance owns it).  Used by the recovery scan to skip live peers. */
+static HANDLE g_lock = INVALID_HANDLE_VALUE;
+
+static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                        int objc, Tcl_Obj *const objv[]) {
+    if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "path"); return TCL_ERROR; }
+    Tcl_Size n; const char *p = Tcl_GetStringFromObj(objv[1], &n);
+    WCHAR *w = utf8_to_wide(p, n);
+    if (w == nullptr) { Tcl_SetObjResult(ip, Tcl_NewStringObj("path conversion failed", -1)); return TCL_OK; }
+    HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD gle = GetLastError();           /* capture BEFORE Tcl_Free clobbers it */
+    Tcl_Free((char *)w);
+    if (h == INVALID_HANDLE_VALUE) {
+        Tcl_SetObjResult(ip, Tcl_ObjPrintf("open lock error %lu", (unsigned long)gle));
+        return TCL_OK;
+    }
+    OVERLAPPED ov = {0};
+    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+        DWORD gle = GetLastError();
+        CloseHandle(h);
+        Tcl_SetObjResult(ip, Tcl_ObjPrintf("lock held (error %lu)", (unsigned long)gle));
+        return TCL_OK;
+    }
+    if (g_lock != INVALID_HANDLE_VALUE) { CloseHandle(g_lock); }  /* replace any prior */
+    g_lock = h;
+    Tcl_SetObjResult(ip, Tcl_NewObj());     /* "" = success, lock held */
+    return TCL_OK;
+}
+
+static int UnlockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                          [[maybe_unused]] int objc, [[maybe_unused]] Tcl_Obj *const objv[]) {
+    if (g_lock != INVALID_HANDLE_VALUE) {
+        OVERLAPPED ov = {0};
+        UnlockFileEx(g_lock, 0, 1, 0, &ov);
+        CloseHandle(g_lock);
+        g_lock = INVALID_HANDLE_VALUE;
+    }
+    Tcl_SetObjResult(ip, Tcl_NewObj());
+    return TCL_OK;
+}
+
+static int TryLock_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                       int objc, Tcl_Obj *const objv[]) {
+    if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "path"); return TCL_ERROR; }
+    Tcl_Size n; const char *p = Tcl_GetStringFromObj(objv[1], &n);
+    WCHAR *w = utf8_to_wide(p, n);
+    if (w == nullptr) { Tcl_SetObjResult(ip, Tcl_NewStringObj("0", -1)); return TCL_OK; }
+    HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD gle = GetLastError();           /* capture BEFORE Tcl_Free clobbers it */
+    Tcl_Free((char *)w);
+    if (h == INVALID_HANDLE_VALUE) {
+        /* no such lock file -> no owner -> dead ("1"); any other open failure ->
+         * be conservative and treat as live ("0", don't recover a maybe-live one) */
+        const char *r = (gle == ERROR_FILE_NOT_FOUND || gle == ERROR_PATH_NOT_FOUND) ? "1" : "0";
+        Tcl_SetObjResult(ip, Tcl_NewStringObj(r, -1));
+        return TCL_OK;
+    }
+    OVERLAPPED ov = {0};
+    BOOL got = LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
+    if (got) {
+        OVERLAPPED ov2 = {0};
+        UnlockFileEx(h, 0, 1, 0, &ov2);
+    }
+    CloseHandle(h);
+    Tcl_SetObjResult(ip, Tcl_NewStringObj(got ? "1" : "0", -1));   /* 1=free/dead, 0=held/live */
+    return TCL_OK;
+}
+
 int Winfs_Init(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, "9.0", 0) == nullptr) return TCL_ERROR;
     /* fully-qualified name: Tcl creates ::els if it doesn't exist yet (this Init
      * may run before main.tcl is sourced, in the native build). */
     Tcl_CreateObjCommand(ip, "::els::win_replace_file", ReplaceFile_Cmd, nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_lock_file",    LockFile_Cmd,    nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_unlock_file",  UnlockFile_Cmd,  nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_try_lock",     TryLock_Cmd,     nullptr, nullptr);
     if (Tcl_PkgProvide(ip, "winfs", "0.1") != TCL_OK) return TCL_ERROR;
     return TCL_OK;
 }

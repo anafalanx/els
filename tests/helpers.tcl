@@ -36,6 +36,10 @@ source [file join $::ELS_ROOT els.tcl]
 set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
 
+# Autosave/crash-recovery is OFF by default in the suite (it would write swap
+# files and schedule timers on every edit); recover.test turns it on explicitly.
+set ::els::swap_enabled 0
+
 # ---- total control of error reporting: no dialog ever reaches the screen ----
 #
 # THE fix for GUI error boxes "raining" on the desktop.  Loading Tk installs a
@@ -68,12 +72,30 @@ catch {proc ::tk::dialog::error::bgerror {msg args} { ::els_test_bgerror $msg }}
 # Replace native dialogs with stubs so a stray dialog never blocks a test run.
 proc ::tk_getOpenFile {args} { set ::els_test_open_args $args ; return $::els_test_openfile }
 proc ::tk_getSaveFile {args} { set ::els_test_save_args $args ; return $::els_test_savefile }
-proc ::tk_messageBox  {args} { return $::els_test_mbanswer }
+# Count calls, record the last args, and (optionally) pop answers from a queue so
+# a multi-prompt flow can be driven deterministically; else fall back to a fixed
+# answer.  Recovery tests assert on the count to prove "one dialog, not N".
+proc ::tk_messageBox  {args} {
+    incr ::els_test_mbcount
+    set ::els_test_mbargs $args
+    if {[llength $::els_test_mbqueue]} {
+        set ::els_test_mbqueue [lassign $::els_test_mbqueue ans]
+        return $ans
+    }
+    return $::els_test_mbanswer
+}
 set ::els_test_openfile ""
 set ::els_test_savefile ""
 set ::els_test_open_args {}
 set ::els_test_save_args {}
 set ::els_test_mbanswer "yes"
+set ::els_test_mbcount 0
+set ::els_test_mbargs {}
+set ::els_test_mbqueue {}
+
+# Binary file I/O for tests (swap files, mark-of-the-web ADS, byte assertions).
+proc raw_write {path bytes} { set fh [::open $path wb] ; puts -nonewline $fh $bytes ; close $fh }
+proc raw_read  {path}       { set fh [::open $path rb] ; set d [read $fh] ; close $fh ; return $d }
 
 # Stub the OS-level menu post.  A real `tk_popup` in an unfocused/automated
 # context blocks (waiting on a grab) and would flash a grabbing menu on the
@@ -99,10 +121,17 @@ proc els_reset {} {
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    foreach a {docPath docEnc docBom docEol docRaw} {
+    foreach a {docPath docEnc docBom docEol docRaw docRecovered swapSig savedSig dirtySince loading} {
         array unset ::els::$a
         array set ::els::$a {}
     }
+    # Crash-recovery subsystem: cancel any pending timers and reset all state so a
+    # stray swap `after` can't fire into the next test.
+    catch {els::swap_stop}
+    set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    set ::els::session_id_cached "" ; set ::els::session_token_cached ""
+    set ::els::lock_handle "" ; set ::els::lock_chan ""
+    set ::els::last_recover 0 ; set ::els::recover_auto 0
     set ::els::show_ws 0 ; set ::els::word_wrap 0
     set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}
     set ::els::restore_session 1
@@ -112,6 +141,7 @@ proc els_reset {} {
     # captured background errors, so one test's answer can't leak into the next.
     set ::els_test_openfile "" ; set ::els_test_savefile ""
     set ::els_test_mbanswer "yes" ; set ::els_test_popup_args {}
+    set ::els_test_mbcount 0 ; set ::els_test_mbargs {} ; set ::els_test_mbqueue {}
     set ::els_test_bgerrors {}
     catch {file delete -force $::els::config_path}
     catch {font configure elsMono -size 11}

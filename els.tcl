@@ -29,6 +29,36 @@ namespace eval els {
     variable docBom ; array set docBom {}   ;# id -> 1 if a byte-order mark was present
     variable docEol ; array set docEol {}   ;# id -> lf | crlf | cr
     variable docRaw ; array set docRaw {}   ;# id -> exact bytes as loaded ("" = never from disk)
+    variable docRecovered ; array set docRecovered {}  ;# id -> 1 if this tab is crash-recovered (unsaved)
+    # ---- crash-recovery / autosave subsystem (R2 / docs robustness P0-b) ----
+    # A swap file per dirty doc under <configdir>/swap/, written atomically and
+    # often, so a crash / power-loss / kill never loses unsaved edits; on the next
+    # launch, orphaned swaps (from a dead session) are offered for non-destructive
+    # recovery.  Liveness is a held Win32 byte-range lock (released by the OS on
+    # process death) so a live peer's swaps are never stolen.  See the spec in the
+    # crash-recovery design pass.
+    variable swap_enabled      1    ;# master switch (the test harness turns it off)
+    variable swap_test_mtime   0    ;# test seam: force the pure-Tcl mtime liveness path
+    variable swap_after        ""   ;# after-id of the periodic tick ("" = stopped)
+    variable swap_touch_after  ""   ;# after-id of the debounced first-touch flush
+    variable swap_interval     2000 ;# periodic tick period (ms)
+    variable swap_debounce     400  ;# debounce after an edit (ms)
+    variable swap_suspend      0    ;# re-entrancy guard: 1 while a modal pump / recovery runs
+    variable swap_tick_count   0
+    variable session_id_cached    ""
+    variable session_token_cached ""
+    variable lock_handle ""         ;# non-empty once the native lock is held
+    variable lock_chan   ""         ;# pure-Tcl fallback: a held channel ("" = none)
+    variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
+    variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
+    variable swapSig    ; array set swapSig    {}  ;# id -> last-written buffer sig "chars:crc"
+    variable savedSig   ; array set savedSig   {}  ;# id -> on-disk file sig "size:mtime:crc" ("" untitled)
+    variable dirtySince ; array set dirtySince {}  ;# id -> 1 if edited since last successful swap
+    variable loading    ; array set loading    {}  ;# id -> 1 while open/recovery mutate identity
+    variable SWAP_SIG_FULL_CAP  4194304    ;# chars: above this an idle dirty doc reuses its cached sig
+    variable SWAP_FILE_CRC_CAP  16777216   ;# bytes: above this a file sig uses a sampled (head+tail) crc
+    variable STALE_SECS         45         ;# fallback liveness / litter staleness window (s)
+    variable HEARTBEAT_EVERY    3          ;# bump the lock mtime every Nth tick
     # charset detection (chardet quality via the system ICU; 0 until loaded)
     variable have_detect 0
     variable DETECT_MIN  15      ;# ignore ICU guesses below this confidence (0-100)
@@ -196,16 +226,27 @@ proc els::config_legacy_candidates {} {
     return [els::config_candidates config.tcl]
 }
 proc els::config_file {} { return $::els::config_path }
+# Single choke point for resolving the config location: the instant the dir is
+# known, hold the session lock and start autosave -- so edits are protected even
+# before the first save or a session restore.
+proc els::set_config_path {p} {
+    set ::els::config_path $p
+    if {$p ne "" && !$::els::selftest} {
+        catch {file mkdir [file dirname $p]}
+        els::lock_acquire
+        els::swap_start
+    }
+}
 # Point config_path at whichever location already holds a config; 1 if found,
 # 0 if this looks like a first run (neither location exists yet).
 proc els::config_resolve_existing {} {
     lassign [els::config_candidates] near appdata
-    if {[file exists $near]}    { set ::els::config_path $near    ; return 1 }
-    if {[file exists $appdata]} { set ::els::config_path $appdata ; return 1 }
+    if {[file exists $near]}    { els::set_config_path $near    ; return 1 }
+    if {[file exists $appdata]} { els::set_config_path $appdata ; return 1 }
     lassign [els::config_legacy_candidates] oldNear oldAppdata
     foreach {old new} [list $oldNear $near $oldAppdata $appdata] {
         if {![file exists $old]} { continue }
-        set ::els::config_path $new
+        els::set_config_path $new
         if {![file exists $new]} {
             catch {
                 file mkdir [file dirname $new]
@@ -226,11 +267,11 @@ proc els::config_first_run {} {
     els::config_choice_dialog $near $appdata
 }
 proc els::config_apply_choice {near appdata} {
-    set ::els::config_path [expr {$::els::cfg_radio eq "near" ? $near : $appdata}]
-    catch {file mkdir [file dirname $::els::config_path]}
+    els::set_config_path [expr {$::els::cfg_radio eq "near" ? $near : $appdata}]
     els::save_geometry
     catch {grab release .cfgask}
     catch {destroy .cfgask}
+    after idle [list els::recover_boot 0]   ;# no orphans on a true first run; harmless
 }
 proc els::config_choice_dialog {near appdata} {
     set ::els::cfg_radio appdata
@@ -1068,6 +1109,11 @@ proc els::build {} {
     bind elsText <<Paste>>       {after idle els::refresh_view}
     bind elsText <<Cut>>         {after idle els::refresh_view}
     bind elsText <Configure>     {after idle els::refresh_view}
+    # autosave: re-arm the swap debounce on real edits (<<Modified>> only flips on
+    # the 0->1 transition, so a sustained typing burst would otherwise miss it)
+    bind elsText <KeyRelease>    {+els::swap_touch}
+    bind elsText <<Paste>>       {+els::swap_touch}
+    bind elsText <<Cut>>         {+els::swap_touch}
     bind elsText <Control-n> { els::new;       break }
     bind elsText <Control-o> { els::open;      break }
     bind elsText <Control-s> { els::save;      break }
@@ -1235,8 +1281,10 @@ proc els::close_doc {id} {
     set idx [lsearch -exact $docs $id]
     if {$idx < 0} { return }
     if {[els::doc_dirty $id]} {
+        set ::els::swap_suspend 1
         set ans [tk_messageBox -parent . -icon warning -type yesnocancel \
             -title els -message "Save changes to [els::doc_name $id]?"]
+        set ::els::swap_suspend 0
         if {$ans eq "cancel"} { return }
         if {$ans eq "yes"} {
             els::switch_to $id
@@ -1246,8 +1294,10 @@ proc els::close_doc {id} {
     }
     set idx [lsearch -exact $docs $id]
     set docs [lreplace $docs $idx $idx]
+    els::swap_clear $id   ;# clean close -> the swap is no longer needed
     destroy [els::W $id]
     destroy [els::tabW $id]
+    unset -nocomplain ::els::docRecovered($id)
     unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
         ::els::docEol($id) ::els::docRaw($id)
     if {$active eq $id} { set active "" }
@@ -1266,7 +1316,8 @@ proc els::close_doc {id} {
 # ---- tab strip ----------------------------------------------------------
 proc els::tab_text {id} {
     set mark [expr {[els::doc_dirty $id] ? "• " : ""}]
-    return "$mark[els::doc_name $id]"
+    set tag [expr {[info exists ::els::docRecovered($id)] ? " (recovered)" : ""}]
+    return "$mark[els::doc_name $id]$tag"
 }
 # Tooltip text for a tab: the document's full native path (empty for untitled).
 proc els::tab_tip {id} {
@@ -1416,6 +1467,12 @@ proc els::on_modified {w} {
     variable active
     set id [els::id_of $w]
     if {$id eq ""} { return }
+    if {[$w edit modified]} {
+        set ::els::dirtySince($id) 1                          ;# 0->1 dirty latch
+    } else {
+        unset -nocomplain ::els::dirtySince($id)             ;# undo-to-clean clears it
+    }
+    els::swap_flush_soon                                      ;# debounced; never writes inline
     els::update_tab $id
     if {$id eq $active} {
         els::settitle
@@ -1813,6 +1870,14 @@ proc els::reopen_with {enc bom} {
             -message "Nothing to reopen — this document was never loaded from a file."
         return
     }
+    if {$::els::docRaw($id) eq ""} {
+        # no cached on-disk bytes to re-decode (e.g. a recovered-but-unsaved tab);
+        # decoding "" would silently blank the buffer — refuse instead.
+        tk_messageBox -parent . -icon info -title els \
+            -message "Nothing to reopen — this document's on-disk bytes aren't cached\
+                      (recovered unsaved content). Save it first to re-read from disk."
+        return
+    }
     if {[els::doc_dirty $id]} {
         set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
             -message "Reopen [els::doc_name $id] as [els::enc_label $enc $bom]?\
@@ -1931,6 +1996,7 @@ proc els::open {{p ""} {quiet 0}} {
     set ::els::docBom($id) $bom
     set ::els::docEol($id) $eol
     set ::els::docRaw($id) $raw
+    els::cache_saved_sig $id
     $w edit reset
     $w edit modified 0
     els::switch_to $id
@@ -1960,12 +2026,15 @@ proc els::_save_emit {chan bytes} {
 # command is absent (a dev/tclsh run) the plain `file rename -force` below is used,
 # which does not carry those; a >260-char or locked target falls back to an
 # in-place write (non-atomic only for those rare cases).
-proc els::write_atomic {path bytes} {
+proc els::write_atomic {path bytes {tmpHint ""}} {
     if {[file exists $path] && ![catch {file attributes $path -readonly} ro] && $ro} {
         return "the file is read-only"
     }
+    # A caller-supplied temp name keeps concurrent writers (the swap fan-out loop)
+    # from colliding on a shared [clock clicks]; saves use the default per-pid name.
     set tmp [file join [file dirname $path] \
-                 [format ".els-save-%d-%d.tmp" [pid] [clock clicks]]]
+                 [expr {$tmpHint ne "" ? $tmpHint \
+                        : [format ".els-save-%d-%d.tmp" [pid] [clock clicks]]}]]
     set fh ""
     if {[catch {
         set fh [::open $tmp {WRONLY CREAT TRUNC}]
@@ -2015,6 +2084,528 @@ proc els::_write_inplace {path bytes} {
     }
     return ""
 }
+
+# ===========================================================================
+#  CRASH RECOVERY / AUTOSAVE (R2)
+#  ---------------------------------------------------------------------------
+#  Per-dirty-doc swap files under <configdir>/swap/, written atomically and
+#  often; orphaned swaps from a dead session are offered for non-destructive
+#  recovery on the next launch.  Never auto-writes the user's file.
+# ===========================================================================
+
+# ---- session identity ----------------------------------------------------
+# A per-run id "host-pid-token".  pid disambiguates concurrent instances; the
+# token (folded from microseconds/clicks/pid/rand) disambiguates a pid reused
+# across runs.  Memoized so every swap from one run shares one id.
+proc els::host_tag {} {
+    set h ""
+    catch {set h [string tolower [info hostname]]}
+    regsub -all {[^a-z0-9_]} $h _ h
+    if {$h eq ""} { set h unknown }
+    return $h
+}
+proc els::session_token {} {
+    if {$::els::session_token_cached ne ""} { return $::els::session_token_cached }
+    set seed "[clock microseconds]:[clock clicks]:[pid]:[info hostname]"
+    for {set i 0} {$i < 4} {incr i} { append seed ":[expr {int(rand()*0x7fffffff)}]" }
+    set ::els::session_token_cached \
+        [format %08x%08x [zlib crc32 $seed] [zlib crc32 "salt:$seed:[clock clicks]"]]
+    return $::els::session_token_cached
+}
+proc els::session_id {} {
+    if {$::els::session_id_cached ne ""} { return $::els::session_id_cached }
+    set ::els::session_id_cached "[els::host_tag]-[pid]-[els::session_token]"
+    return $::els::session_id_cached
+}
+
+# ---- swap directory + file paths -----------------------------------------
+# "" in any inert context (config unresolved, --selftest): every writer no-ops.
+proc els::swap_dir {} {
+    if {$::els::config_path eq "" || $::els::selftest} { return "" }
+    set d [file join [file dirname $::els::config_path] swap]
+    if {[catch {file mkdir $d}]} { return "" }
+    return $d
+}
+proc els::swap_path {sid id} { return [file join [els::swap_dir] "swp-$sid-$id.swp"] }
+proc els::lock_path {{sid ""}} {
+    if {$sid eq ""} { set sid [els::session_id] }
+    return [file join [els::swap_dir] "$sid.lock"]
+}
+
+# ---- the swap file: framed, self-validating ------------------------------
+#   ELSSWAP v1\n  <payload bytes>  \nELSSWAPEND <len> <crc32>\n
+# Payload is a Tcl dict (UTF-8).  The trailer is the last "ELSSWAPEND " line, so
+# the payload may contain newlines (the body does).  Read validates len+crc and
+# returns "" on any corruption -- never raises.
+proc els::swap_serialize {id sid} {
+    set w [els::W $id]
+    # store the buffer as the internal (LF) string; encoding the whole dict to
+    # UTF-8 once (below) is lossless and never goes through the doc's lossy enc.
+    set text [$w get 1.0 "end - 1 char"]
+    set d [dict create schema 1 sessionId $sid docId $id \
+               path $::els::docPath($id) enc $::els::docEnc($id) \
+               bom $::els::docBom($id) eol $::els::docEol($id) \
+               cursor [$w index insert] dirty [els::doc_dirty $id] \
+               savedSig [els::doc_saved_sig $id] mtime [clock seconds] \
+               host [els::host_tag] bodyCrc [zlib crc32 [encoding convertto utf-8 $text]] \
+               text $text]
+    set payload [encoding convertto utf-8 $d]
+    return "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+}
+# Returns the validated dict, or "" on any corruption.  Never raises.  (No
+# `return` inside the catch -- that makes catch report code 2 and swallow the
+# value; set then return after.)
+proc els::swap_read {file} {
+    set d ""
+    if {[catch {
+        set fh [::open $file rb]
+        set all [read $fh]
+        close $fh
+        set magic "ELSSWAP v1\n"
+        if {[string range $all 0 [expr {[string length $magic]-1}]] ne $magic} { error bad }
+        set body [string range $all [string length $magic] end]
+        set idx [string last "\nELSSWAPEND " $body]   ;# the LAST trailer line
+        if {$idx < 0} { error bad }
+        set payload [string range $body 0 [expr {$idx-1}]]
+        set trailer [string trimright [string range $body [expr {$idx+1}] end] "\n"]
+        if {![regexp {^ELSSWAPEND ([0-9]+) ([0-9]+)$} $trailer -> declen declcrc]} { error bad }
+        if {[string length $payload] != $declen} { error bad }
+        if {[zlib crc32 $payload] != $declcrc} { error bad }
+        set d [encoding convertfrom utf-8 $payload]
+        if {![dict exists $d schema] || [dict get $d schema] != 1} { error bad }
+    }]} { return "" }
+    return $d
+}
+
+# ---- change-detection + on-disk file signatures --------------------------
+# buf_sig: "chars:crc" of the LF-internal buffer.  Cheap char-count first; only
+# above SWAP_SIG_FULL_CAP and only when an edit was latched (dirtySince) do we
+# pay the O(n) crc -- an idle large dirty doc costs nothing per tick.
+proc els::buf_sig {id} {
+    set w [els::W $id]
+    set chars [$w count -chars 1.0 "end - 1 char"]
+    # Above the cap, an idle dirty doc reuses its cached sig to skip the O(n) crc --
+    # but only when the CHAR COUNT also still matches, so a length-changing edit
+    # that didn't latch dirtySince (e.g. a programmatic Replace) is never missed.
+    if {$chars > $::els::SWAP_SIG_FULL_CAP && \
+            ![info exists ::els::dirtySince($id)] && \
+            [info exists ::els::swapSig($id)] && \
+            [lindex [split $::els::swapSig($id) :] 0] == $chars} {
+        return $::els::swapSig($id)
+    }
+    return "$chars:[zlib crc32 [encoding convertto utf-8 [$w get 1.0 "end - 1 char"]]]"
+}
+# A signature of on-disk bytes "size:mtime:crc" (sampled crc above the cap), used
+# to reconcile a swap's baseline against the file at recovery time.
+proc els::sig_from_bytes {bytes mtime} {
+    set size [string length $bytes]
+    if {$size <= $::els::SWAP_FILE_CRC_CAP} {
+        set crc [zlib crc32 $bytes]
+    } else {
+        set crc [zlib crc32 "[string range $bytes 0 65535][string range $bytes end-65535 end]"]
+    }
+    return "$size:$mtime:$crc"
+}
+proc els::file_sig {path} {
+    if {[catch {file stat $path st}]} { return "" }
+    # Single open + single guaranteed close; NO `return` inside the catch (that
+    # makes catch report code 2 and the outer `if` take the error branch — which
+    # silently broke this for >16 MB files).  fh tracked so an I/O fault can't leak.
+    set fh ""
+    set sig ""
+    if {[catch {
+        set fh [::open $path rb]
+        if {$st(size) <= $::els::SWAP_FILE_CRC_CAP} {
+            set bytes [read $fh]
+        } else {
+            set head [read $fh 65536]
+            seek $fh -65536 end
+            set tail [read $fh 65536]
+            set bytes "$head$tail"   ;# sampled: matches sig_from_bytes' >cap branch
+        }
+        close $fh
+        set fh ""
+        set sig "$st(size):$st(mtime):[zlib crc32 $bytes]"
+    }]} {
+        if {$fh ne ""} { catch {close $fh} }
+        return ""
+    }
+    return $sig
+}
+# Cache the doc's on-disk signature from the bytes we already hold (the exact
+# loaded/saved bytes) plus the file's mtime -- one consistent source.
+proc els::cache_saved_sig {id} {
+    if {$::els::docPath($id) eq ""} { set ::els::savedSig($id) ""; return }
+    set mtime 0
+    catch {set mtime [file mtime $::els::docPath($id)]}
+    set ::els::savedSig($id) [els::sig_from_bytes $::els::docRaw($id) $mtime]
+}
+proc els::doc_saved_sig {id} {
+    if {[info exists ::els::savedSig($id)]} { return $::els::savedSig($id) }
+    return ""
+}
+
+# ---- the writer (single idempotent path) ---------------------------------
+# Never raises (catch-wrapped I/O).  Writes a swap only when there are unsaved
+# edits AND the buffer changed since the last swap.
+proc els::swap_flush_doc {id} {
+    if {!$::els::swap_enabled || $::els::swap_suspend} { return 0 }
+    if {![info exists ::els::docPath($id)]} { return 0 }
+    if {[els::swap_dir] eq ""} { return 0 }
+    if {![winfo exists [els::W $id]]} { return 0 }
+    if {[info exists ::els::loading($id)]} { return 0 }
+    if {![els::doc_dirty $id] && ![info exists ::els::dirtySince($id)]} { return 0 }
+    if {[els::pristine $id]} { return 0 }
+    set done 0
+    catch {
+        set sig [els::buf_sig $id]
+        if {![info exists ::els::swapSig($id)] || $sig ne $::els::swapSig($id)} {
+            set sid [els::session_id]
+            set bytes [els::swap_serialize $id $sid]
+            if {[els::write_atomic [els::swap_path $sid $id] $bytes ".swp-$sid-$id.tmp"] eq ""} {
+                set ::els::swapSig($id) $sig
+                unset -nocomplain ::els::dirtySince($id)
+                set done 1
+            }
+        }
+    }
+    return $done
+}
+proc els::swap_flush_all {} { foreach id $::els::docs { els::swap_flush_doc $id } }
+proc els::swap_clear {id} {
+    catch {file delete -force [els::swap_path [els::session_id] $id]}
+    unset -nocomplain ::els::swapSig($id) ::els::dirtySince($id)
+}
+
+# ---- timers --------------------------------------------------------------
+proc els::swap_tick {} {
+    incr ::els::swap_tick_count
+    # catch the work so an unexpected throw can NEVER skip the reschedule below --
+    # that would silently kill autosave for the rest of the session.
+    catch {els::swap_flush_all}
+    if {($::els::swap_tick_count % $::els::HEARTBEAT_EVERY) == 0} { catch {els::lock_heartbeat} }
+    set ::els::swap_after [after $::els::swap_interval els::swap_tick]   ;# reschedule after work
+}
+proc els::swap_flush_soon {} {
+    if {!$::els::swap_enabled} return
+    if {$::els::swap_touch_after ne ""} { after cancel $::els::swap_touch_after }
+    set ::els::swap_touch_after \
+        [after $::els::swap_debounce {set ::els::swap_touch_after ""; els::swap_flush_all}]
+}
+# Bound to actual edit events so a sustained typing burst (which never re-fires
+# <<Modified>>) keeps re-arming dirtySince + the debounce, coalescing to one
+# write ~swap_debounce after typing pauses.
+proc els::swap_touch {} {
+    if {$::els::active ne ""} { set ::els::dirtySince($::els::active) 1 }
+    els::swap_flush_soon
+}
+proc els::swap_start {} {
+    if {!$::els::swap_enabled || $::els::selftest} { return }
+    if {[els::swap_dir] eq ""} { return }
+    if {$::els::swap_after ne ""} { return }
+    set ::els::swap_after [after $::els::swap_interval els::swap_tick]
+}
+proc els::swap_stop {} {
+    if {$::els::swap_after ne ""} { after cancel $::els::swap_after; set ::els::swap_after "" }
+    if {$::els::swap_touch_after ne ""} { after cancel $::els::swap_touch_after; set ::els::swap_touch_after "" }
+}
+
+# ---- liveness lock -------------------------------------------------------
+# Held Win32 byte-range lock (native build): the OS frees it the instant the
+# process dies, so "lock acquirable -> owner is dead" survives crash, kill, and
+# even a fast reboot/power-loss (unlike an mtime heartbeat).  Pure-Tcl builds
+# fall back to mtime freshness.
+proc els::lock_acquire {} {
+    set d [els::swap_dir]
+    if {$d eq ""} { return 0 }
+    set lp [els::lock_path]
+    catch {
+        set fh [::open $lp w]
+        puts $fh [dict create pid [pid] token [els::session_token] \
+                      host [els::host_tag] started [clock seconds] ver 1]
+        close $fh
+    }
+    if {[llength [info commands ::els::win_lock_file]]} {
+        if {[els::win_lock_file [file nativename $lp]] eq ""} { set ::els::lock_handle 1 }
+    } else {
+        catch {set ::els::lock_chan [::open $lp {RDWR}]}
+    }
+    return 1
+}
+proc els::lock_heartbeat {} { catch {file mtime [els::lock_path] [clock seconds]} }
+proc els::lock_release {} {
+    if {[llength [info commands ::els::win_unlock_file]]} { catch {els::win_unlock_file} }
+    if {$::els::lock_chan ne ""} { catch {close $::els::lock_chan} }
+    set ::els::lock_chan ""
+    set ::els::lock_handle ""
+}
+# 1 if the session that owns <lp> is alive.  Native try-lock is authoritative;
+# mtime is the pure-Tcl fallback only (never ORs over a successful native probe).
+proc els::lock_is_live {sid lp} {
+    if {!$::els::swap_test_mtime && [llength [info commands ::els::win_try_lock]]} {
+        return [expr {[els::win_try_lock [file nativename $lp]] == 0}]
+    }
+    if {![file exists $lp]} { return 0 }
+    if {[catch {file mtime $lp} mt]} { return 0 }
+    return [expr {([clock seconds] - $mt) < $::els::STALE_SECS}]
+}
+
+# ---- orphan enumeration + reconcile --------------------------------------
+# Scan globs swp-*.swp and derives the owning session from the PAYLOAD (not the
+# filename), so a swap is never stranded by a renamed/lost lock.  Orphan = a swap
+# whose session has no live lock (and isn't ours).
+proc els::swap_scan_orphans {} {
+    set d [els::swap_dir]
+    if {$d eq ""} { return {} }
+    set mine [els::session_id]
+    set live [dict create]
+    set out {}
+    foreach f [glob -nocomplain -directory $d swp-*.swp] {
+        set rec [els::swap_read $f]
+        if {$rec eq ""} { continue }   ;# unreadable: maybe a TRANSIENT lock on a live
+                                       ;# peer's swap -- never delete here; the age-based
+                                       ;# sweep reclaims genuinely-old corrupt swaps
+        set sid [dict get $rec sessionId]
+        if {$sid eq $mine} continue
+        if {![dict exists $live $sid]} {
+            dict set live $sid [els::lock_is_live $sid [els::lock_path $sid]]
+        }
+        if {[dict get $live $sid]} continue                           ;# owned by a live peer
+        lappend out [list $f $rec]
+    }
+    return $out
+}
+# branch: untitled | missing | match | changed
+proc els::recover_reconcile {rec} {
+    set path [dict get $rec path]
+    if {$path eq ""} { return untitled }
+    if {![file exists $path]} { return missing }
+    set base [dict get $rec savedSig]
+    if {$base ne "" && [els::file_sig $path] eq $base} { return match }
+    return changed
+}
+# Claim an orphan session once so two live instances don't both recover it.
+# A separate marker (not the lock), exclusive-create; a crashed claimer's stale
+# marker is swept by age and the swaps -- keyed off swp-*.swp -- stay recoverable.
+proc els::orphan_claim {sid} {
+    set d [els::swap_dir]
+    if {$d eq ""} { return 1 }
+    set cp [file join $d "$sid.claimed"]
+    if {[catch {set ch [::open $cp {WRONLY CREAT EXCL}]}]} { return 0 }
+    catch {puts $ch "[els::session_id] [clock seconds]"; close $ch}
+    return 1
+}
+# Returns a list of plan triples {swapfile recordDict branch} for claimed orphans.
+proc els::recover_scan {} {
+    set claimed [dict create]
+    set out {}
+    foreach pair [els::swap_scan_orphans] {
+        lassign $pair f rec
+        set sid [dict get $rec sessionId]
+        if {![dict exists $claimed $sid]} { dict set claimed $sid [els::orphan_claim $sid] }
+        if {![dict get $claimed $sid]} continue
+        lappend out [list $f $rec [els::recover_reconcile $rec]]
+    }
+    return $out
+}
+
+# ---- litter sweep + teardown ---------------------------------------------
+proc els::swap_sweep {} {
+    set d [els::swap_dir]
+    if {$d eq ""} { return }
+    set now [clock seconds]
+    catch {
+        foreach f [glob -nocomplain -directory $d .swp-*.tmp] {
+            if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS} {
+                catch {file delete -force $f}
+            }
+        }
+        # genuinely-corrupt swaps: old AND unreadable.  A live session keeps its
+        # swap fresh, so an old+unreadable one is safe to reclaim (a transient lock
+        # on a live peer's swap leaves the mtime recent, so it is never swept here).
+        foreach f [glob -nocomplain -directory $d swp-*.swp] {
+            if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS \
+                    && [els::swap_read $f] eq ""} {
+                catch {file delete -force $f}
+            }
+        }
+        foreach f [glob -nocomplain -directory $d *.claimed] {
+            if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS} {
+                catch {file delete -force $f}
+            }
+        }
+        # orphan locks: dead session with no surviving swaps
+        foreach f [glob -nocomplain -directory $d *.lock] {
+            set sid [file rootname [file tail $f]]
+            if {$sid eq [els::session_id]} continue
+            if {[els::lock_is_live $sid $f]} continue
+            if {[llength [glob -nocomplain -directory $d "swp-$sid-*.swp"]]} continue
+            catch {file delete -force $f}
+        }
+    }
+}
+# Clean teardown order: stop timers -> delete OUR swaps -> release+delete lock.
+# A swap must never outlive its lock (else a peer would false-orphan it).  Only
+# ever reached on a committed exit -- never on a crash or a cancelled quit.
+proc els::swap_shutdown {} {
+    catch {els::swap_stop}
+    catch {foreach id $::els::docs { els::swap_clear $id }}
+    catch {els::lock_release}
+    catch {file delete -force [els::lock_path]}
+    catch {file delete -force [file join [els::swap_dir] "[els::session_id].claimed"]}
+}
+
+# ---- recovery: load into a DIRTY buffer (never auto-write) ----------------
+# Loads a swap's lossless UTF-8 body into an in-memory dirty tab.  Metadata comes
+# from the RECORD (never re-detected), so a lossy-encoded doc round-trips exactly.
+# Merges onto an existing CLEAN tab for the same path; a user-dirtied tab is left
+# alone and the recovery opens as a separate "(recovered)" tab.
+proc els::recover_load {rec branch} {
+    set path [dict get $rec path]
+    set body [dict get $rec text]   ;# already the internal (LF) string
+    set tid ""
+    if {$path ne ""} {
+        foreach id $::els::docs {
+            if {[info exists ::els::docPath($id)] && [els::same_path $::els::docPath($id) $path]} {
+                if {![els::doc_dirty $id]} { set tid $id }
+                break
+            }
+        }
+    }
+    set fresh 0
+    if {$tid eq ""} {
+        set tid [els::new_doc]
+        set fresh 1
+        if {$path ne ""} { set ::els::docPath($tid) $path }
+        set ::els::docRaw($tid) ""           ;# new tab: no on-disk bytes cached yet
+        set ::els::docRecovered($tid) 1      ;# mark a separate recovered tab as such
+    }
+    # NB: when merging onto an existing clean tab, its docRaw (loaded from disk by
+    # els::open) is LEFT INTACT — clobbering it would blank a later "Reopen with
+    # Encoding".  We never re-detect: the swap record is authoritative.
+    set w [els::W $tid]
+    set ::els::loading($tid) 1
+    $w delete 1.0 end
+    $w insert end $body
+    set ::els::docEnc($tid) [dict get $rec enc]
+    set ::els::docBom($tid) [dict get $rec bom]
+    set ::els::docEol($tid) [dict get $rec eol]
+    catch {$w mark set insert [dict get $rec cursor]}
+    catch {$w see insert}
+    $w edit reset
+    $w edit modified 1
+    unset -nocomplain ::els::loading($tid)
+    set ::els::dirtySince($tid) 1
+    els::update_tab $tid
+    els::settitle
+    return $tid
+}
+# decision: recover | discard.  Suspends autosave so the running tick can't write
+# a fresh swap of the recovered body before the orphan is cleared.  The orphan
+# swap is deleted only AFTER a successful load (delete-last), so a failed load
+# preserves it for the next attempt.
+proc els::recover_apply {plan decision} {
+    lassign $plan f rec branch
+    catch {
+        set ::els::swap_suspend 1
+        switch -- $decision {
+            recover {
+                set id [els::recover_load $rec $branch]
+                if {$id ne "" && [winfo exists [els::W $id]]} { catch {file delete -force $f} }
+            }
+            discard { catch {file delete -force $f} }
+        }
+    }
+    set ::els::swap_suspend 0
+}
+
+# ---- startup orchestration + the consolidated dialog ----------------------
+proc els::recover_boot {openedArgs} {
+    catch {els::swap_sweep}
+    if {!$openedArgs && $::els::restore_session} { catch {els::session_restore} }
+    set recs {}
+    catch {set recs [els::recover_scan]}
+    set ::els::last_recover [llength $recs]
+    if {[llength $recs]} { catch {els::recover_offer $recs} }
+}
+proc els::recover_label {rec branch} {
+    set path [dict get $rec path]
+    set name [expr {$path eq "" ? "untitled" : [file tail $path]}]
+    set when ""
+    catch {set when [clock format [dict get $rec mtime] -format "%Y-%m-%d %H:%M"]}
+    switch -- $branch {
+        untitled { set note "unsaved new document" }
+        missing  { set note "original file is gone" }
+        match    { set note "file unchanged since" }
+        changed  { set note "file changed on disk since" }
+        default  { set note "" }
+    }
+    return [list $name $note $when]
+}
+# One consolidated, non-modal dialog for the whole batch (never one modal per
+# file).  recover_auto / ELS_RECOVER_AUTO auto-apply (probe + tests).
+proc els::recover_offer {records} {
+    if {![llength $records]} return
+    if {$::els::recover_auto || [info exists ::env(ELS_RECOVER_AUTO)]} {
+        foreach p $records { catch {els::recover_apply $p recover} }
+        return
+    }
+    set top .recover
+    catch {destroy $top}
+    toplevel $top -bg $::els::PAGE
+    wm withdraw $top
+    wm title $top "Recover unsaved changes"
+    wm transient $top .
+    ttk::frame $top.f -padding 16 ; pack $top.f -fill both -expand 1
+    ttk::label $top.f.h -text "els found unsaved changes from a previous session." \
+        -font elsUIb -foreground $::els::INK
+    ttk::label $top.f.s -font elsUI -foreground $::els::MUTED -justify left \
+        -text "These were autosaved when els closed unexpectedly. Recover them into\neditable tabs (nothing is written to disk until you Save), or discard."
+    grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
+    grid $top.f.s -row 1 -column 0 -sticky w -pady {0 12}
+    set lf $top.f.list
+    ttk::frame $lf
+    grid $lf -row 2 -column 0 -sticky we -pady {0 12}
+    set r 0
+    set ::els::_recover_pick [dict create]
+    foreach p $records {
+        lassign $p f rec branch
+        lassign [els::recover_label $rec $branch] name note when
+        set var ::els::_recover_chk($r)
+        set $var [expr {$branch ne "missing"}]   ;# default-check all but vanished originals
+        ttk::checkbutton $lf.c$r -variable $var -text $name -style TCheckbutton
+        ttk::label $lf.n$r -font elsUI -foreground $::els::MUTED -text "  $note $when"
+        grid $lf.c$r -row $r -column 0 -sticky w
+        grid $lf.n$r -row $r -column 1 -sticky w
+        dict set ::els::_recover_pick $r $p
+        incr r
+    }
+    set bf $top.f.btns
+    ttk::frame $bf
+    grid $bf -row 3 -column 0 -sticky e
+    ttk::button $bf.rec -text "Recover checked" -command [list els::recover_dialog_apply $top recover]
+    ttk::button $bf.dis -text "Discard checked" -command [list els::recover_dialog_apply $top discard]
+    ttk::button $bf.cancel -text "Later" -command [list destroy $top]
+    grid $bf.rec -row 0 -column 0 -padx {0 6}
+    grid $bf.dis -row 0 -column 1 -padx {0 6}
+    grid $bf.cancel -row 0 -column 2
+    bind $top <Escape> [list destroy $top]
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
+    wm geometry $top +$x+$y
+    wm deiconify $top
+}
+proc els::recover_dialog_apply {top decision} {
+    foreach r [lsort -integer [dict keys $::els::_recover_pick]] {
+        set chk 1
+        catch {set chk [set ::els::_recover_chk($r)]}
+        if {$decision eq "recover" && !$chk} continue   ;# unchecked: leave the swap for later
+        if {$decision eq "discard" && !$chk} continue
+        els::recover_apply [dict get $::els::_recover_pick $r] $decision
+    }
+    catch {destroy $top}
+}
 proc els::save {} {
     variable active
     variable docPath
@@ -2048,6 +2639,9 @@ proc els::save {} {
     # to the bytes loaded at open time (which silently discarded saved edits, and
     # blanked a Save-As'd new document whose docRaw was still empty)
     set ::els::docRaw($active) $bytes
+    els::cache_saved_sig $active
+    unset -nocomplain ::els::docRecovered($active)   ;# saved -> no longer a recovered tab
+    els::swap_clear $active   ;# the file is safely on disk now -> drop the swap
     els::update_tab $active
     els::settitle
     return 1
@@ -2276,9 +2870,11 @@ proc els::quit {} {
     foreach id $docs {
         if {[els::doc_dirty $id]} {
             els::switch_to $id
+            set ::els::swap_suspend 1
             set ans [tk_messageBox -parent . -icon warning -type yesnocancel \
                 -title els -message "Save changes to [els::doc_name $id]?"]
-            if {$ans eq "cancel"} { return }
+            set ::els::swap_suspend 0
+            if {$ans eq "cancel"} { return }   ;# aborted quit: autosave stays armed
             if {$ans eq "yes"} {
                 els::save
                 if {[els::doc_dirty $id]} { return }
@@ -2286,6 +2882,7 @@ proc els::quit {} {
         }
     }
     els::save_geometry
+    els::swap_shutdown   ;# committed exit: stop autosave, delete our swaps + lock
     exit
 }
 
@@ -2706,6 +3303,7 @@ proc els::find_replace_one {} {
     $w edit separator
     $w replace $s $e $repl
     $w mark set insert "$s + [string length $repl] chars"
+    els::swap_touch   ;# a button-driven edit doesn't fire <KeyRelease> -> latch it
     els::find_update
 }
 
@@ -2724,6 +3322,7 @@ proc els::find_replace_all {} {
         $w replace $s $e [els::repl_for $w $s $e]
     }
     $w edit separator
+    els::swap_touch   ;# button-driven edit -> latch dirtySince + schedule a flush
     els::find_update
     set ::els::find_count "Replaced $n"
 }
@@ -2898,8 +3497,12 @@ proc els::open_url {url} {
 proc els::startup_probe {report} {
     update idletasks
     set paths {}
+    set chars {}
+    set dirty {}
     foreach id $::els::docs {
         if {[info exists ::els::docPath($id)]} { lappend paths $::els::docPath($id) }
+        catch {lappend chars [[els::W $id] count -chars 1.0 "end - 1 char"]}
+        lappend dirty [els::doc_dirty $id]
     }
     set data [dict create \
         mapped [winfo ismapped .] \
@@ -2908,6 +3511,10 @@ proc els::startup_probe {report} {
         config $::els::config_path \
         docs [llength $::els::docs] \
         paths $paths \
+        doc_chars $chars \
+        doc_dirty $dirty \
+        recovered $::els::last_recover \
+        swap_dir [els::swap_dir] \
         active_path [els::session_current_active] \
         title [wm title .] \
         argv $::argv \
@@ -2922,6 +3529,7 @@ proc els::startup_probe {report} {
             catch {file rename -force $report.tmp $report}
         }
     }
+    catch {els::swap_shutdown}   ;# probe holds a lock + may have written swaps -> clean up
     exit
 }
 
@@ -2958,9 +3566,10 @@ proc els::main {} {
         }
         # first run (no config in either location): ask where to keep settings,
         # a moment after the main window is up (never a startup-time modal vwait)
-        if {$::els::config_path eq ""} { after 250 els::config_first_run }
-        if {!$openedArgs && $::els::config_path ne ""} {
-            after 80 els::session_restore
+        if {$::els::config_path eq ""} {
+            after 250 els::config_first_run   ;# recovery runs once the user picks a config dir
+        } else {
+            after 80 [list els::recover_boot $openedArgs]   ;# session restore + crash recovery
         }
         if {$startupProbe} {
             after 900 [list els::startup_probe $startupReport]

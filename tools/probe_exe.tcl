@@ -42,7 +42,18 @@ proc wait_report {report pid} {
     error "exe probe did not finish: $report"
 }
 
-proc run_probe {name src {conf ""} {files {}} {args {}}} {
+# Frame a swap file exactly like els::swap_serialize (text stored as the internal
+# string; the whole dict is UTF-8-encoded once; length+crc trailer).
+proc make_swap {sid docId text {path ""} {savedSig ""} {enc utf-8} {eol lf}} {
+    set d [dict create schema 1 sessionId $sid docId $docId path $path enc $enc \
+               bom 0 eol $eol cursor 1.0 dirty 1 savedSig $savedSig \
+               mtime [clock seconds] host forged \
+               bodyCrc [zlib crc32 [encoding convertto utf-8 $text]] text $text]
+    set payload [encoding convertto utf-8 $d]
+    return "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+}
+
+proc run_probe {name src {conf ""} {files {}} {args {}} {recoverAuto 0}} {
     set app [file join $::BASE $name]
     catch {file delete -force $app}
     file mkdir $app
@@ -54,7 +65,7 @@ proc run_probe {name src {conf ""} {files {}} {args {}}} {
     set report [file join $app report.txt]
 
     set saved {}
-    foreach v {APPDATA LOCALAPPDATA ELS_STARTUP_PROBE} {
+    foreach v {APPDATA LOCALAPPDATA ELS_STARTUP_PROBE ELS_RECOVER_AUTO} {
         if {[info exists ::env($v)]} {
             dict set saved $v [list 1 $::env($v)]
         } else {
@@ -64,10 +75,11 @@ proc run_probe {name src {conf ""} {files {}} {args {}}} {
     set ::env(APPDATA) [file join $app appdata]
     set ::env(LOCALAPPDATA) [file join $app localappdata]
     set ::env(ELS_STARTUP_PROBE) $report
+    if {$recoverAuto} { set ::env(ELS_RECOVER_AUTO) 1 } else { catch {unset ::env(ELS_RECOVER_AUTO)} }
     set pid [exec [file join $app els.exe] {*}$args &]
-    foreach v {APPDATA LOCALAPPDATA ELS_STARTUP_PROBE} {
+    foreach v {APPDATA LOCALAPPDATA ELS_STARTUP_PROBE ELS_RECOVER_AUTO} {
         lassign [dict get $saved $v] had val
-        if {$had} { set ::env($v) $val } else { unset ::env($v) }
+        if {$had} { set ::env($v) $val } else { catch {unset ::env($v)} }
     }
 
     return [wait_report $report $pid]
@@ -107,5 +119,23 @@ if {[dict get $explicitRun cfgask] != 0 ||
     [file tail [dict get $explicitRun active_path]] ne "explicit.txt"} {
     error "explicit-arg probe failed: $explicitRun"
 }
+
+# Crash recovery: seed a valid orphan swap (from a "dead" session -- no held
+# lock) into the app's swap dir, launch with auto-recovery, and assert the real
+# fused exe recovers it into a dirty in-memory tab (never writing the user's
+# files).  This proves the on-disk swap format is durable across a real process.
+set conf [dict create geometry 800x600 recent {} word_wrap 0 \
+    restore_session 1 session_files {} session_active ""]
+set deadSid "host-999-deadbeefdeadbeef"
+set swapBytes [make_swap $deadSid d0 "RECOVERED!"]
+set recoverRun [run_probe recover $SRC $conf \
+    [list "swap/swp-$deadSid-d0.swp" $swapBytes] {} 1]
+if {[dict get $recoverRun recovered] < 1} {
+    error "recovery probe: nothing recovered: $recoverRun"
+}
+if {10 ni [dict get $recoverRun doc_chars]} {
+    error "recovery probe: recovered body (10 chars) not present: $recoverRun"
+}
+puts "recovery probe ok (recovered=[dict get $recoverRun recovered])"
 
 puts "exe probe ok"
