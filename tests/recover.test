@@ -243,6 +243,86 @@ test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies
 
 # ===== sweep: stale temp/claim litter from dead sessions ===================
 
+# ---- bug-hunt wave 3: clean docs never swap; metadata + claims ------------
+
+test swap-clean-2.1 {swap_touch on a CLEAN doc latches nothing and writes nothing} -setup recover_reset -body {
+    set p [file join $::ELS_TMP cl.txt] ; raw_write $p "clean content\n"
+    els::open $p ; set id $::els::active
+    els::swap_touch                          ;# arrow key / PgUp on a clean doc
+    set latched [info exists ::els::dirtySince($id)]
+    set rc [els::swap_flush_doc $id]
+    list $latched $rc [file exists [els::swap_path [els::session_id] $id]]
+} -result {0 0 0}
+
+test swap-clean-2.2 {after a save, the Ctrl+S key release does not re-create the swap} -setup recover_reset -body {
+    set p [file join $::ELS_TMP cl2.txt] ; raw_write $p "v1\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "edit" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    els::save                                 ;# clears the swap
+    els::swap_touch                           ;# the key-release after Ctrl+S
+    els::swap_flush_all
+    file exists [els::swap_path [els::session_id] $id]
+} -result 0
+
+test swap-undo-2.1 {undo back to the saved state deletes the swap (nothing left to protect)} -setup recover_reset -body {
+    set p [file join $::ELS_TMP un.txt] ; raw_write $p "base\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "X" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set had [file exists [els::swap_path [els::session_id] $id]]
+    [els::W $id] edit modified 0              ;# back to the saved state
+    els::on_modified [els::W $id]             ;# the 1->0 transition event
+    list $had [file exists [els::swap_path [els::session_id] $id]]
+} -result {1 0}
+
+test swap-meta-2.1 {an encoding change on an already-dirty doc reaches the swap} -setup recover_reset -body {
+    set id [els::new_doc]
+    [els::W $id] insert end "text" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id                   ;# swap with enc utf-8
+    els::switch_to $id
+    els::save_with cp1252 0                   ;# metadata-only change
+    els::swap_flush_doc $id                   ;# must rewrite despite same content
+    dict get [els::swap_read [els::swap_path [els::session_id] $id]] enc
+} -result cp1252
+
+test scan-keys-2.1 {one incomplete (validly framed) swap doesn't abort recovery for the batch} -setup recover_reset -body {
+    set d [dict create schema 1 sessionId host-i-dead docId d0]   ;# missing most keys
+    set payload [encoding convertto utf-8 $d]
+    raw_write [file join [els::swap_dir] swp-host-i-dead-d0.swp] \
+        "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+    forge_lock "host-i-dead" 0
+    forge_swap "host-g-dead" d0 "good body" "" "" ; forge_lock "host-g-dead" 0
+    set plans [els::recover_scan]
+    set sids {} ; foreach p $plans { lappend sids [dict get [lindex $p 1] sessionId] }
+    list [llength $::els_test_bgerrors] $sids
+} -result {0 host-g-dead}
+
+test scan-clean-2.1 {a clean-doc swap whose file is unchanged is reclaimed, not offered} -setup recover_reset -body {
+    set p [file join $::ELS_TMP sc.txt] ; raw_write $p "same\n"
+    set d [dict create schema 1 sessionId host-c2-dead docId d0 path $p enc utf-8 \
+               bom 0 eol lf cursor 1.0 dirty 0 savedSig [els::file_sig $p] \
+               mtime [clock seconds] host forged bodyCrc 0 text "same\n"]
+    set payload [encoding convertto utf-8 $d]
+    set f [file join [els::swap_dir] swp-host-c2-dead-d0.swp]
+    raw_write $f "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+    forge_lock "host-c2-dead" 0
+    set plans [els::recover_scan]
+    list [llength $plans] [file exists $f]
+} -result {0 0}
+
+test claims-2.1 {released claim markers let the next scan re-offer deferred swaps} -setup recover_reset -body {
+    forge_swap "host-l-dead" d0 "deferred" "" "" ; forge_lock "host-l-dead" 0
+    set n1 [llength [els::recover_scan]]      ;# claims host-l-dead
+    set marker [file join [els::swap_dir] host-l-dead.claimed]
+    set m1 [file exists $marker]
+    set n2 [llength [els::recover_scan]]      ;# still claimed -> withheld
+    els::recover_release_claims               ;# the "Later" path
+    set m2 [file exists $marker]
+    set n3 [llength [els::recover_scan]]      ;# re-claims -> re-offered
+    list $n1 $m1 $n2 $m2 $n3
+} -result {1 1 0 0 1}
+
 test swap-surrogate-1.1 {an unpaired surrogate in the buffer does not kill autosave} -setup recover_reset -body {
     set id [els::new_doc]
     [els::W $id] insert end "abc\uD800def"     ;# Tk holds it; strict convertto would throw
@@ -310,8 +390,9 @@ test review-bufsig-1.1 {a length-changing edit above the sig cap is caught witho
     expr {$sig1 ne $sig2}
 } -result 1
 
-test review-swaptouch-1.1 {swap_touch latches dirtySince for the active doc (the Replace fix)} -setup recover_reset -body {
+test review-swaptouch-1.1 {swap_touch latches dirtySince for a DIRTY active doc (the Replace fix)} -setup recover_reset -body {
     set id [els::new_doc] ; els::switch_to $id
+    [els::W $id] insert end "edited"          ;# Replace always edits before touching
     unset -nocomplain ::els::dirtySince($id)
     els::swap_touch
     info exists ::els::dirtySince($id)

@@ -126,12 +126,16 @@ proc els_reset {} {
         array set ::els::$a {}
     }
     # Crash-recovery subsystem: cancel any pending timers and reset all state so a
-    # stray swap `after` can't fire into the next test.
+    # stray swap `after` can't fire into the next test.  swap_enabled/swap_test_mtime
+    # must be restored here too — recover.test enables them per-test, and a leak
+    # leaves autosave running for every later test FILE (timing flakiness).
     catch {els::swap_stop}
+    set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
     set ::els::session_id_cached "" ; set ::els::session_token_cached ""
     set ::els::lock_handle "" ; set ::els::lock_chan ""
     set ::els::last_recover 0 ; set ::els::recover_auto 0
+    set ::els::recover_claims {}
     set ::els::show_ws 0 ; set ::els::word_wrap 0
     set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}
     set ::els::restore_session 1

@@ -51,6 +51,7 @@ namespace eval els {
     variable lock_chan   ""         ;# pure-Tcl fallback: a held channel ("" = none)
     variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
     variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
+    variable recover_claims {}      ;# .claimed markers created by THIS session's scan
     variable swapSig    ; array set swapSig    {}  ;# id -> last-written buffer sig "chars:crc"
     variable savedSig   ; array set savedSig   {}  ;# id -> on-disk file sig "size:mtime:crc" ("" untitled)
     variable dirtySince ; array set dirtySince {}  ;# id -> 1 if edited since last successful swap
@@ -1474,7 +1475,10 @@ proc els::on_modified {w} {
     if {[$w edit modified]} {
         set ::els::dirtySince($id) 1                          ;# 0->1 dirty latch
     } else {
-        unset -nocomplain ::els::dirtySince($id)             ;# undo-to-clean clears it
+        # back to the saved state (undo-to-clean, save, reopen): there is
+        # nothing to protect any more — drop the latch AND the swap file, so a
+        # crash cannot re-offer content the user already discarded or saved
+        els::swap_clear $id
     }
     els::swap_flush_soon                                      ;# debounced; never writes inline
     els::update_tab $id
@@ -1956,6 +1960,7 @@ proc els::save_with {enc bom} {
     set ::els::docEnc($id) $enc
     set ::els::docBom($id) $bom
     [els::W $id] edit modified 1
+    els::swap_meta_touch $id       ;# the swap must carry the new encoding
     els::update_tab $id
     els::settitle
 }
@@ -1975,6 +1980,7 @@ proc els::set_eol {v} {
     if {$id eq "" || $::els::docEol($id) eq $v} return
     set ::els::docEol($id) $v
     [els::W $id] edit modified 1   ;# make the change saveable
+    els::swap_meta_touch $id       ;# the swap must carry the new EOL
     els::update_tab $id
     els::settitle
 }
@@ -2226,6 +2232,12 @@ proc els::swap_read {file} {
         if {[zlib crc32 $payload] != $declcrc} { error bad }
         set d [encoding convertfrom utf-8 $payload]
         if {![dict exists $d schema] || [dict get $d schema] != 1} { error bad }
+        # all keys the recovery path consumes must be present: ONE incomplete
+        # (yet validly framed) swap must not throw mid-scan and silently abort
+        # recovery for the whole batch
+        foreach k {sessionId docId path enc bom eol dirty savedSig mtime text} {
+            if {![dict exists $d $k]} { error bad }
+        }
     }]} { return "" }
     return $d
 }
@@ -2308,12 +2320,17 @@ proc els::swap_flush_doc {id} {
     if {[els::swap_dir] eq ""} { return 0 }
     if {![winfo exists [els::W $id]]} { return 0 }
     if {[info exists ::els::loading($id)]} { return 0 }
-    if {![els::doc_dirty $id] && ![info exists ::els::dirtySince($id)]} { return 0 }
+    if {![els::doc_dirty $id]} { return 0 }   ;# clean doc: nothing to protect
     if {[els::pristine $id]} { return 0 }
     set done 0
     catch {
         set sig [els::buf_sig $id]
-        if {![info exists ::els::swapSig($id)] || $sig ne $::els::swapSig($id)} {
+        if {[info exists ::els::swapSig($id)] && $sig eq $::els::swapSig($id)} {
+            # content verified unchanged since the last swap: drop the latch so
+            # an idle large doc returns to the cheap cached-sig path (else every
+            # cursor movement would keep re-paying the O(n) crc per tick)
+            unset -nocomplain ::els::dirtySince($id)
+        } else {
             set sid [els::session_id]
             set bytes [els::swap_serialize $id $sid]
             if {[els::write_atomic [els::swap_path $sid $id] $bytes ".swp-$sid-$id.tmp"] eq ""} {
@@ -2326,8 +2343,21 @@ proc els::swap_flush_doc {id} {
     return $done
 }
 proc els::swap_flush_all {} { foreach id $::els::docs { els::swap_flush_doc $id } }
+# A doc's encoding/EOL metadata changed without a content edit: force the next
+# autosave pass to rewrite the swap.  buf_sig is content-only, so an already-
+# current swap would otherwise keep the OLD metadata and crash recovery would
+# silently revert the user's explicit encoding/EOL choice.
+proc els::swap_meta_touch {id} {
+    unset -nocomplain ::els::swapSig($id)
+    set ::els::dirtySince($id) 1
+    els::swap_flush_soon
+}
 proc els::swap_clear {id} {
-    catch {file delete -force [els::swap_path [els::session_id] $id]}
+    # guard the delete: with no swap dir, swap_path degrades to a RELATIVE name
+    # and the delete would aim at the current working directory
+    if {[els::swap_dir] ne ""} {
+        catch {file delete -force [els::swap_path [els::session_id] $id]}
+    }
     unset -nocomplain ::els::swapSig($id) ::els::dirtySince($id)
 }
 
@@ -2350,7 +2380,14 @@ proc els::swap_flush_soon {} {
 # <<Modified>>) keeps re-arming dirtySince + the debounce, coalescing to one
 # write ~swap_debounce after typing pauses.
 proc els::swap_touch {} {
-    if {$::els::active ne ""} { set ::els::dirtySince($::els::active) 1 }
+    # Latch only a doc that actually has unsaved changes: plain <KeyRelease>
+    # also fires for arrow keys / PgUp / the Ctrl+S release itself, and latching
+    # a CLEAN doc wrote swap files for it — after a crash, the recovery dialog
+    # then offered bogus "unsaved changes" for every file merely navigated
+    # (worst case resurrecting pre-crash bytes over a newer external edit).
+    set id $::els::active
+    if {$id eq "" || ![els::doc_dirty $id]} { return }
+    set ::els::dirtySince($id) 1
     els::swap_flush_soon
 }
 proc els::swap_start {} {
@@ -2380,7 +2417,13 @@ proc els::lock_acquire {} {
         close $fh
     }
     if {[llength [info commands ::els::win_lock_file]]} {
-        if {[els::win_lock_file [file nativename $lp]] eq ""} { set ::els::lock_handle 1 }
+        if {[els::win_lock_file [file nativename $lp]] eq ""} {
+            set ::els::lock_handle 1
+        } else {
+            # native lock failed (AV interference, exotic FS): hold the channel
+            # anyway so mtime-fallback peers still see this session as alive
+            catch {set ::els::lock_chan [::open $lp {RDWR}]}
+        }
     } else {
         catch {set ::els::lock_chan [::open $lp {RDWR}]}
     }
@@ -2456,11 +2499,39 @@ proc els::recover_scan {} {
     foreach pair [els::swap_scan_orphans] {
         lassign $pair f rec
         set sid [dict get $rec sessionId]
-        if {![dict exists $claimed $sid]} { dict set claimed $sid [els::orphan_claim $sid] }
+        if {![dict exists $claimed $sid]} {
+            set got [els::orphan_claim $sid]
+            dict set claimed $sid $got
+            if {$got} {
+                # remember the marker so "Later" / quit can release it — else
+                # the next launch within STALE_SECS finds the orphan already
+                # claimed and silently withholds the recovery offer
+                lappend ::els::recover_claims [file join [els::swap_dir] "$sid.claimed"]
+            }
+        }
         if {![dict get $claimed $sid]} continue
-        lappend out [list $f $rec [els::recover_reconcile $rec]]
+        set branch [els::recover_reconcile $rec]
+        # a swap recorded for a CLEAN doc whose file is unchanged on disk has
+        # nothing to recover (pre-fix sessions wrote those for merely-navigated
+        # files): reclaim it instead of offering a bogus recovery
+        if {![dict get $rec dirty] && $branch eq "match"} {
+            catch {file delete -force $f}
+            continue
+        }
+        lappend out [list $f $rec $branch]
     }
     return $out
+}
+# Release the orphan-claim markers created by THIS session's scan.  Without
+# this, "Later" (or quitting with the dialog open) hid the deferred recovery
+# from any relaunch within STALE_SECS.
+proc els::recover_release_claims {} {
+    foreach c $::els::recover_claims { catch {file delete -force $c} }
+    set ::els::recover_claims {}
+}
+proc els::recover_dialog_close {top} {
+    els::recover_release_claims
+    catch {destroy $top}
 }
 
 # ---- litter sweep + teardown ---------------------------------------------
@@ -2506,7 +2577,9 @@ proc els::swap_shutdown {} {
     catch {foreach id $::els::docs { els::swap_clear $id }}
     catch {els::lock_release}
     catch {file delete -force [els::lock_path]}
-    catch {file delete -force [file join [els::swap_dir] "[els::session_id].claimed"]}
+    # markers are named after the ORPHAN session we claimed, never our own id —
+    # release the tracked ones so deferred recovery survives a clean quit
+    catch {els::recover_release_claims}
 }
 
 # ---- recovery: load into a DIRTY buffer (never auto-write) ----------------
@@ -2602,6 +2675,7 @@ proc els::recover_offer {records} {
     if {![llength $records]} return
     if {$::els::recover_auto || [info exists ::env(ELS_RECOVER_AUTO)]} {
         foreach p $records { catch {els::recover_apply $p recover} }
+        els::recover_release_claims
         return
     }
     set top .recover
@@ -2639,11 +2713,12 @@ proc els::recover_offer {records} {
     grid $bf -row 3 -column 0 -sticky e
     ttk::button $bf.rec -text "Recover checked" -command [list els::recover_dialog_apply $top recover]
     ttk::button $bf.dis -text "Discard checked" -command [list els::recover_dialog_apply $top discard]
-    ttk::button $bf.cancel -text "Later" -command [list destroy $top]
+    ttk::button $bf.cancel -text "Later" -command [list els::recover_dialog_close $top]
     grid $bf.rec -row 0 -column 0 -padx {0 6}
     grid $bf.dis -row 0 -column 1 -padx {0 6}
     grid $bf.cancel -row 0 -column 2
-    bind $top <Escape> [list destroy $top]
+    bind $top <Escape> [list els::recover_dialog_close $top]
+    wm protocol $top WM_DELETE_WINDOW [list els::recover_dialog_close $top]
     update idletasks
     set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
     set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
@@ -2658,7 +2733,9 @@ proc els::recover_dialog_apply {top decision} {
         if {$decision eq "discard" && !$chk} continue
         els::recover_apply [dict get $::els::_recover_pick $r] $decision
     }
-    catch {destroy $top}
+    # releasing the claim markers lets the next launch re-offer any swaps that
+    # were left unchecked (it re-claims them then)
+    els::recover_dialog_close $top
 }
 proc els::save {} {
     variable active
