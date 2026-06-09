@@ -124,6 +124,8 @@ namespace eval els {
     variable cfg_radio appdata   ;# first-run location dialog selection
     variable gutter_px -1        ;# last-set gutter canvas width (px); -1 = unset
     variable gutter_after ""     ;# coalesced gutter-redraw after token
+    variable refresh_after ""    ;# coalesced full-view refresh (resize bursts)
+    variable tp_zoom_acc 0       ;# accumulated Ctrl+touchpad zoom delta
     variable recent_row_tip -1   ;# recent-list row whose hover tip is active
     variable boot_script ""      ;# path of this file at source time (see below)
 }
@@ -1134,9 +1136,11 @@ proc els::build {} {
     bind elsText <KeyRelease>    {els::refresh_view}
     bind elsText <ButtonRelease> {els::refresh_view}
     bind elsText <FocusIn>       {els::refresh_view}
-    bind elsText <<Paste>>       {after idle els::refresh_view}
-    bind elsText <<Cut>>         {after idle els::refresh_view}
-    bind elsText <Configure>     {after idle els::refresh_view}
+    bind elsText <<Paste>>       {els::refresh_schedule}
+    bind elsText <<Cut>>         {els::refresh_schedule}
+    # coalesced: an interactive resize delivers a continuous Configure stream,
+    # and a bare `after idle` per event ran N full repaints per idle batch
+    bind elsText <Configure>     {els::refresh_schedule}
     # autosave: re-arm the swap debounce on real edits (<<Modified>> only flips on
     # the 0->1 transition, so a sustained typing burst would otherwise miss it)
     bind elsText <KeyRelease>    {+els::swap_touch}
@@ -1161,6 +1165,7 @@ proc els::build {} {
     bind elsText <Control-minus>      { els::zoom -1;    break }
     bind elsText <Control-Key-0>      { els::zoom_reset; break }
     bind elsText <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
+    bind elsText <Control-TouchpadScroll> { els::zoom_touchpad %D; break }
     bind elsText <Shift-MouseWheel>   { els::hwheel %D; break }
     bind elsText <Key-F3>             { els::find_step 1;  break }
     bind elsText <Shift-Key-F3>       { els::find_step -1; break }
@@ -1189,6 +1194,7 @@ proc els::build {} {
     bind . <Control-minus>      { els::zoom -1;    break }
     bind . <Control-Key-0>      { els::zoom_reset; break }
     bind . <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
+    bind . <Control-TouchpadScroll> { els::zoom_touchpad %D; break }
     bind . <Key-F3>             { els::find_step 1;  break }
     bind . <Shift-Key-F3>       { els::find_step -1; break }
 
@@ -1196,6 +1202,11 @@ proc els::build {} {
     bind .ln <MouseWheel> { els::wheel %D; break }
     bind .ln <Shift-MouseWheel> { els::hwheel %D; break }
     bind .ln <Control-MouseWheel> { els::zoom [expr {%D > 0 ? 1 : -1}]; break }
+    # precision touchpads arrive as <TouchpadScroll>, not <MouseWheel>: the Text
+    # class handles it, a bare canvas does not — without these the gutter was
+    # dead to touchpad scrolling and Ctrl+touchpad scrolled instead of zooming
+    bind .ln <TouchpadScroll>         { els::touchpad_scroll %D; break }
+    bind .ln <Control-TouchpadScroll> { els::zoom_touchpad %D; break }
     bind .ln <Button-4>   { els::scroll scroll -3 units; break }
     bind .ln <Button-5>   { els::scroll scroll  3 units; break }
 
@@ -1492,8 +1503,23 @@ proc els::status_link_leave {w} {
 }
 
 # ---- Edit-menu actions, routed to the active document -------------------
-proc els::menu_undo {}    { set w [els::T] ; if {$w ne ""} { catch {$w edit undo} } }
-proc els::menu_redo {}    { set w [els::T] ; if {$w ne ""} { catch {$w edit redo} } }
+# A mouse-driven Edit menu undo/redo produces no key event on the text widget
+# (and <<Modified>> only fires on flag transitions), so the view must be
+# refreshed — and the autosave latched — explicitly, like other button edits.
+proc els::menu_undo {} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    catch {$w edit undo}
+    els::swap_touch
+    els::refresh_schedule
+}
+proc els::menu_redo {} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    catch {$w edit redo}
+    els::swap_touch
+    els::refresh_schedule
+}
 proc els::menu_event {ev} { set w [els::T] ; if {$w ne ""} { event generate $w $ev } }
 proc els::on_modified {w} {
     variable active
@@ -1532,7 +1558,9 @@ proc els::update_current_line {} {
     if {$w eq ""} { return }
     set line [lindex [split [$w index insert] .] 0]
     $w tag remove currentLine 1.0 end
-    if {[$w get 1.0 "end - 1 char"] ne ""} {
+    # emptiness via index compare, never `$w get 1.0 end-1c`: materializing the
+    # whole buffer here made every keystroke O(document size)
+    if {[$w compare "end - 1 char" != 1.0]} {
         $w tag add currentLine "$line.0" "$line.end + 1 char"
     }
     # the gutter's matching current-line band is drawn by els::draw_gutter
@@ -1559,20 +1587,36 @@ proc els::draw_gutter {} {
     }
     set h [winfo height $w]
     if {$h <= 1} { return }   ;# not realized yet — a later refresh will draw it
-    set gw [winfo width .ln]
+    # use the REQUESTED width: `winfo width` still reports the old realized
+    # width until the geometry pass runs, so after a digit-count change the
+    # numbers would right-align (and the band would size) against the old edge
+    # for one visible frame
+    set gw $::els::gutter_px
     set right [expr {$gw - 6}]
     set ascent [font metrics elsMono -ascent]
     set first [lindex [split [$w index @0,0] .] 0]
     set last  [lindex [split [$w index "@0,$h"] .] 0]
     set cur   [lindex [split [$w index insert] .] 0]
-    set hasText [expr {[$w get 1.0 "end - 1 char"] ne ""}]
+    # emptiness via index compare (a full `$w get` is O(document size))
+    set hasText [$w compare "end - 1 char" != 1.0]
+    # the current line's band must cover the line's FULL visible extent: with
+    # word wrap a line spans several display rows (the text wash covers all of
+    # them), and when its first row is scrolled off the top, dlineinfo "$cur.0"
+    # is empty — wash the visible continuation rows from the canvas top.
+    if {$hasText && $cur == $first && [$w dlineinfo "$cur.0"] eq ""} {
+        set nx [$w dlineinfo "$cur.0 + 1 line linestart"]
+        if {$nx ne ""} { set bot [lindex $nx 1] } else { set bot $h }
+        .ln create rectangle 0 0 $gw $bot -fill $::els::LINE -outline ""
+    }
     for {set ln $first} {$ln <= $last} {incr ln} {
         set di [$w dlineinfo "$ln.0"]
         if {$di eq ""} { continue }   ;# this line's first row is scrolled off
         lassign $di dx dy dw dh dbase
         if {$hasText && $ln == $cur} {
-            .ln create rectangle 0 $dy $gw [expr {$dy + $dh}] \
-                -fill $::els::LINE -outline ""
+            set nx [$w dlineinfo "$ln.0 + 1 line linestart"]
+            if {$nx ne ""} { set bot [lindex $nx 1] } else { set bot $h }
+            if {$bot < $dy + $dh} { set bot [expr {$dy + $dh}] }
+            .ln create rectangle 0 $dy $gw $bot -fill $::els::LINE -outline ""
         }
         # anchor ne at (right, baseline-ascent) puts the number's baseline on the
         # text row's baseline and its right edge at the gutter's right margin
@@ -1616,6 +1660,10 @@ proc els::update_vscroll {} {
     variable vs_shown
     if {$active eq "" || ![winfo exists [els::W $active]]} { return }
     lassign [[els::W $active] yview] first last
+    # re-feed the shared bar from the live view: re-gridding a widget with an
+    # unchanged view does not re-fire -yscrollcommand, so after a tab switch
+    # the thumb still showed the PREVIOUS tab's position
+    .vs set $first $last
     set need [expr {$first > 0.0001 || $last < 0.9999}]
     if {$need != $vs_shown} {
         set vs_shown $need
@@ -1631,8 +1679,31 @@ proc els::scroll {args} {
 proc els::wheel {delta} {
     set w [els::T]
     if {$w eq ""} { return }
-    $w yview scroll [expr {-$delta / 120}] units
+    # float division like Tk's own tk::MouseWheel: integer / floors toward
+    # -inf, so +40 scrolled one unit while -40 scrolled none (asymmetric for
+    # any delta that isn't a multiple of 120)
+    $w yview scroll [expr {-$delta / 120.0}] units
     els::sync_scroll
+}
+# Precision-touchpad scrolling (Tk 9 delivers it as <TouchpadScroll>, which the
+# Text class handles but a bare canvas does not) — used by the gutter.
+proc els::touchpad_scroll {D} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    lassign [tk::PreciseScrollDeltas $D] dx dy
+    if {$dy != 0} { $w yview scroll [expr {-$dy}] pixels ; els::sync_scroll }
+    if {$dx != 0} { $w xview scroll [expr {-$dx}] pixels }
+}
+# Ctrl+touchpad-scroll = zoom (matching Ctrl+MouseWheel): without these
+# bindings the gesture fell through to the plain TouchpadScroll handler and
+# scrolled instead.  Deltas accumulate so the high event rate zooms smoothly.
+proc els::zoom_touchpad {D} {
+    lassign [tk::PreciseScrollDeltas $D] dx dy
+    if {$dy == 0} { return }
+    set a [expr {$::els::tp_zoom_acc + $dy}]
+    while {$a >= 60}  { els::zoom 1  ; set a [expr {$a - 60}] }
+    while {$a <= -60} { els::zoom -1 ; set a [expr {$a + 60}] }
+    set ::els::tp_zoom_acc $a
 }
 # ---- horizontal scrolling (active only when word wrap is off) -----------
 # The text widget fires -xscrollcommand only on a view *change*; the show/hide
@@ -1645,6 +1716,13 @@ proc els::xscroll {id first last} {
     .hs set $first $last
     after cancel $hs_after
     set hs_after [after idle els::update_hscroll]
+    # whitespace tints are viewport-scoped: a horizontal pan changes what is
+    # visible too, and without this the top row's left-of-viewport whitespace
+    # stayed untinted after panning back (only yscroll re-tagged)
+    if {$::els::show_ws} {
+        after cancel $::els::ws_after
+        set ::els::ws_after [after idle els::ws_refresh]
+    }
 }
 # Show the horizontal bar only when wrap is off AND a line runs past the window
 # edge.  Under word wrap nothing scrolls sideways (xview is {0 1}), so the bar
@@ -1657,6 +1735,7 @@ proc els::update_hscroll {} {
         set need 0
     } else {
         lassign [[els::W $active] xview] first last
+        .hs set $first $last   ;# re-feed after a tab switch (same as update_vscroll)
         set need [expr {$first > 0.0001 || $last < 0.9999}]
     }
     if {$need != $hs_shown} {
@@ -1672,7 +1751,7 @@ proc els::hscroll {args} {
 proc els::hwheel {delta} {
     set w [els::T]
     if {$w eq ""} { return }
-    $w xview scroll [expr {-$delta / 120}] units
+    $w xview scroll [expr {-$delta / 120.0}] units
 }
 proc els::refresh_view {} {
     if {[els::T] eq ""} { return }
@@ -1682,6 +1761,14 @@ proc els::refresh_view {} {
     els::update_vscroll
     els::update_hscroll
     if {$::els::show_ws} { els::ws_refresh }
+}
+# Coalesce deferred full refreshes (like gutter_schedule): a resize delivers a
+# continuous <Configure> stream, and one queued refresh per event multiplied
+# the whole repaint several-fold per frame.
+proc els::refresh_schedule {} {
+    variable refresh_after
+    after cancel $refresh_after
+    set refresh_after [after idle els::refresh_view]
 }
 
 # ---- encoding / EOL -----------------------------------------------------
@@ -3150,7 +3237,15 @@ proc els::build_findbar {} {
 proc els::tooltip {w text} {
     bind $w <Enter>      [list els::tip_schedule $w $text]
     bind $w <Leave>      els::tip_cancel
-    bind $w <ButtonPress> els::tip_cancel
+    # per-button (not generic <ButtonPress>) + APPEND: a widget's own specific
+    # <Button-1> binding (e.g. a tab's switch_to) shadows a generic one, so a
+    # click never dismissed the tip; appending composes with existing handlers
+    bind $w <ButtonPress-1> {+els::tip_cancel}
+    bind $w <ButtonPress-2> {+els::tip_cancel}
+    bind $w <ButtonPress-3> {+els::tip_cancel}
+    # the anchor dying must take its pending timer AND a visible tip with it —
+    # otherwise an orphan -topmost .tip floats over the desktop indefinitely
+    bind $w <Destroy> {+els::tip_cancel}
 }
 proc els::tip_schedule {w text} {
     els::tip_cancel
@@ -3228,10 +3323,15 @@ proc els::tip_pop_at {text rx ry} {
     pack .tip.l
     update idletasks
     set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
-    set sw [winfo screenwidth .tip] ; set sh [winfo screenheight .tip]
+    # clamp against the VIRTUAL desktop (wm maxsize tracks it), not winfo
+    # screenwidth/-height, which report only the PRIMARY monitor on Windows —
+    # the old clamp teleported the tip from a secondary monitor to the primary's
+    # edge.  No max(...,0) snap either: monitors left/above the primary have
+    # legitimately negative root coordinates.
+    lassign [wm maxsize .tip] sw sh
     if {$rx + $tw > $sw - 4} { set rx [expr {$sw - $tw - 4}] }
     if {$ry + $th > $sh - 4} { set ry [expr {$ry - $th - 22}] }
-    wm geometry .tip +[expr {max($rx,0)}]+[expr {max($ry,0)}]
+    wm geometry .tip +$rx+$ry
 }
 # A dynamic tooltip: `textcmd` is evaluated each time the tip is about to show,
 # so it tracks live state; an empty result suppresses the tip (e.g. a status
@@ -3239,7 +3339,11 @@ proc els::tip_pop_at {text rx ry} {
 proc els::tooltip_for {w textcmd {delay 550}} {
     bind $w <Enter>       [list els::tip_schedule_cmd $w $textcmd $delay]
     bind $w <Leave>       els::tip_cancel
-    bind $w <ButtonPress> els::tip_cancel
+    # see els::tooltip: per-button appends (shadowing) + a Destroy hook (orphans)
+    bind $w <ButtonPress-1> {+els::tip_cancel}
+    bind $w <ButtonPress-2> {+els::tip_cancel}
+    bind $w <ButtonPress-3> {+els::tip_cancel}
+    bind $w <Destroy> {+els::tip_cancel}
 }
 proc els::tip_schedule_cmd {w textcmd {delay 550}} {
     els::tip_cancel
@@ -3652,7 +3756,10 @@ proc els::ws_refresh {} {
     $w tag remove wsTab   1.0 end
     $w tag remove wsTrail 1.0 end
     if {!$::els::show_ws} { return }
-    set top [$w index @0,0]
+    # linestart: with wrap off and the view scrolled right, @0,0 is a MID-LINE
+    # index, and tagging from there left the top row's left-of-viewport
+    # whitespace untinted after panning back to column 0
+    set top [$w index "@0,0 linestart"]
     set bot [$w index "@0,[winfo height $w] + 1 line"]
     # spaces -> grey; tabs -> blue; any trailing space OR a run of 2+ spaces ->
     # mauve (flags trailing and accidental double-spaces, overriding the grey).
