@@ -243,6 +243,16 @@ test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies
 
 # ===== sweep: stale temp/claim litter from dead sessions ===================
 
+test swap-surrogate-1.1 {an unpaired surrogate in the buffer does not kill autosave} -setup recover_reset -body {
+    set id [els::new_doc]
+    [els::W $id] insert end "abc\uD800def"     ;# Tk holds it; strict convertto would throw
+    set ::els::dirtySince($id) 1
+    set rc [els::swap_flush_doc $id]
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    list $rc [expr {$rec ne ""}] \
+        [string match "abc?def" [dict get $rec text]] [llength $::els_test_bgerrors]
+} -result {1 1 1 0}
+
 test sweep-1.1 {swap_sweep removes stale .swp temp + claim litter, keeps fresh} -setup recover_reset -body {
     set d [els::swap_dir]
     raw_write [file join $d .swp-old-d0.tmp] "x" ; file mtime [file join $d .swp-old-d0.tmp] [expr {[clock seconds]-9999}]

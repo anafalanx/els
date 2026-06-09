@@ -67,8 +67,10 @@ namespace eval els {
     variable ENC_CURATED {
         "UTF-8"                       utf-8      0
         "UTF-8 with BOM"              utf-8      1
-        "UTF-16 LE"                   utf-16le   1
-        "UTF-16 BE"                   utf-16be   1
+        "UTF-16 LE"                   utf-16le   0
+        "UTF-16 LE with BOM"          utf-16le   1
+        "UTF-16 BE"                   utf-16be   0
+        "UTF-16 BE with BOM"          utf-16be   1
         "-" - -
         "Windows-1252 (Western)"      cp1252     0
         "ISO-8859-1 (Latin-1)"        iso8859-1  0
@@ -1740,7 +1742,18 @@ proc els::detect_encoding {raw} {
     # 1. BOM sniff — UTF-32 before UTF-16 (the UTF-32 LE BOM begins FF FE too).
     if {[string range $raw 0 3] eq "\x00\x00\xFE\xFF"} { return {utf-32be 1} }
     if {[string range $raw 0 3] eq "\xFF\xFE\x00\x00"} { return {utf-32le 1} }
-    if {[string range $raw 0 2] eq "\xEF\xBB\xBF"}     { return {utf-8 1} }
+    if {[string range $raw 0 2] eq "\xEF\xBB\xBF"} {
+        # Trust the UTF-8 BOM only when the payload really is valid UTF-8: a
+        # Windows tool prepending a BOM to legacy (cp1252...) content is common,
+        # and decoding that payload as utf-8 -profile replace would destroy
+        # every non-UTF-8 byte (U+FFFD -> EF BF BD on save).  On invalid payload
+        # fall through to detection over the WHOLE raw (BOM bytes stay content,
+        # which round-trips losslessly).
+        if {![catch {encoding convertfrom -profile strict utf-8 \
+                         [string range $raw 3 end]}]} {
+            return {utf-8 1}
+        }
+    }
     if {[string range $raw 0 1] eq "\xFF\xFE"}         { return {utf-16le 1} }
     if {[string range $raw 0 1] eq "\xFE\xFF"}         { return {utf-16be 1} }
     set sample [string range $raw 0 4095]
@@ -1763,26 +1776,59 @@ proc els::detect_encoding {raw} {
         if {[llength $d] == 2} {
             lassign $d icu conf
             set enc [els::icu_to_tcl $icu]
+            # never accept a utf-8 verdict for bytes that are NOT valid UTF-8:
+            # ICU trusts a BOM even when the payload is legacy bytes
+            if {$enc eq "utf-8" && !$utf8_ok} { set enc "" }
+            if {$enc eq "cp1252"} { set enc [els::cp1252_or_latin1 $raw] }
             if {$enc ne "" && $conf >= $::els::DETECT_MIN} { return [list $enc 0] }
         }
     }
     # 5. UTF-8 fallback when the bytes are strictly valid and ICU had no better
-    #    answer.  Otherwise use Windows Western — a safe 8-bit fallback.
+    #    answer.  Otherwise Windows Western — demoted to Latin-1 when the bytes
+    #    include code points cp1252 cannot round-trip.
     if {$utf8_ok} { return {utf-8 0} }
-    return {cp1252 0}
+    return [list [els::cp1252_or_latin1 $raw] 0]
+}
+# cp1252 leaves 0x81 0x8D 0x8F 0x90 0x9D undefined: Tcl 9 decodes them to
+# U+FFFD and save re-encodes that as "?" — silent byte destruction.  When any
+# of those bytes is present, use iso8859-1 instead: it maps all 256 bytes, so
+# the file round-trips losslessly.
+proc els::cp1252_or_latin1 {raw} {
+    if {[regexp {[\x81\x8D\x8F\x90\x9D]} $raw]} { return iso8859-1 }
+    return cp1252
 }
 proc els::decode {raw enc bom} {
     if {$bom} {
-        set skip 2
-        if {$enc eq "utf-8"} { set skip 3 } elseif {[string match utf-32* $enc]} { set skip 4 }
-        set raw [string range $raw $skip end]
+        # Strip the BOM only when those bytes are actually present: the curated
+        # picker can assert bom=1 ("UTF-8 with BOM") on a file that has none,
+        # and a blind byte-count skip would eat the first 2-4 CONTENT bytes —
+        # persisted by the next save.  (Reopening a BOM-less file as a
+        # with-BOM encoding now means "add the BOM on save", losing nothing.)
+        switch -- $enc {
+            utf-8    { set bomb "\xEF\xBB\xBF" }
+            utf-16le { set bomb "\xFF\xFE" }
+            utf-16be { set bomb "\xFE\xFF" }
+            utf-32le { set bomb "\xFF\xFE\x00\x00" }
+            utf-32be { set bomb "\x00\x00\xFE\xFF" }
+            default  { set bomb "" }
+        }
+        set skip [string length $bomb]
+        if {$bomb ne "" && [string range $raw 0 [expr {$skip - 1}]] eq $bomb} {
+            set raw [string range $raw $skip end]
+        }
     }
     return [encoding convertfrom -profile replace $enc $raw]
 }
 proc els::detect_eol {text} {
-    if {[string first "\r\n" $text] >= 0} { return crlf }
-    if {[string first "\n"   $text] >= 0} { return lf }
-    if {[string first "\r"   $text] >= 0} { return cr }
+    # Pick the DOMINANT ending, not the first one seen: first-match priority
+    # classified a mostly-LF file with one stray CRLF as crlf, so a save
+    # rewrote every line ending in the file.  Ties keep crlf > lf > cr.
+    set crlf [regexp -all {\r\n} $text]
+    set cr   [expr {[regexp -all {\r} $text] - $crlf}]
+    set lf   [expr {[regexp -all {\n} $text] - $crlf}]
+    if {$crlf > 0 && $crlf >= $lf && $crlf >= $cr} { return crlf }
+    if {$lf > 0 && $lf >= $cr} { return lf }
+    if {$cr > 0} { return cr }
     return lf
 }
 proc els::enc_label {enc bom} {
@@ -2144,14 +2190,19 @@ proc els::swap_serialize {id sid} {
     # store the buffer as the internal (LF) string; encoding the whole dict to
     # UTF-8 once (below) is lossless and never goes through the doc's lossy enc.
     set text [$w get 1.0 "end - 1 char"]
+    # -profile replace on BOTH conversions: Tcl 9's default strict profile
+    # throws on an unpaired surrogate (which the Tk text widget happily holds,
+    # e.g. from a malformed clipboard paste) — and a throw here, swallowed by
+    # swap_flush_doc's catch, would silently kill crash protection for the doc.
     set d [dict create schema 1 sessionId $sid docId $id \
                path $::els::docPath($id) enc $::els::docEnc($id) \
                bom $::els::docBom($id) eol $::els::docEol($id) \
                cursor [$w index insert] dirty [els::doc_dirty $id] \
                savedSig [els::doc_saved_sig $id] mtime [clock seconds] \
-               host [els::host_tag] bodyCrc [zlib crc32 [encoding convertto utf-8 $text]] \
+               host [els::host_tag] \
+               bodyCrc [zlib crc32 [encoding convertto -profile replace utf-8 $text]] \
                text $text]
-    set payload [encoding convertto utf-8 $d]
+    set payload [encoding convertto -profile replace utf-8 $d]
     return "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
 }
 # Returns the validated dict, or "" on any corruption.  Never raises.  (No
@@ -2195,7 +2246,8 @@ proc els::buf_sig {id} {
             [lindex [split $::els::swapSig($id) :] 0] == $chars} {
         return $::els::swapSig($id)
     }
-    return "$chars:[zlib crc32 [encoding convertto utf-8 [$w get 1.0 "end - 1 char"]]]"
+    return "$chars:[zlib crc32 [encoding convertto -profile replace utf-8 \
+                                    [$w get 1.0 "end - 1 char"]]]"
 }
 # A signature of on-disk bytes "size:mtime:crc" (sampled crc above the cap), used
 # to reconcile a swap's baseline against the file at recovery time.

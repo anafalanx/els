@@ -8,6 +8,15 @@ test unit-eol-1 {CRLF wins when present} -body { els::detect_eol "a\r\nb\r\n" } 
 test unit-eol-2 {LF}                      -body { els::detect_eol "a\nb\n" }     -result lf
 test unit-eol-3 {lone CR}                 -body { els::detect_eol "a\rb\r" }     -result cr
 test unit-eol-4 {no newline defaults LF}  -body { els::detect_eol "abc" }        -result lf
+test unit-eol-5 {the DOMINANT ending wins: one stray CRLF in an LF file stays LF} -body {
+    els::detect_eol "one\ntwo\nthree\nfour\r\n"
+} -result lf
+test unit-eol-6 {majority CRLF with a stray LF stays CRLF} -body {
+    els::detect_eol "x\r\ny\r\nz\n"
+} -result crlf
+test unit-eol-7 {tie keeps the crlf > lf priority} -body {
+    els::detect_eol "a\r\nb\n"
+} -result crlf
 
 # ---- labels -------------------------------------------------------------
 test unit-enclabel-1 {plain utf-8}     -body { els::enc_label utf-8 0 }    -result {UTF-8}
