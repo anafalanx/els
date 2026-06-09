@@ -8,6 +8,10 @@ proc find_reset {} {
     set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
     set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::find_matches {} ; set ::els::find_current -1
+    set ::els::find_scan_doc "" ; set ::els::find_scan_chars -1
+    # the find procs are only live while the bar is shown; mirror that here
+    # (find_update/find_step deliberately no-op when find_mode is "")
+    set ::els::find_mode find
 }
 
 test find-1.1 {literal find is case-insensitive by default} -setup {find_reset} -body {
@@ -147,3 +151,90 @@ test find-2.3 {search history is capped at the 16 newest terms} -setup {find_res
     for {set i 1} {$i <= 20} {incr i} { els::find_history_push "term$i" }
     list [llength $::els::find_history] [lindex $::els::find_history 0] [lindex $::els::find_history end]
 } -result {16 term20 term5}
+
+# ---- bug-hunt wave 1: match bookkeeping regressions -----------------------
+
+test replall-3.1 {Replace All replaces EVERY adjacent match (Tk merges abutting tag ranges)} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "aaa"
+    set ::els::find_q a ; set ::els::find_r b
+    els::find_update ; els::find_replace_all
+    list [$w get 1.0 "end - 1 char"] $::els::find_count
+} -result {bbb {Replaced 3}}
+
+test replall-3.2 {Replace All on back-to-back multi-char matches} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "abab"
+    set ::els::find_q ab ; set ::els::find_r X
+    els::find_update ; els::find_replace_all
+    $w get 1.0 "end - 1 char"
+} -result {XX}
+
+test replall-3.3 {Replace All on adjacent regex matches replaces each one} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "abab"
+    set ::els::find_regex 1 ; set ::els::find_q {ab} ; set ::els::find_r X
+    els::find_update ; els::find_replace_all
+    $w get 1.0 "end - 1 char"
+} -result {XX}
+
+test trailnl-3.1 {the widget's virtual trailing newline is not searchable} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "abc"     ;# no whitespace anywhere in the doc
+    set ::els::find_regex 1
+    set ::els::find_q {\s}   ; els::find_update ; set a $::els::find_count
+    set ::els::find_q {c\s}  ; els::find_update ; set b $::els::find_count
+    list $a $b [$w get 1.0 "end - 1 char"]
+} -result {{No results} {No results} abc}
+
+test trailnl-3.2 {real interior whitespace still matches and replaces} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a b"
+    set ::els::find_regex 1 ; set ::els::find_q {\s} ; set ::els::find_r _
+    els::find_update ; set n $::els::find_count
+    els::find_replace_all
+    list $n [$w get 1.0 "end - 1 char"]
+} -result {{1 of 1} a_b}
+
+test stepstale-3.1 {find_step after a buffer edit re-scans instead of stepping on stale spans} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo bar foo baz foo"
+    set ::els::find_q foo ; els::find_update
+    $w insert 1.0 "XX"                        ;# shift every cached index by 2
+    els::find_step 1
+    lassign [$w tag ranges findOne] s e
+    $w get $s $e                              ;# must be a real match, not "r f"
+} -result {foo}
+
+test stepstale-3.2 {find_step after a same-length edit over the target re-scans} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo bar foo"
+    set ::els::find_q foo ; els::find_update      ;# current = match 0 at 1.0
+    $w replace 1.8 1.11 "qux"                      ;# kill match 1 without changing length
+    els::find_step 1                               ;# stale target -> re-scan
+    list $::els::find_count [$w get {*}[$w tag ranges findOne]]
+} -result {{1 of 1} foo}
+
+test hide-3.1 {find_hide cancels the pending debounce: no late re-tag / caret jump} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "alpha beta alpha"
+    $w mark set insert 1.14
+    set ::els::find_q alpha
+    els::find_schedule                             ;# debounce armed
+    els::find_hide
+    after 250 {set ::__hidewait 1} ; vwait ::__hidewait
+    list [llength [$w tag ranges findAll]] [llength $::els::find_matches] [$w index insert]
+} -result {0 0 1.14}
+
+test hide-3.2 {F3 with the bar hidden does not jump to stale coordinates} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "beta beta"
+    set ::els::find_q beta ; els::find_update      ;# caret now at match 0
+    els::find_hide
+    $w mark set insert 1.7
+    els::find_step 1                               ;# bar hidden: must be a no-op
+    list [llength [$w tag ranges findOne]] [$w index insert]
+} -result {0 1.7}
+
+test lookahead-3.1 {regex lookahead replaces the consumed text (not a silent no-op)} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foobar foox"
+    set ::els::find_regex 1 ; set ::els::find_q {foo(?=bar)} ; set ::els::find_r N
+    els::find_update ; els::find_replace_all
+    list [$w get 1.0 "end - 1 char"] $::els::find_count
+} -result {{Nbar foox} {Replaced 1}}
+
+test adaptcase-3.1 {adapt-case works for non-ASCII (Unicode) matches} \
+        -setup {find_reset ; set ::els::find_adapt 1} -body {
+    list [els::adapt_case ПРИВЕТ hello] [els::adapt_case привет HELLO] [els::adapt_case Привет hello]
+} -result {HELLO hello Hello}

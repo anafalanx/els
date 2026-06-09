@@ -104,6 +104,8 @@ namespace eval els {
     variable hs_shown -1         ;# horizontal scrollbar visibility (only when wrap off + long lines)
     variable hs_after ""         ;# pending (idle) horizontal scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
+    variable find_scan_doc ""    ;# doc id the cached matches were scanned in
+    variable find_scan_chars -1  ;# buffer char count at scan time (staleness probe)
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
     variable tab_tip_delay 1000  ;# tabs are crossed often; let their tips breathe
     variable recent {}           ;# recently-opened file paths, newest first
@@ -3179,8 +3181,18 @@ proc els::find_show {mode} {
 }
 
 proc els::find_hide {} {
-    variable find_mode
+    variable find_mode ; variable find_matches ; variable find_current
+    variable find_after
     set find_mode ""
+    # a pending debounced search would otherwise fire ~130 ms after dismissal,
+    # re-tagging the buffer and teleporting the caret to a match
+    after cancel $find_after
+    set find_after ""
+    # drop the cached spans: they are plain string indices that do not float
+    # with edits, and F3 on a hidden bar must never jump to (or replace) stale
+    # coordinates — possibly in a different document
+    set find_matches {}
+    set find_current -1
     grid remove .find
     set w [els::T]
     if {$w ne ""} {
@@ -3190,24 +3202,17 @@ proc els::find_hide {} {
     }
 }
 
-# re-run the search in the active doc, tag all matches, pick the current one
-proc els::find_update {} {
+# The search pattern + `search` args for the current query/options; "" when the
+# query is empty.  (NOT an expr ternary anywhere: expr canonicalizes operands
+# that look like numbers, so a query of "007" would silently become "7".)
+proc els::find_spec {} {
     variable find_q ; variable find_case ; variable find_word ; variable find_regex
-    variable find_matches ; variable find_count
-    set w [els::T]
-    if {$w eq ""} { return }
-    catch {.find.fr.help configure -state normal}
-    catch {.find.fr.help state !disabled}
-    $w tag remove findAll 1.0 end
-    $w tag remove findOne 1.0 end
-    set find_matches {}
-    if {$find_q eq ""} { set find_count "" ; return }
-
+    if {$find_q eq ""} { return "" }
     set useRegex $find_regex
     set pat $find_q
     if {$find_word} {
         set useRegex 1
-        set p [expr {$find_regex ? $find_q : [els::re_escape $find_q]}]
+        if {$find_regex} { set p $find_q } else { set p [els::re_escape $find_q] }
         # group the pattern so the word boundaries bind the WHOLE pattern, not
         # just the first/last alternative of an alternation like foo|bar
         set pat "\\m(?:$p)\\M"
@@ -3215,25 +3220,79 @@ proc els::find_update {} {
     set sargs {-all}
     if {$useRegex}   { lappend sargs -regexp }
     if {!$find_case} { lappend sargs -nocase }
+    return [list $pat $sargs]
+}
+# Search the buffer FRESH and return the valid {start end} pairs ("bad" for a
+# malformed pattern).  Centralised so find_update and Replace All can never
+# disagree — Replace All must NEVER walk `tag ranges findAll` instead: Tk merges
+# abutting ranges of one tag, so N adjacent matches would collapse into ONE
+# replacement, silently deleting text.
+proc els::find_scan {w} {
+    set spec [els::find_spec]
+    if {$spec eq ""} { return {} }
+    lassign $spec pat sargs
     if {[catch {set starts [$w search {*}$sargs -count ::els::find_lens -- $pat 1.0 end]}]} {
-        set find_count "bad pattern" ; return
+        return bad
     }
-    if {![llength $starts]} { set find_count "No results" ; return }
-
-    set lens $::els::find_lens
+    set ::els::find_scan_doc $::els::active
+    set ::els::find_scan_chars [$w count -chars 1.0 end]
+    set out {}
+    set last [$w index "end - 1 char"]
     set i 0
     foreach s $starts {
-        set L [lindex $lens $i]
+        set L [lindex $::els::find_lens $i]
         incr i
         # skip zero-width matches (x*, ^, \d* on non-digits, …): they are
         # invisible, navigate to nothing, and Replace All would turn each into an
         # insert between every character, corrupting the buffer
         if {$L <= 0} { continue }
         set e [$w index "$s + $L chars"]
-        $w tag add findAll $s $e
-        lappend find_matches [list $s $e]
+        # the widget's mandatory final newline is searchable but is NOT part of
+        # the document: drop any match that extends past the last real character
+        # (else \s "matches" in a whitespace-free file and Replace All edits —
+        # and saves — text that was never in the document)
+        if {[$w compare $e > $last]} { continue }
+        lappend out [list $s $e]
     }
-    if {![llength $find_matches]} { set find_count "No results" ; return }
+    return $out
+}
+# Does the text at s..e still satisfy the current query?  A cheap staleness
+# probe for cached match spans: plain string indices do not float with edits.
+proc els::find_span_ok {w s e} {
+    variable find_q ; variable find_case ; variable find_word ; variable find_regex
+    if {[catch {$w get $s $e} txt]} { return 0 }
+    if {!$find_regex && !$find_word} {
+        if {$find_case} { return [string equal $txt $find_q] }
+        return [string equal -nocase $txt $find_q]
+    }
+    set spec [els::find_spec]
+    if {$spec eq ""} { return 0 }
+    lassign $spec pat sargs
+    set fl {}
+    if {"-nocase" in $sargs} { lappend fl -nocase }
+    if {[catch {regexp {*}$fl -- "\\A(?:$pat)\\Z" $txt} ok]} { return 0 }
+    return $ok
+}
+
+# re-run the search in the active doc, tag all matches, pick the current one
+proc els::find_update {} {
+    variable find_matches ; variable find_count ; variable find_mode
+    # the bar is hidden: a late debounce / stray caller must not re-tag matches
+    # or move the caret on a search the user already dismissed
+    if {$find_mode eq ""} { return }
+    set w [els::T]
+    if {$w eq ""} { return }
+    catch {.find.fr.help configure -state normal}
+    catch {.find.fr.help state !disabled}
+    $w tag remove findAll 1.0 end
+    $w tag remove findOne 1.0 end
+    set find_matches {}
+    if {$::els::find_q eq ""} { set find_count "" ; return }
+    set scan [els::find_scan $w]
+    if {$scan eq "bad"} { set find_count "bad pattern" ; return }
+    if {![llength $scan]} { set find_count "No results" ; return }
+    set find_matches $scan
+    foreach m $scan { $w tag add findAll {*}$m }
     set n [llength $find_matches]
     set ins [$w index insert]
     set cur 0
@@ -3262,14 +3321,33 @@ proc els::find_highlight {idx} {
 }
 
 proc els::find_step {dir} {
-    variable find_matches ; variable find_current
-    if {![llength $find_matches]} { els::find_update ; return }
-    els::find_highlight [expr {$find_current + $dir}]
+    variable find_matches ; variable find_current ; variable find_mode
+    if {$find_mode eq ""} { return }   ;# bar hidden (F3): nothing to step
+    set w [els::T]
+    if {$w eq ""} { return }
+    # Cached spans are plain string indices — they do NOT float with edits.
+    # Re-scan instead of stepping when they could be stale: different doc, the
+    # buffer length changed since the scan, or the target span no longer matches
+    # the query (a same-length edit).  find_update lands on the match nearest
+    # the caret, which is the natural continuation.
+    if {![llength $find_matches] \
+            || $::els::active ne $::els::find_scan_doc \
+            || [$w count -chars 1.0 end] != $::els::find_scan_chars} {
+        els::find_update
+        return
+    }
+    set n [llength $find_matches]
+    set idx [expr {(($find_current + $dir) % $n + $n) % $n}]
+    lassign [lindex $find_matches $idx] s e
+    if {![els::find_span_ok $w $s $e]} { els::find_update ; return }
+    els::find_highlight $idx
 }
 
 # Make a match's case template carry to its replacement (when Adapt case is on).
 proc els::adapt_case {match repl} {
-    if {!$::els::find_adapt || $match eq "" || ![regexp {[A-Za-z]} $match]} { return $repl }
+    # [[:alpha:]] not [A-Za-z]: toupper/tolower/totitle below are Unicode-aware,
+    # so an all-Cyrillic/Greek match must not be skipped by an ASCII-only guard
+    if {!$::els::find_adapt || $match eq "" || ![regexp {[[:alpha:]]} $match]} { return $repl }
     if {$match eq [string toupper $match]} { return [string toupper $repl] }
     if {$match eq [string tolower $match]} { return [string tolower $repl] }
     if {$match eq [string totitle $match]} { return [string totitle $repl] }
@@ -3282,9 +3360,22 @@ proc els::repl_for {w s e} {
     set matched [$w get $s $e]
     set repl $find_r
     if {$find_regex} {
-        set pat [expr {$find_word ? "\\m(?:$find_q)\\M" : $find_q}]
+        if {$find_word} { set pat "\\m(?:$find_q)\\M" } else { set pat $find_q }
         set fl {} ; if {!$find_case} { lappend fl -nocase }
-        catch {regsub {*}$fl -- $pat $matched $find_r repl}
+        # Re-match WITH trailing context, anchored at the match start: a
+        # context-dependent construct (lookahead (?=...), \M at a word edge)
+        # cannot re-match against the excised match text alone, so the
+        # "replacement" would silently write the original text back.  2000 chars
+        # of context bounds the cost on huge buffers; a lookahead needing more
+        # degrades to leaving the match untouched.
+        set ctx [$w get $s "$e + 2000 chars"]
+        set out ""
+        if {[catch {regsub {*}$fl -- "\\A(?:$pat)" $ctx $find_r out} nsub] || $nsub == 0} {
+            set repl $matched          ;# could not re-match: leave the text as-is
+        } else {
+            set tail [expr {[string length $ctx] - [string length $matched]}]
+            set repl [string range $out 0 end-$tail]
+        }
     }
     return [els::adapt_case $matched $repl]
 }
@@ -3310,16 +3401,19 @@ proc els::find_replace_one {} {
 proc els::find_replace_all {} {
     set w [els::T]
     if {$w eq ""} { return }
-    # findAll tag ranges float with edits (cached find_matches indices do not),
-    # and are returned sorted; replace in reverse so earlier ranges stay valid.
-    set ranges [$w tag ranges findAll]
-    set n [expr {[llength $ranges] / 2}]
-    if {$n == 0} { return }
+    # Search FRESH at replace time and walk the result in reverse (earlier
+    # indices stay valid while later text is replaced; no edits happen between
+    # the scan and the walk).  NEVER via `tag ranges findAll`: Tk merges
+    # abutting ranges of one tag, so N adjacent matches ("aa" find a) would
+    # collapse into ONE range and a single replacement would eat the rest.
+    set scan [els::find_scan $w]
+    if {$scan eq "bad" || ![llength $scan]} { return }
     $w edit separator
-    for {set i [expr {[llength $ranges] - 2}]} {$i >= 0} {incr i -2} {
-        set s [lindex $ranges $i]
-        set e [lindex $ranges [expr {$i + 1}]]
+    set n 0
+    foreach m [lreverse $scan] {
+        lassign $m s e
         $w replace $s $e [els::repl_for $w $s $e]
+        incr n
     }
     $w edit separator
     els::swap_touch   ;# button-driven edit -> latch dirtySince + schedule a flush

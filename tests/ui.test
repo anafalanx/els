@@ -11,6 +11,7 @@ proc ui_reset {} {
     set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
     set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::find_matches {} ; set ::els::find_current -1
+    set ::els::find_mode "" ; set ::els::find_scan_doc "" ; set ::els::find_scan_chars -1
     set ::els::show_ws 0
     set ::els_test_openfile "" ; set ::els_test_savefile "" ; set ::els_test_mbanswer yes
     set ::els_test_open_args {} ; set ::els_test_save_args {}
@@ -1202,7 +1203,7 @@ test reg-1.2 {Reopen-with-Encoding on a Save-As'd new document keeps its content
 test reg-2.1 {Replace uses the floating findOne tag, not a stale index, after a manual edit} -setup {ui_reset} -body {
     set w [els::T]
     $w insert end "cat cat cat"
-    set ::els::find_q cat
+    set ::els::find_q cat ; set ::els::find_mode find
     els::find_update
     $w insert 1.0 "XYZ- "
     set ::els::find_r dog
@@ -1214,7 +1215,7 @@ test reg-2.1 {Replace uses the floating findOne tag, not a stale index, after a 
 test reg-3.1 {zero-width regex yields no matches and Replace All does not corrupt} -setup {ui_reset} -body {
     set w [els::T]
     $w insert end "abc"
-    set ::els::find_regex 1 ; set ::els::find_q {x*}
+    set ::els::find_regex 1 ; set ::els::find_q {x*} ; set ::els::find_mode find
     els::find_update
     set m [llength $::els::find_matches]
     set ::els::find_r Q
@@ -1317,6 +1318,7 @@ test reg-7.1 {Whole Word + Regex alternation does not match inside larger words}
     set w [els::T]
     $w insert end "foo bar foobar"
     set ::els::find_regex 1 ; set ::els::find_word 1 ; set ::els::find_q {foo|bar}
+    set ::els::find_mode find
     els::find_update
     llength $::els::find_matches
 } -result 2
@@ -1342,7 +1344,7 @@ test ui-4.14 {find highlights are cleared from a tab when you switch away} -setu
 
 test ui-4.15 {F3 / Shift+F3 step to the next / previous match} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "x x x x"
-    set ::els::find_q x ; els::find_update
+    set ::els::find_q x ; set ::els::find_mode find ; els::find_update
     set c0 $::els::find_current
     event generate $w <Key-F3>       ; update ; set c1 $::els::find_current
     event generate $w <Shift-Key-F3> ; update ; set c2 $::els::find_current
