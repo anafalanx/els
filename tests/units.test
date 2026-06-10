@@ -18,6 +18,20 @@ test unit-eol-7 {tie keeps the crlf > lf priority} -body {
     els::detect_eol "a\r\nb\n"
 } -result crlf
 
+# ---- reg.exe output parsing (locale-independent, bug-hunt wave 6) ---------
+test unit-reg-1 {English default value parses} -body {
+    els::reg_parse "HKEY_CURRENT_USER\\X\n    (Default)    REG_SZ    C:\\apps\\els.exe \"%1\"\n"
+} -result {C:\apps\els.exe "%1"}
+test unit-reg-2 {German (Standard) name parses positionally} -body {
+    els::reg_parse "HKEY_CURRENT_USER\\X\n    (Standard)    REG_SZ    C:\\apps\\els.exe \"%1\"\n"
+} -result {C:\apps\els.exe "%1"}
+test unit-reg-3 {French name WITH A SPACE parses (column regex must not assume \S+)} -body {
+    els::reg_parse "HKEY_CURRENT_USER\\X\n    (Par défaut)    REG_SZ    C:\\apps\\els.exe \"%1\"\n"
+} -result {C:\apps\els.exe "%1"}
+test unit-reg-4 {English unset sentinel maps to empty} -body {
+    els::reg_parse "HKEY_CURRENT_USER\\X\n    (Default)    REG_SZ    (value not set)\n"
+} -result {}
+
 # ---- labels -------------------------------------------------------------
 test unit-enclabel-1 {plain utf-8}     -body { els::enc_label utf-8 0 }    -result {UTF-8}
 test unit-enclabel-2 {utf-8 with BOM}  -body { els::enc_label utf-8 1 }    -result {UTF-8 BOM}

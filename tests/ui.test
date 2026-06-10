@@ -1218,6 +1218,15 @@ test session-4.1 {an explicit-file-arg launch does not destroy the stored sessio
     dict get $data session_files
 } -result {C:/saved/a.txt C:/saved/b.txt}
 
+test cfg-2.5 {the first-run dialog's <Return> routes through the button (no % substitution of paths)} -setup {ui_reset} -body {
+    els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
+    catch {wm withdraw .cfgask}
+    set b [bind .cfgask <Return>]
+    set ok [string equal $b [list .cfgask.f.ok invoke]]
+    catch {destroy .cfgask}
+    set ok
+} -result 1
+
 test session-4.2 {a session-owning run persists its open docs as the session} -setup {ui_reset} -body {
     set p [els_tmpfile sw5.txt "y\n"]
     els::open $p                               ;# owned (els_reset default) -> persists

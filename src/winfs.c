@@ -73,6 +73,7 @@ static int ReplaceFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
  *   (no live owner -> the session that wrote this lock is dead) or "0" if HELD
  *   (a live instance owns it).  Used by the recovery scan to skip live peers. */
 static HANDLE g_lock = INVALID_HANDLE_VALUE;
+static WCHAR  g_lock_path[MAX_PATH * 2];   /* path the held lock was opened on */
 
 static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
                         int objc, Tcl_Obj *const objv[]) {
@@ -80,24 +81,42 @@ static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     Tcl_Size n; const char *p = Tcl_GetStringFromObj(objv[1], &n);
     WCHAR *w = utf8_to_wide(p, n);
     if (w == nullptr) { Tcl_SetObjResult(ip, Tcl_NewStringObj("path conversion failed", -1)); return TCL_OK; }
+    /* re-acquiring the path we already hold must be idempotent: byte-range
+     * locks conflict across handles even within one process, so a second open
+     * + LockFileEx on the same path would FAIL and look like "another
+     * instance owns my lock" */
+    if (g_lock != INVALID_HANDLE_VALUE && _wcsicmp(w, g_lock_path) == 0) {
+        Tcl_Free((char *)w);
+        Tcl_SetObjResult(ip, Tcl_NewObj());
+        return TCL_OK;
+    }
+    /* NO FILE_SHARE_DELETE: it would grant every other process DELETE access
+     * to the lock file while the lock is held — on Win11 (POSIX delete
+     * semantics) the name unlinks immediately, a peer's try-lock then sees
+     * FILE_NOT_FOUND = "owner dead", and a LIVE session's swaps get recovered
+     * by a second instance.  Nothing in els requests DELETE while it's held. */
     HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     DWORD gle = GetLastError();           /* capture BEFORE Tcl_Free clobbers it */
-    Tcl_Free((char *)w);
     if (h == INVALID_HANDLE_VALUE) {
+        Tcl_Free((char *)w);
         Tcl_SetObjResult(ip, Tcl_ObjPrintf("open lock error %lu", (unsigned long)gle));
         return TCL_OK;
     }
     OVERLAPPED ov = {0};
     if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
-        DWORD gle = GetLastError();
+        DWORD gle2 = GetLastError();
         CloseHandle(h);
-        Tcl_SetObjResult(ip, Tcl_ObjPrintf("lock held (error %lu)", (unsigned long)gle));
+        Tcl_Free((char *)w);
+        Tcl_SetObjResult(ip, Tcl_ObjPrintf("lock held (error %lu)", (unsigned long)gle2));
         return TCL_OK;
     }
     if (g_lock != INVALID_HANDLE_VALUE) { CloseHandle(g_lock); }  /* replace any prior */
     g_lock = h;
+    wcsncpy(g_lock_path, w, (sizeof g_lock_path / sizeof g_lock_path[0]) - 1);
+    g_lock_path[(sizeof g_lock_path / sizeof g_lock_path[0]) - 1] = L'\0';
+    Tcl_Free((char *)w);
     Tcl_SetObjResult(ip, Tcl_NewObj());     /* "" = success, lock held */
     return TCL_OK;
 }
@@ -109,6 +128,7 @@ static int UnlockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
         UnlockFileEx(g_lock, 0, 1, 0, &ov);
         CloseHandle(g_lock);
         g_lock = INVALID_HANDLE_VALUE;
+        g_lock_path[0] = L'\0';
     }
     Tcl_SetObjResult(ip, Tcl_NewObj());
     return TCL_OK;

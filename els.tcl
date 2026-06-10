@@ -316,7 +316,10 @@ proc els::config_choice_dialog {near appdata} {
     grid $top.f.p2 -row 5 -column 0 -sticky w -padx {24 0} -pady {0 18}
     ttk::button $top.f.ok -text "Continue" -command $apply
     grid $top.f.ok -row 6 -column 0 -sticky e
-    bind $top <Return> $apply
+    # route <Return> through the button's -command: $apply as a BIND script
+    # would get %-substituted, so a "%" in the install path (legal on Windows)
+    # corrupted where the config/swap dir lands when confirming with Enter
+    bind $top <Return> [list $top.f.ok invoke]
     update idletasks
     set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
     set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
@@ -851,13 +854,23 @@ proc els::assoc_run {cmd} {
 # The value name is matched to its column (not as a substring), and reg.exe's
 # "(value not set)" sentinel for an empty default is normalized to "".
 proc els::reg_value {key {val ""}} {
-    set q [expr {$val eq "" ? [list reg.exe query $key /ve] : [list reg.exe query $key /v $val]}]
+    if {$val eq ""} { set q [list reg.exe query $key /ve] } else { set q [list reg.exe query $key /v $val] }
     if {[catch {exec {*}$q} out]} { return "" }
-    set want [expr {$val eq "" ? {(Default)} : $val}]
+    return [els::reg_parse $out]
+}
+# Parse `reg.exe query` output POSITIONALLY, never by the name column: reg.exe
+# localizes the default-value name ("(Default)" / "(Standard)" / "(Par défaut)"
+# — the last even contains a space) and the unset sentinel, so name matching
+# made registration state read as "not registered" on non-English Windows.
+# Both query forms print exactly the one requested value as the first
+# "<name> REG_TYPE <data>" line; the name is matched non-greedily so localized
+# names with spaces survive.
+proc els::reg_parse {out} {
     foreach ln [split $out \n] {
-        if {[regexp -- {^\s+(\S+)\s+REG_\w+\s+(.*)$} $ln -> nm data] && $nm eq $want} {
+        if {[regexp -- {^\s+(.+?)\s+REG_\w+\s+(.*)$} $ln -> nm data]} {
             set data [string trimright $data]
-            return [expr {$data eq "(value not set)" ? "" : $data}]
+            if {$data eq "(value not set)"} { return "" }   ;# English sentinel
+            return $data
         }
     }
     return ""
@@ -868,7 +881,10 @@ proc els::assoc_registered {} {
     set exe [els::association_exe]
     if {$exe eq ""} { return 0 }
     set appExe [file tail [file normalize $exe]]
-    return [expr {[els::reg_value "HKCU\\Software\\Classes\\Applications\\$appExe\\shell\\open\\command" ""] ne ""}]
+    set cmd [els::reg_value "HKCU\\Software\\Classes\\Applications\\$appExe\\shell\\open\\command" ""]
+    # locale-proof decision: registered means OUR exe appears in the command
+    # (a localized unset-sentinel from a non-English reg.exe is never a match)
+    return [string match -nocase "*${appExe}*" $cmd]
 }
 proc els::open_default_apps {} {
     if {[catch {exec cmd.exe /c start "" ms-settings:defaultapps &}]} {

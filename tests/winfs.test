@@ -35,6 +35,34 @@ test winfs-1.2 {win_replace_file preserves an alternate data stream (mark-of-the
     list $err $got $ads
 } -result {{} EDITED 1}
 
+# ---- bug-hunt wave 6: session-lock share mode + idempotent re-acquire ------
+
+test winfs-2.1 {a held session lock cannot be deleted by another open; re-acquire is idempotent} -constraints winfsBuilt -setup {load_winfs} -body {
+    set lp [file join $::ELS_TMP wfs_lock.lock]
+    catch {els::win_unlock_file}
+    catch {file delete -force $lp}
+    set r1 [els::win_lock_file [file nativename $lp]]
+    set r2 [els::win_lock_file [file nativename $lp]]   ;# same path: must not fail
+    set delHeld [catch {file delete -force $lp}]         ;# DELETE denied while held
+    set survives [file exists $lp]
+    els::win_unlock_file
+    set delFree [catch {file delete -force $lp}]
+    list $r1 $r2 $delHeld $survives $delFree
+} -result {{} {} 1 1 0}
+
+test winfs-2.2 {try_lock still reads held/free/missing correctly with the tightened share mode} -constraints winfsBuilt -setup {load_winfs} -body {
+    set lp [file join $::ELS_TMP wfs_lock2.lock]
+    catch {els::win_unlock_file}
+    catch {file delete -force $lp}
+    els::win_lock_file [file nativename $lp]
+    set held [els::win_try_lock [file nativename $lp]]   ;# 0 = live owner
+    els::win_unlock_file
+    set free [els::win_try_lock [file nativename $lp]]   ;# 1 = no owner
+    file delete -force $lp
+    set missing [els::win_try_lock [file nativename $lp]]
+    list $held $free $missing
+} -result {0 1 1}
+
 test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; ui_reset} -body {
     set p [file join $::ELS_TMP wfs_save.txt]
     set f [open $p w] ; puts -nonewline $f "downloaded content\n" ; close $f
