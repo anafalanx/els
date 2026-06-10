@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.61"      ;# 0.60 follow-up: gutter-off startup fix + dist/ build home
+    variable version "0.70"      ;# saves complete the safety story: lossy guard + auto-save + backups
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
