@@ -72,7 +72,18 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 - **Blast radius:** irreversible third-party data loss with no warning; common, mundane triggers.
 - **Fix:** capture `file mtime`+`file size` (**and a content hash — required, not optional:** NTFS mtime is ~1 s granularity and two same-second writes produced identical mtimes in probes) at open and **re-cache after every successful save** (verified: els's own save advances mtime by 1 s — without re-caching, the *next* save false-positives as "externally changed"). Before writing, re-stat; on mismatch prompt **Overwrite / Reload / Save As**. The check wires into the **in-place truncate path** (els::save does *not* rename today — a finding-text reference to "re-check before the rename" pointed at machinery that doesn't exist; correct it to the actual write site).
 
-### R4 — Silent lossy encoding substitution on save **[OBSERVED, verified]**
+### R4 — Silent lossy encoding substitution on save **[IMPLEMENTED 2026-06-10]**
+
+> Shipped essentially as designed below: `els::save` encodes strictly and on
+> failure asks keep-lossy / switch-to-UTF-8 / cancel, with the lossy consent
+> latched per document and voided on an encoding change.  One design
+> divergence found the hard way: in Tcl 9.0.3 the `-failindex` VALUE is a
+> byte offset into the internal UTF-8 rep for some encodings (gb2312-raw)
+> and a character index for others, contradicting encoding(n) -- only its
+> sign is trusted, and `els::lossy_first` locates the failing character by
+> binary search on prefix length instead.  Auto-save (also added) uses a
+> quiet mode: lossy pauses auto-saving for the doc until a manual save
+> settles it.  Tests lossy-1.1..1.8.
 - **Location:** `els::save` els.tcl:1956 — `encoding convertto -profile replace $docEnc $text`.
 - **Trigger:** buffer holds a character not representable in the document's encoding (euro in iso8859-1; any non-ASCII in a legacy single-byte codepage; or after a "Save with Encoding" downgrade). The picker (els.tcl:43-53) offers 9 lossy encodings, and any file auto-opened as a legacy codepage carries that `docEnc` forward — so a plain Ctrl+S loses data with no explicit lossy action.
 - **Current behavior:** [OBSERVED] euro U+20AC written as byte `0x3F` (`?`); `save` returns **success, no warning**. Worse-hidden than expected: the buffer still *shows* the euro (open early-returns for an already-open path), so nothing reveals the loss until a fresh reopen.
