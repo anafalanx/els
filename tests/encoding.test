@@ -337,3 +337,51 @@ test enc-5.2 {a BOM-less UTF-16BE ASCII file is detected as wide (big-endian)} \
     els::open $p
     list $::els::docEnc($::els::active) $::els::docBom($::els::active)
 } -result {utf-16be 0}
+
+# ---- bug-hunt wave 2: BOM and fallback hardening ---------------------------
+
+test enc-6.1 {a UTF-8 BOM glued onto legacy bytes does not destroy them (lossless round-trip)} -setup {els_reset} -body {
+    set bytes "\xEF\xBB\xBF[encoding convertto cp1252 "café olé\n"]"
+    set p [write_raw bom_legacy.txt $bytes]
+    els::open $p
+    els::save
+    list [string equal [raw_read $p] $bytes] $::els::docBom($::els::active)
+} -result {1 0}
+
+test enc-6.2 {a real UTF-8 BOM on valid payload is still detected as utf-8+BOM} -setup {els_reset} -body {
+    els::detect_encoding "\xEF\xBB\xBF[encoding convertto utf-8 "héllo wörld"]"
+} -result {utf-8 1}
+
+test enc-6.3 {decode strips a BOM only when its bytes are actually present} -body {
+    list [els::decode "Hello" utf-8 1] \
+         [els::decode "\xEF\xBB\xBFHello" utf-8 1] \
+         [els::decode "H\x00i\x00" utf-16le 1] \
+         [els::decode "\xFF\xFEH\x00i\x00" utf-16le 1]
+} -result {Hello Hello Hi Hi}
+
+test enc-6.4 {Reopen as "UTF-8 with BOM" on a BOM-less file keeps the content and adds the BOM on save} -setup {els_reset} -body {
+    set p [write_raw nobom.txt "Hello, world\n"]
+    els::open $p
+    els::reopen_with utf-8 1
+    set buf [els_text]
+    els::save
+    list $buf [string equal [raw_read $p] "\xEF\xBB\xBFHello, world\n"]
+} -result [list "Hello, world\n" 1]
+
+test enc-6.5 {bytes cp1252 cannot round-trip demote the fallback to Latin-1 (lossless)} -setup {els_reset} -body {
+    set saved $::els::have_detect ; set ::els::have_detect 0
+    set a [els::detect_encoding "abc\x81\xE9"]
+    set b [els::detect_encoding "abc\xE9"]
+    set ::els::have_detect $saved
+    list $a $b
+} -result {{iso8859-1 0} {cp1252 0}}
+
+test enc-6.6 {a 0x81-bearing file round-trips byte-exact through open + save} -setup {els_reset} -body {
+    set saved $::els::have_detect ; set ::els::have_detect 0
+    set bytes "price \x80 100 \x81 caf\xE9\n"
+    set p [write_raw c1bytes.txt $bytes]
+    els::open $p
+    els::save
+    set ::els::have_detect $saved
+    string equal [raw_read $p] $bytes
+} -result 1

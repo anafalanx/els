@@ -231,9 +231,14 @@ if {![file isdirectory $MAN]} {
     puts stderr "man source not found: $MAN (need the vendored .toolchain/tcl9)"
     exit 1
 }
-set OUT [file join $ROOT docs tcl-tk-9-manual]
+# Generate into a temp sibling and swap onto the live tree only on FULL
+# success: deleting docs/tcl-tk-9-manual up front meant any mid-run failure
+# left the committed, authoritative reference tree partially destroyed.
+set FINAL [file join $ROOT docs tcl-tk-9-manual]
+set OUT   [file join $ROOT docs tcl-tk-9-manual.new]
 file delete -force $OUT
 file mkdir $OUT
+set nfail 0
 
 # section dir -> {output subdir, extension, index heading}
 set sections {
@@ -253,7 +258,7 @@ dict for {sec spec} $sections {
     foreach f [lsort [glob -nocomplain -directory $srcdir *$ext]] {
         set base [file rootname [file tail $f]]
         if {[catch {convert_file $f} res]} {
-            puts stderr "FAILED $f: $res" ; continue
+            puts stderr "FAILED $f: $res" ; incr nfail ; continue
         }
         lassign $res title grp md
         set of [file join $dstdir $base.md]
@@ -309,4 +314,13 @@ foreach grp $index {
 set oh [open [file join $OUT INDEX.md] w] ; fconfigure $oh -encoding utf-8 -translation lf
 puts -nonewline $oh [join $ix \n]\n ; close $oh
 
+if {$nfail > 0} {
+    # leave the live tree untouched: silently-missing pages in the
+    # authoritative reference are wrong artifacts with downstream effect
+    puts stderr "$nfail page(s) FAILED to convert; docs/tcl-tk-9-manual left unchanged"
+    puts stderr "(partial output kept at docs/tcl-tk-9-manual.new for inspection)"
+    exit 1
+}
+file delete -force $FINAL
+file rename -force $OUT $FINAL
 puts "wrote $total pages + INDEX.md to [file join docs tcl-tk-9-manual]"

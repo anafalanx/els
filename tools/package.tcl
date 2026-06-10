@@ -36,7 +36,9 @@ proc zip_entries {root {rel ""}} {
     set out {}
     foreach item [glob -nocomplain [file join $root $rel *]] {
         set name [file tail $item]
-        set zrel [expr {$rel eq "" ? $name : [file join $rel $name]}]
+        # no expr ternary on file names: expr canonicalizes number-looking
+        # operands, so a payload file named "007" would be packaged as "7"
+        if {$rel eq ""} { set zrel $name } else { set zrel [file join $rel $name] }
         if {[file isdirectory $item]} {
             lappend out {*}[zip_entries $root $zrel]
         } else {
@@ -64,7 +66,7 @@ if {$out eq ""} { set out [file join $ROOT els.exe] }
 # mkimg appends the zip AFTER the PE image.
 set wish [TCp tcl9s bin wish90s.exe]
 if {![file exists $wish]} { error "static wish missing: $wish" }
-set mkimgWrapper [expr {$wrapperOverride ne "" ? $wrapperOverride : $wish}]
+if {$wrapperOverride ne ""} { set mkimgWrapper $wrapperOverride } else { set mkimgWrapper $wish }
 if {[file isdirectory //zipfs:/app/tcl_library]} {
     set tclLibrary //zipfs:/app/tcl_library
 } elseif {[file isdirectory [TCp appfull tcl_library]]} {

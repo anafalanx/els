@@ -11,6 +11,7 @@ proc ui_reset {} {
     set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
     set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::find_matches {} ; set ::els::find_current -1
+    set ::els::find_mode "" ; set ::els::find_scan_doc "" ; set ::els::find_scan_chars -1
     set ::els::show_ws 0
     set ::els_test_openfile "" ; set ::els_test_savefile "" ; set ::els_test_mbanswer yes
     set ::els_test_open_args {} ; set ::els_test_save_args {}
@@ -410,15 +411,20 @@ test ui-8.3b {opening an already-open file switches to its tab} -setup {ui_reset
          [expr {$::els::active ne $id2}]
 } -result {2 2 1 1}
 
-test ui-8.3c {encoding popup reserves room for cascades inside the window} -setup {ui_reset} -body {
+test ui-8.3c {encoding popup hugs its button: the MENU stays inside the window, the cascade reserve only uses slack} -setup {ui_reset} -body {
     event generate .sb.enc <ButtonPress-1> -x 5 -y 5
     update
     set menu [lindex $::els_test_popup_args 0]
     set x [lindex $::els_test_popup_args 1]
-    set reserve [els::menu_cascade_reserve $menu]
-    set right [expr {[winfo rootx .] + [winfo width .]}]
-    expr {$reserve > 0 && $x + [winfo reqwidth $menu] + $reserve <= $right}
-} -result 1
+    set mw [winfo reqwidth $menu]
+    set winl [winfo rootx .]
+    set winr [expr {$winl + [winfo width .]}]
+    set btnx [winfo rootx .sb.enc]
+    # never left of the button unless the menu itself wouldn't fit (the old
+    # full-cascade reserve shoved the menu far left of the picker)
+    set want [expr {max($winl, min($btnx, $winr - $mw))}]
+    list [expr {$x == $want}] [expr {$x + $mw <= $winr}]
+} -result {1 1}
 
 test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "keep" ; $w edit separator
@@ -1147,6 +1153,8 @@ test cfg-1.2 {resolve_existing finds the LOCALAPPDATA config when present} -setu
     set ::els::config_path ""
     set found  [els::config_resolve_existing]
     set picked [string equal $::els::config_path $appdata]
+    catch {els::lock_release}   ;# set_config_path acquired a real lock: release
+                                ;# it or the delete below silently fails
     catch {file delete -force [file dirname $appdata]}
     set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
     list $found $picked
@@ -1159,6 +1167,11 @@ test cfg-1.3 {the first-run dialog applies the chosen location and closes} -setu
     .cfgask.f.ok invoke                          ;# default selection -> appdata
     set chosen $::els::config_path
     set gone [expr {![winfo exists .cfgask]}]
+    # config_apply_choice scheduled `after idle recover_boot` and acquired a
+    # session lock: neutralize both, or the callback fires mid-suite (it could
+    # deiconify a REAL recovery dialog) and the delete below silently fails
+    foreach a [after info] { catch {after cancel $a} }
+    catch {els::lock_release}
     catch {file delete -force [file dirname $appdata]}
     set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
     list [string equal $chosen $appdata] $gone
@@ -1174,12 +1187,139 @@ test cfg-1.4 {legacy config.tcl is migrated to els.conf} -setup {els_reset} -bod
     set found [els::config_resolve_existing]
     set migrated [file exists $appdata]
     set picked [string equal $::els::config_path $appdata]
+    catch {els::lock_release}   ;# release the lock set_config_path acquired
     catch {file delete -force [file dirname $appdata]}
     set ::els::config_path [file join $::ELS_TMP els.conf]
     list $found $migrated $picked
 } -result {1 1 1}
 
-# ---- regression: bug-hunt fixes (data loss / corruption) ----------------
+# ---- bug-hunt wave 4: config + session robustness ------------------------
+
+test cfg-2.1 {corrupt config VALUES cannot abort startup (load_geometry tolerates anything)} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w]
+    puts $fh {geometry 100x100+50 word_wrap maybe recent {a "b} session_files {x "y} always_on_top 7 font_size huge restore_session perhaps show_whitespace blah}
+    close $fh
+    set rc [catch {els::load_geometry} err]
+    catch {file delete -force $f}
+    list $rc $::els::word_wrap $::els::show_ws
+} -result {0 0 0}
+
+test cfg-2.2 {a config that is not a dict at all is ignored, not fatal} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w] ; puts $fh "this is \{unbalanced and not a dict" ; close $fh
+    set rc [catch {els::load_geometry}]
+    catch {file delete -force $f}
+    set rc
+} -result 0
+
+test cfg-2.3 {LOCALAPPDATA-unset fallback resolves a real home dir (no literal ~)} -setup {ui_reset} -body {
+    set saved $::env(LOCALAPPDATA)
+    unset ::env(LOCALAPPDATA)
+    lassign [els::config_roots] near appdata
+    set ::env(LOCALAPPDATA) $saved
+    list [string match "*~*" $appdata] [string match -nocase "*AppData*" $appdata]
+} -result {0 1}
+
+test session-4.1 {an explicit-file-arg launch does not destroy the stored session} -setup {ui_reset} -body {
+    set ::els::session_files [list C:/saved/a.txt C:/saved/b.txt]
+    set ::els::session_active C:/saved/a.txt
+    set ::els::session_owned 0                ;# arg launch: session never adopted
+    els::open [els_tmpfile sw4.txt "x\n"]      ;# recent_add -> save_geometry
+    set fh [open $::els::config_path r] ; set data [read $fh] ; close $fh
+    set ::els::session_owned 1
+    dict get $data session_files
+} -result {C:/saved/a.txt C:/saved/b.txt}
+
+test cfg-2.5 {the first-run dialog's <Return> routes through the button (no % substitution of paths)} -setup {ui_reset} -body {
+    els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
+    catch {wm withdraw .cfgask}
+    set b [bind .cfgask <Return>]
+    set ok [string equal $b [list .cfgask.f.ok invoke]]
+    catch {destroy .cfgask}
+    set ok
+} -result 1
+
+test session-4.2 {a session-owning run persists its open docs as the session} -setup {ui_reset} -body {
+    set p [els_tmpfile sw5.txt "y\n"]
+    els::open $p                               ;# owned (els_reset default) -> persists
+    set fh [open $::els::config_path r] ; set data [read $fh] ; close $fh
+    expr {[dict get $data session_files] eq [list [file normalize $p]]}
+} -result 1
+
+# ---- user-issues batch A ---------------------------------------------------
+
+test issue-a.1 {cancelling the first-run dialog postpones, never adopts a location} -setup {ui_reset} -body {
+    set ::els::config_path ""
+    els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
+    catch {wm withdraw .cfgask}
+    els::config_postpone_choice .cfgask        ;# the WM close / Escape path
+    list $::els::config_path [winfo exists .cfgask]
+} -cleanup {
+    set ::els::config_path [file join $::ELS_TMP els.conf]
+} -result {{} 0}
+
+test issue-a.2 {Markdown is not offered in the open/save filetypes} -body {
+    string match -nocase "*markdown*" [els::filetypes]
+} -result 0
+
+test issue-a.3 {Help menu links to the GitHub repo} -setup {ui_reset} -body {
+    set found 0
+    for {set i 0} {$i <= [.menu.help index end]} {incr i} {
+        if {[.menu.help type $i] eq "command" &&
+            [.menu.help entrycget $i -label] eq "els on GitHub"} { set found 1 }
+    }
+    set found
+} -result 1
+
+test issue-a.4 {goto entry rejects non-numeric input at the keyboard} -setup {ui_reset} -body {
+    els::goto_line
+    catch {wm withdraw .goto}
+    .goto.f.e insert 0 abc                     ;# validated: rejected
+    set bad [.goto.f.e get]
+    .goto.f.e insert 0 42
+    set good [.goto.f.e get]
+    catch {destroy .goto}
+    list $bad $good
+} -result {{} 42}
+
+test issue-a.5 {statusbar shows the path length in its normal depiction} -setup {ui_reset} -body {
+    els::open [els_tmpfile ia5.txt "x\n"]
+    update idletasks
+    els::update_namelabel
+    set t [.sb.name cget -text]
+    set want [string length [els::display_path $::els::docPath($::els::active)]]
+    list [string match "*\\\[$want\\\]" $t] [string match "*ia5.txt*" $t]
+} -result {1 1}
+
+test issue-a.6 {the update indicator has a hover state} -setup {ui_reset} -body {
+    list [expr {[bind .sb.update <Enter>] ne ""}] [expr {[bind .sb.update <Leave>] ne ""}]
+} -result {1 1}
+
+test issue-a.7 {find/replace entries grow a clear button while non-empty} -setup {ui_reset} -body {
+    els::find_show find ; update idletasks
+    set ::els::find_q "needle" ; update idletasks
+    set shown [winfo ismapped .find.fr.q.clearx]
+    event generate .find.fr.q.clearx <Button-1> ; update
+    list $shown $::els::find_q [winfo ismapped .find.fr.q.clearx]
+} -result {1 {} 0}
+test recentvs-b.1 {the Maintain List scrollbar appears only when the list overflows} -setup {ui_reset} -body {
+    # the dialog is withdrawn for test hygiene, so a child's `winfo ismapped` is
+    # always 0 — assert on grid membership (manager "grid" vs removed "") instead
+    set ::els::recent [list [els_tmpfile rvs1.txt "x\n"]]
+    els::recent_manage ; catch {wm withdraw .recent}
+    update idletasks ; els::recent_vs_apply
+    set few [winfo manager .recent.f.vs]
+    set many {}
+    for {set i 0} {$i < 30} {incr i} { lappend many [file join $::ELS_TMP "rvs_$i.txt"] }
+    set ::els::recent $many
+    els::recent_manage_refresh
+    update idletasks ; els::recent_vs_apply
+    set lots [winfo manager .recent.f.vs]
+    catch {destroy .recent}
+    list $few $lots
+} -result {{} grid}
+
 test reg-1.1 {Reopen-with-Encoding keeps edits saved since open (docRaw refreshed on save)} -setup {ui_reset} -body {
     set p [els_tmpfile reg11.txt "original line\n"]
     els::open $p
@@ -1202,7 +1342,7 @@ test reg-1.2 {Reopen-with-Encoding on a Save-As'd new document keeps its content
 test reg-2.1 {Replace uses the floating findOne tag, not a stale index, after a manual edit} -setup {ui_reset} -body {
     set w [els::T]
     $w insert end "cat cat cat"
-    set ::els::find_q cat
+    set ::els::find_q cat ; set ::els::find_mode find
     els::find_update
     $w insert 1.0 "XYZ- "
     set ::els::find_r dog
@@ -1214,7 +1354,7 @@ test reg-2.1 {Replace uses the floating findOne tag, not a stale index, after a 
 test reg-3.1 {zero-width regex yields no matches and Replace All does not corrupt} -setup {ui_reset} -body {
     set w [els::T]
     $w insert end "abc"
-    set ::els::find_regex 1 ; set ::els::find_q {x*}
+    set ::els::find_regex 1 ; set ::els::find_q {x*} ; set ::els::find_mode find
     els::find_update
     set m [llength $::els::find_matches]
     set ::els::find_r Q
@@ -1269,10 +1409,55 @@ test reg-6.2 {config save is atomic: a mid-build throw leaves the old config int
     list [expr {$after eq $good && [string length $good] > 0}] [file exists $f.tmp]
 } -result {1 0}
 
+# ---- atomic document save (robustness P0) -------------------------------
+# The old els::save did `open $path w` (truncate-then-write): a crash / disk-full
+# / I/O error mid-write left the user's file 0 bytes.  els::write_atomic writes a
+# same-dir temp then renames it over the target, so the original is never touched
+# until a complete new copy exists.  save-atomic-1.1 is RED on the old code.
+test save-atomic-1.1 {a mid-write failure leaves the original file intact (no truncation)} -setup {ui_reset} -cleanup {
+    catch {rename els::_save_emit {}}
+    catch {rename _els_save_emit els::_save_emit}
+} -body {
+    set p [raw_write savefault.txt "ORIGINAL CONTENT\n"]
+    els::open $p
+    [els::W $::els::active] insert end "EDIT THAT MUST NOT REACH DISK"
+    rename els::_save_emit _els_save_emit                 ;# force a mid-write crash
+    proc els::_save_emit {chan bytes} { error "simulated mid-write failure" }
+    set rc [els::save]
+    set ondisk [raw_read $p]
+    set residue [glob -nocomplain -directory $::ELS_TMP .els-save-*.tmp]
+    list $rc [expr {$ondisk eq "ORIGINAL CONTENT\n"}] \
+         [[els::W $::els::active] edit modified] [llength $residue]
+} -result {0 1 1 0}
+
+test save-atomic-1.2 {a clean save writes the new content and leaves no temp residue} -setup {ui_reset} -body {
+    set p [raw_write saveok.txt "old\n"]
+    els::open $p
+    set w [els::W $::els::active]
+    $w delete 1.0 end ; $w insert end "brand new content"
+    set rc [els::save]
+    set ondisk [raw_read $p]
+    set residue [glob -nocomplain -directory $::ELS_TMP .els-save-*.tmp]
+    list $rc [expr {$ondisk eq "brand new content"}] \
+         [[els::W $::els::active] edit modified] [llength $residue]
+} -result {1 1 0 0}
+
+test save-atomic-1.3 {a read-only target is refused and left intact (matches old behavior)} -setup {ui_reset} -body {
+    set p [raw_write savero.txt "keep me\n"]
+    els::open $p
+    [els::W $::els::active] insert end "should not be written"
+    file attributes $p -readonly 1
+    set rc [els::save]
+    set ondisk [raw_read $p]
+    file attributes $p -readonly 0
+    list $rc [expr {$ondisk eq "keep me\n"}] [[els::W $::els::active] edit modified]
+} -result {0 1 1}
+
 test reg-7.1 {Whole Word + Regex alternation does not match inside larger words} -setup {ui_reset} -body {
     set w [els::T]
     $w insert end "foo bar foobar"
     set ::els::find_regex 1 ; set ::els::find_word 1 ; set ::els::find_q {foo|bar}
+    set ::els::find_mode find
     els::find_update
     llength $::els::find_matches
 } -result 2
@@ -1298,7 +1483,7 @@ test ui-4.14 {find highlights are cleared from a tab when you switch away} -setu
 
 test ui-4.15 {F3 / Shift+F3 step to the next / previous match} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "x x x x"
-    set ::els::find_q x ; els::find_update
+    set ::els::find_q x ; set ::els::find_mode find ; els::find_update
     set c0 $::els::find_current
     event generate $w <Key-F3>       ; update ; set c1 $::els::find_current
     event generate $w <Shift-Key-F3> ; update ; set c2 $::els::find_current
@@ -1378,3 +1563,89 @@ test ui-4.16 {the find count label fits a large match count without clipping} -s
     update idletasks
     expr {[winfo reqwidth .find.fr.n] >= [font measure elsUI "15912 of 20631"]}
 } -result 1
+
+# ---- bug-hunt wave 5: recent dialog, tooltips, menu undo -------------------
+
+test recent-5.1 {Maintain List stays path-correct after recent_add reorders it} -setup {ui_reset} -body {
+    set pa [file normalize [els_tmpfile r5a.txt "A\n"]]
+    set pb [file normalize [els_tmpfile r5b.txt "B\n"]]
+    set ::els::recent [list $pa $pb]
+    els::recent_manage ; catch {wm withdraw .recent}
+    .recent.f.list selection clear 0 end
+    .recent.f.list selection set 1             ;# select pb
+    els::recent_manage_select                   ;# selection now tracked by path
+    els::recent_add [file normalize [els_tmpfile r5c.txt "C\n"]]   ;# reorders
+    set agree [string equal [els::recent_manage_path] $pb]
+    set rows [.recent.f.list size]
+    catch {destroy .recent}
+    list $agree [expr {$rows == [llength $::els::recent]}]
+} -result {1 1}
+
+test recent-5.2 {a failed Open keeps the Maintain List dialog up} -setup {ui_reset} -body {
+    set dir [file join $::ELS_TMP r5dir] ; file mkdir $dir
+    set ::els::recent [list $dir]               ;# exists, but cannot be opened
+    els::recent_manage ; catch {wm withdraw .recent}
+    .recent.f.list selection set 0
+    els::recent_manage_open
+    set alive [winfo exists .recent]
+    catch {destroy .recent}
+    list $alive [llength $::els::docs]
+} -result {1 1}
+
+test recent-5.3 {hovering the empty area below the rows schedules no tip} -setup {ui_reset} -body {
+    set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5long.txt]
+    set ::els::recent [list $long]              ;# elided row -> tip applies
+    els::recent_manage ; catch {wm withdraw .recent}
+    update idletasks
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    els::recent_row_motion 5 5 100 100          ;# inside row 0
+    set inRow [info exists ::els::tip_after]
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    set below [expr {[winfo reqheight .recent.f.list] - 5}]
+    els::recent_row_motion 5 $below 100 100     ;# empty area below the row
+    set inGap [info exists ::els::tip_after]
+    catch {destroy .recent}
+    list $inRow $inGap
+} -result {1 0}
+
+test recent-5.4 {destroying the Maintain List dialog cancels a pending row tip} -setup {ui_reset} -body {
+    set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5d.txt]
+    set ::els::recent [list $long]
+    els::recent_manage ; catch {wm withdraw .recent}
+    update idletasks
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    els::recent_row_motion 5 5 100 100          ;# schedules the after-550 tip
+    set pend [info exists ::els::tip_after]
+    destroy .recent                              ;# dialog dies before it fires
+    after 700 {set ::__tipwait 1} ; vwait ::__tipwait
+    list $pend [winfo exists .tip]
+} -result {1 0}
+
+test tip-5.1 {destroying a tooltip's anchor removes a visible tip} -setup {ui_reset} -body {
+    button .tmpb -text x
+    els::tooltip .tmpb "tip text"
+    els::tip_pop .tmpb "tip text"
+    set vis [winfo exists .tip]
+    destroy .tmpb                                ;# <Destroy> hook fires
+    list $vis [winfo exists .tip]
+} -result {1 0}
+
+test tip-5.2 {clicking a tab dismisses its visible tooltip and still switches} -setup {ui_reset} -body {
+    set a $::els::active
+    els::new_doc ; update
+    set tf [els::tabW $a]
+    els::tip_pop $tf "path tip"
+    set vis [winfo exists .tip]
+    event generate $tf <ButtonPress-1> ; update
+    list $vis [winfo exists .tip] [expr {$::els::active eq $a}]
+} -result {1 0 1}
+
+test undo-5.1 {menu Undo refreshes Ln/Col and the current-line wash} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "one\n" ; $w edit separator ; $w insert end "two\n"
+    $w mark set insert 2.3 ; els::refresh_view
+    els::menu_undo ; ui_settle
+    lassign [split [$w index insert] .] L C
+    set fresh [string equal [.sb.pos cget -text] "Ln $L Col [expr {$C + 1}]"]
+    list $fresh [expr {[llength [$w tag ranges currentLine]] > 0}]
+} -result {1 1}

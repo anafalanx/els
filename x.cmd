@@ -9,6 +9,11 @@ rem  gcc).  Usage:  x <command> [args]   (run `x help`)
 rem
 rem  Double-clicking x.cmd in Explorer (or `x shell`) drops you into a shell with
 rem  the toolchain on PATH, so you can run `x test`, gcc, tclsh, etc. directly.
+rem
+rem  NOTE: no %VAR% expansions inside ( ) blocks — cmd.exe expands BEFORE paren
+rem  matching, so a ')' in the folder name (e.g. "els (1)" from Explorer's copy)
+rem  would close the block early and kill the whole script at PARSE time.  The
+rem  flow below uses goto labels instead.
 rem ============================================================================
 setlocal
 set "ELS_ROOT=%~dp0"
@@ -23,24 +28,23 @@ if exist "%TC%\appfull\tk_library\tk.tcl" set "TK_LIBRARY=%TC%\appfull\tk_librar
 
 rem Open a shell when double-clicked (no arguments) or when asked explicitly via
 rem `x shell`.  Normal commands like `x help` must dispatch to tools\x.tcl.
-set "ELS_SHELL="
-if "%~1"=="" set "ELS_SHELL=1"
-if /i "%~1"=="shell" set "ELS_SHELL=1"
+if "%~1"=="" goto :shell
+if /i "%~1"=="shell" goto :shell
 
-if defined ELS_SHELL (
-  if not exist "%TC%\tcl9\bin\tclsh90.exe" echo [els] Warning: toolchain not found at %TC%\tcl9
-  echo.
-  echo   els toolchain shell - the vendored toolchain is on PATH.
-  echo   Try:  x help   x test   x colors     ^(or 'exit' to leave^)
-  echo.
-  cmd /k prompt els$G$S
-  exit /b
-)
+if exist "%TC%\tcl9\bin\tclsh90.exe" goto :dispatch
+echo [els] Tcl toolchain not found under "%TC%\tcl9" - this folder is not provisioned.
+echo        Restore .toolchain\ ^(copy-paste^), or rebuild it, then run: x toolcheck
+exit /b 1
 
-if not exist "%TC%\tcl9\bin\tclsh90.exe" (
-  echo [els] Tcl toolchain not found under %TC%\tcl9 - this folder is not provisioned.
-  echo        Restore .toolchain\ ^(copy-paste^), or rebuild it, then run: x toolcheck
-  exit /b 1
-)
+:dispatch
 "%TC%\tcl9\bin\tclsh90.exe" "%ELS_ROOT%tools\x.tcl" %*
 exit /b %errorlevel%
+
+:shell
+if not exist "%TC%\tcl9\bin\tclsh90.exe" echo [els] Warning: toolchain not found at "%TC%\tcl9"
+echo.
+echo   els toolchain shell - the vendored toolchain is on PATH.
+echo   Try:  x help   x test   x colors     ^(or 'exit' to leave^)
+echo.
+cmd /k prompt els$G$S
+exit /b

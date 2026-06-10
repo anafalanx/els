@@ -27,6 +27,7 @@ file mkdir $::ELS_TMP
 set ::env(APPDATA)      [file join $::ELS_TMP appdata]
 set ::env(LOCALAPPDATA) [file join $::ELS_TMP localappdata]
 catch {file delete -force $::env(APPDATA)}
+catch {file delete -force $::env(LOCALAPPDATA)}   ;# stale lock/swap litter too
 
 # Load the els library (UI is not launched on source).
 source [file join $::ELS_ROOT els.tcl]
@@ -35,6 +36,10 @@ source [file join $::ELS_ROOT els.tcl]
 # first-run location dialog can never pop during a test run.
 set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
+
+# Autosave/crash-recovery is OFF by default in the suite (it would write swap
+# files and schedule timers on every edit); recover.test turns it on explicitly.
+set ::els::swap_enabled 0
 
 # ---- total control of error reporting: no dialog ever reaches the screen ----
 #
@@ -68,12 +73,30 @@ catch {proc ::tk::dialog::error::bgerror {msg args} { ::els_test_bgerror $msg }}
 # Replace native dialogs with stubs so a stray dialog never blocks a test run.
 proc ::tk_getOpenFile {args} { set ::els_test_open_args $args ; return $::els_test_openfile }
 proc ::tk_getSaveFile {args} { set ::els_test_save_args $args ; return $::els_test_savefile }
-proc ::tk_messageBox  {args} { return $::els_test_mbanswer }
+# Count calls, record the last args, and (optionally) pop answers from a queue so
+# a multi-prompt flow can be driven deterministically; else fall back to a fixed
+# answer.  Recovery tests assert on the count to prove "one dialog, not N".
+proc ::tk_messageBox  {args} {
+    incr ::els_test_mbcount
+    set ::els_test_mbargs $args
+    if {[llength $::els_test_mbqueue]} {
+        set ::els_test_mbqueue [lassign $::els_test_mbqueue ans]
+        return $ans
+    }
+    return $::els_test_mbanswer
+}
 set ::els_test_openfile ""
 set ::els_test_savefile ""
 set ::els_test_open_args {}
 set ::els_test_save_args {}
 set ::els_test_mbanswer "yes"
+set ::els_test_mbcount 0
+set ::els_test_mbargs {}
+set ::els_test_mbqueue {}
+
+# Binary file I/O for tests (swap files, mark-of-the-web ADS, byte assertions).
+proc raw_write {path bytes} { set fh [::open $path wb] ; puts -nonewline $fh $bytes ; close $fh }
+proc raw_read  {path}       { set fh [::open $path rb] ; set d [read $fh] ; close $fh ; return $d }
 
 # Stub the OS-level menu post.  A real `tk_popup` in an unfocused/automated
 # context blocks (waiting on a grab) and would flash a grabbing menu on the
@@ -99,19 +122,53 @@ proc els_reset {} {
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    foreach a {docPath docEnc docBom docEol docRaw} {
+    foreach a {docPath docEnc docBom docEol docRaw docRecovered swapSig savedSig dirtySince loading} {
         array unset ::els::$a
         array set ::els::$a {}
     }
-    set ::els::show_ws 0 ; set ::els::word_wrap 0
+    # Crash-recovery subsystem: cancel any pending timers and reset all state so a
+    # stray swap `after` can't fire into the next test.  swap_enabled/swap_test_mtime
+    # must be restored here too — recover.test enables them per-test, and a leak
+    # leaves autosave running for every later test FILE (timing flakiness).
+    catch {els::swap_stop}
+    catch {els::handoff_stop}
+    set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
+    set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    set ::els::handoff_after ""
+    # Release a held session lock BEFORE blanking the variables: the cfg tests
+    # acquire a real one via set_config_path, and dropping the only reference
+    # without closing leaked the channel and made their cleanup deletes fail
+    # silently (the lock file stayed open).
+    catch {els::lock_release}
+    # Cancel every view-layer deferral too: find_after is a 130 ms TIMER and
+    # tip_after 550 ms — they survive widget destruction, so one test's pending
+    # callback could fire into a LATER test's update (order-dependent flakes).
+    foreach v {find_after refresh_after gutter_after vs_after hs_after ws_after} {
+        catch {after cancel [set ::els::$v]}
+        set ::els::$v ""
+    }
+    catch {els::tip_cancel}
+    # And as the final backstop, cancel EVERY pending after (e.g. the
+    # `after idle recover_boot` scheduled by config_apply_choice in cfg-1.3,
+    # which otherwise fired mid-suite and could deiconify a REAL recovery
+    # dialog over the desktop).
+    foreach a [after info] { catch {after cancel $a} }
+    set ::els::probe_quiet 0
+    set ::els::session_id_cached "" ; set ::els::session_token_cached ""
+    set ::els::lock_handle "" ; set ::els::lock_chan ""
+    set ::els::last_recover 0 ; set ::els::recover_auto 0
+    set ::els::recover_claims {}
+    set ::els::show_ws 0 ; set ::els::word_wrap 0 ; set ::els::show_linenos 1
     set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}
     set ::els::restore_session 1
     set ::els::session_files {}
     set ::els::session_active ""
+    set ::els::session_owned 1   ;# tests act as a plain (session-adopting) run
     # Per-test hygiene: restore the dialog stubs to their defaults and clear the
     # captured background errors, so one test's answer can't leak into the next.
     set ::els_test_openfile "" ; set ::els_test_savefile ""
     set ::els_test_mbanswer "yes" ; set ::els_test_popup_args {}
+    set ::els_test_mbcount 0 ; set ::els_test_mbargs {} ; set ::els_test_mbqueue {}
     set ::els_test_bgerrors {}
     catch {file delete -force $::els::config_path}
     catch {font configure elsMono -size 11}

@@ -126,6 +126,10 @@ proc main {argv} {
         puts stderr "       shot.tcl <els.exe> - <out.png> \[file ...\]   ;# single-exe"
         exit 2
     }
+    # the shot target must be OUR OWN spawned instance: without the opt-out,
+    # single-instance would hand the files to (and raise) the user's running
+    # els, and the window-by-pid wait below would time out on a dead process
+    set ::env(ELS_NO_SINGLE_INSTANCE) 1
     if {$script eq "-"} {
         set pid [exec $app {*}$files &]            ;# self-contained els.exe
     } else {

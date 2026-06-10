@@ -148,11 +148,20 @@ gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS \
     -o build/elsx.dll -L.toolchain/tcl9/lib -ltclstub -static-libgcc
 ```
 
-The product ships only what it needs: `src/icudet.c` (charset detection) is
-**compiled straight into the native `els.exe`** (no DLL); `cap.c` (the screenshot
-capture used by `tools/shot.tcl`) and `elsx.c` (a demo) stay dev-only `.dll`s.
-Tests live in `tests/elsx.test` (gated on the DLL being built, so the suite is
-green with or without a compiler run).
+The product ships only what it needs: `src/icudet.c` (charset detection) and
+`src/winfs.c` are **compiled straight into the native `els.exe`** (no DLL);
+`cap.c` (the screenshot capture used by `tools/shot.tcl`) and `elsx.c` (a demo)
+stay dev-only `.dll`s. `src/winfs.c` exposes two native helpers used by the
+data-safety layer: `els::win_replace_file` (atomic, metadata-preserving save via
+`ReplaceFileW` — keeps ACLs / alternate data streams / the mark-of-the-web that a
+rename drops) and the session-liveness lock `els::win_lock_file` /
+`win_try_lock` / `win_unlock_file` (a held `LockFileEx` byte-range the OS frees on
+process death — so "the lock is acquirable ⇒ that session is dead", which the
+crash-recovery scan relies on; see below). When `winfs` is absent (a dev/tclsh
+run) els falls back to a pure-Tcl temp+rename save and an mtime-based liveness.
+(`els_main.c` is the exe entry point, not a loadable extension — `x build-ext`
+skips it.) Tests live in `tests/elsx.test` / `tests/winfs.test`, gated on the DLL
+being built so the suite is green with or without a compiler run.
 
 ## Build: `x build` (native els.exe)
 

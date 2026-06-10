@@ -5,8 +5,9 @@
 # per-pixel alpha for anti-aliased edges and transparent rounded corners (Tk's
 # canvas isn't anti-aliased, so we rasterize ourselves).  `x icon [size]`.
 #
-# The awl: a dark rounded tile, a pale capsule handle, a ferrule band, and a
-# sharp blade — the blade is the one accent colour (firebrick2 red).
+# The awl on the editor's own page: a light rounded tile (els::PAGE), an ink
+# capsule handle (els::INK), a ferrule band, and a sharp blade — the blade is
+# the one accent colour (els::CARET red).
 package require Tk
 wm withdraw .
 
@@ -19,11 +20,14 @@ if {$out eq ""} {
 }
 set k [expr {$S/256.0}]
 
-# palette (0-255 rgb)
-set TILE   {29 32 39}     ;# #1D2027  dark slate tile
-set HANDLE {223 226 233}  ;# #DFE2E9  pale handle
+# palette (0-255 rgb) — tied to the editor theme (els.tcl)
+set TILE   {242 242 242}  ;# #F2F2F2  the editor page (els::PAGE)
+set HANDLE {26 26 26}     ;# #1A1A1A  ink handle (els::INK)
 set FERR   {150 170 198}  ;# #96AAC6  ferrule band
-set BLADE  {220 50 47}    ;# #DC322F  the signature red — the accent
+set BLADE  {220 50 47}    ;# #DC322F  the signature red (els::CARET)
+set EDGE   {212 212 212}  ;# #D4D4D4  hairline ring (els::HAIR) so the light
+                          ;# tile still has an edge on white surfaces
+set EDGEW  3              ;# ring width in 256-scale px (0 = no ring)
 
 # ---- SDF helpers (coordinates in actual pixels) -------------------------
 proc cl01 {x} { expr {$x<0.0?0.0:($x>1.0?1.0:$x)} }
@@ -67,6 +71,7 @@ proc G {v} { expr {$v*$::k} }
 set img [image create photo -width $S -height $S]
 lassign $TILE tR tG tB ; lassign $HANDLE hR hG hB
 lassign $FERR fR fG fB ; lassign $BLADE bR bG bB
+lassign $EDGE eR eG eB
 
 set t0 [clock milliseconds]
 set data {}
@@ -75,9 +80,20 @@ for {set y 0} {$y < $S} {incr y} {
     set row {}
     for {set x 0} {$x < $S} {incr x} {
         set px [expr {$x+0.5}]
-        set a [cov [sdRound $px $py [G 128] [G 128] [G 110] [G 110] [G 40]]]
+        set dT [sdRound $px $py [G 128] [G 128] [G 110] [G 110] [G 40]]
+        set a [cov $dT]
         if {$a <= 0.002} { lappend row "#00000000" ; continue }
         set R $tR ; set G_ $tG ; set B $tB
+        # hairline ring just inside the tile edge (coverage = outer - inner)
+        if {$::EDGEW > 0} {
+            set ring [expr {$a - [cov [expr {$dT + [G $::EDGEW]}]]}]
+            if {$ring > 0} {
+                set ic [expr {1.0 - $ring}]
+                set R  [expr {$eR*$ring + $R*$ic}]
+                set G_ [expr {$eG*$ring + $G_*$ic}]
+                set B  [expr {$eB*$ring + $B*$ic}]
+            }
+        }
         foreach {col seg} [list \
                 [list $hR $hG $hB] [list capsule [G 128] [G 58] [G 128] [G 92] [G 21]] \
                 [list $bR $bG $bB] [list tri [G 104] [G 124] [G 152] [G 124] [G 128] [G 230]] \

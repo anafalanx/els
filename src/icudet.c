@@ -25,7 +25,11 @@ static int g_state = -1;   /* -1 untried, 0 unavailable, 1 ready */
 static int load_icu(void) {
     if (g_state >= 0) return g_state;
     g_state = 0;
-    HMODULE h = LoadLibraryA("icu.dll");
+    /* System32 ONLY: a bare LoadLibraryA searches the exe's directory first,
+     * and els is a copy-the-folder portable app — an icu.dll planted next to
+     * els.exe would be loaded and executed.  We only ever want the system ICU;
+     * if it is absent, els falls back to BOM/UTF-8/cp1252 detection. */
+    HMODULE h = LoadLibraryExA("icu.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!h) return 0;
     p_open          = (void *)GetProcAddress(h, "ucsdet_open");
     p_setText       = (void *)GetProcAddress(h, "ucsdet_setText");
@@ -41,11 +45,18 @@ static int Detect_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
                       int objc, Tcl_Obj *const objv[]) {
     if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "bytes"); return TCL_ERROR; }
     if (!load_icu()) { Tcl_SetObjResult(ip, Tcl_NewObj()); return TCL_OK; }  /* empty = unavailable */
-    Tcl_Size len;
+    /* In Tcl 9, Tcl_GetByteArrayFromObj returns NULL for a value with any
+     * codepoint > U+00FF and then writes NOTHING to len — initialize it and
+     * check the pointer, or `if (len <= 0)` reads an indeterminate value. */
+    Tcl_Size len = 0;
     unsigned char *bytes = Tcl_GetByteArrayFromObj(objv[1], &len);
-    /* nothing to detect on empty input — and don't hand ICU a 0-length / NULL
-     * buffer (ucsdet_setText on empty text is undefined for some ICU builds) */
-    if (len <= 0) { Tcl_SetObjResult(ip, Tcl_NewObj()); return TCL_OK; }
+    /* nothing to detect on empty/non-byte input — and don't hand ICU a
+     * 0-length / NULL buffer (ucsdet_setText on empty text is undefined for
+     * some ICU builds) */
+    if (bytes == nullptr || len <= 0) { Tcl_SetObjResult(ip, Tcl_NewObj()); return TCL_OK; }
+    /* ucsdet_setText takes an int32: clamp (detection only reads a prefix
+     * anyway; a >2 GiB length would go negative = "NUL-terminated" overread) */
+    if (len > (Tcl_Size)(1 << 20)) { len = (Tcl_Size)(1 << 20); }
     int err = 0;
     UCSD det = p_open(&err);
     if (err > 0 || !det) { Tcl_SetObjResult(ip, Tcl_NewObj()); return TCL_OK; }

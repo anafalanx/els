@@ -1,0 +1,497 @@
+# tests/recover.test -- the crash-recovery / autosave subsystem (R2).
+#
+# Swap files under <configdir>/swap/ protect unsaved edits across a crash;
+# orphaned swaps from a dead session are offered for non-destructive recovery on
+# the next launch.  These are in-process, deterministic, headless tests: timers
+# are driven by direct calls (never real `after`), liveness is forced onto the
+# pure-Tcl mtime path (swap_test_mtime) and faked via forged lock mtimes, and
+# external file changes are simulated with byte rewrites.  No process is killed.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test ::tcltest::testConstraint
+
+# Fresh UI + enabled, pinned-into-tmp autosave; a wiped swap dir each test.
+proc recover_reset {} {
+    els_reset
+    set ::els::swap_enabled 1
+    set ::els::swap_test_mtime 1                  ;# force forgeable mtime liveness
+    set ::els::session_id_cached "host-self-0000000000000000"
+    set ::els::session_token_cached "0000000000000000"
+    catch {file delete -force [file join $::ELS_TMP handoff]}   ;# single-instance spool
+    set d [file join $::ELS_TMP swap]
+    catch {file delete -force $d}
+    file mkdir $d
+    # Hard guard: a swap must NEVER escape the temp tree onto the real config dir.
+    if {[file normalize [els::swap_dir]] ne [file normalize $d]} {
+        error "swap dir not pinned under tmp: [els::swap_dir]"
+    }
+}
+# Forge a swap file as if written by another (dead) session.
+proc forge_swap {sid docId text {path ""} {savedSig ""} {enc utf-8} {eol lf}} {
+    set d [dict create schema 1 sessionId $sid docId $docId path $path enc $enc \
+               bom 0 eol $eol cursor 1.0 dirty 1 savedSig $savedSig \
+               mtime [clock seconds] host forged \
+               bodyCrc [zlib crc32 [encoding convertto utf-8 $text]] text $text]
+    set payload [encoding convertto utf-8 $d]
+    set bytes "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+    set f [file join [els::swap_dir] "swp-$sid-$docId.swp"]
+    raw_write $f $bytes
+    return $f
+}
+# Forge a session lock with a fresh (alive=1) or stale (alive=0) mtime.
+proc forge_lock {sid alive} {
+    set lp [els::lock_path $sid]
+    raw_write $lp "pid 0 token forged host forged started 0 ver 1"
+    file mtime $lp [expr {$alive ? [clock seconds] : [clock seconds] - 9999}]
+}
+
+# ===== swap file: write + round-trip + self-validation =====================
+
+test swap-write-1.1 {swap_flush_doc writes a valid, round-trippable swap} -setup recover_reset -body {
+    set id [els::new_doc]
+    [els::W $id] insert end "hello\nworld"
+    set ::els::dirtySince($id) 1
+    set rc [els::swap_flush_doc $id]
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    list $rc [expr {$rec ne ""}] \
+        [expr {[dict get $rec text] eq "hello\nworld"}] \
+        [dict get $rec schema]
+} -result {1 1 1 1}
+
+test swap-write-1.2 {swap stores lossless UTF-8, not the doc's lossy encoding} -setup recover_reset -body {
+    set id [els::new_doc]
+    set ::els::docEnc($id) cp1252           ;# cannot represent CJK
+    [els::W $id] insert end "café 中文"
+    set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    expr {[dict get $rec text] eq "café 中文"}
+} -result 1
+
+test swap-write-1.3 {the swap write is atomic -- no .tmp residue} -setup recover_reset -body {
+    set id [els::new_doc] ; [els::W $id] insert end "z" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    llength [glob -nocomplain -directory [els::swap_dir] .swp-*.tmp]
+} -result 0
+
+test swap-validate-1.1 {swap_read rejects missing-magic / truncated swaps, never raises} -setup recover_reset -body {
+    set f [file join [els::swap_dir] swp-x-d0.swp]
+    raw_write $f "ELSSWAP v1\nthis payload has no trailer"
+    set r1 [els::swap_read $f]
+    raw_write $f "no magic at all"
+    set r2 [els::swap_read $f]
+    list [expr {$r1 eq ""}] [expr {$r2 eq ""}] [llength $::els_test_bgerrors]
+} -result {1 1 0}
+
+test swap-validate-1.2 {a flipped payload byte fails the crc check} -setup recover_reset -body {
+    set id [els::new_doc] ; [els::W $id] insert end "important data" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set f [els::swap_path [els::session_id] $id]
+    set b [raw_read $f]
+    set i [expr {[string length $b] / 2}]   ;# squarely inside the payload
+    raw_write $f [string replace $b $i $i "~"]
+    list [expr {[els::swap_read $f] eq ""}] [llength $::els_test_bgerrors]
+} -result {1 0}
+
+# ===== change-detection ====================================================
+
+test swap-change-1.1 {an unchanged buffer is not rewritten; an edit is} -setup recover_reset -body {
+    set id [els::new_doc] ; [els::W $id] insert end "x" ; set ::els::dirtySince($id) 1
+    set rc1 [els::swap_flush_doc $id]
+    set rc2 [els::swap_flush_doc $id]                    ;# unchanged
+    [els::W $id] insert end "y" ; set ::els::dirtySince($id) 1
+    set rc3 [els::swap_flush_doc $id]
+    list $rc1 $rc2 $rc3
+} -result {1 0 1}
+
+test swap-suspend-1.1 {swap_suspend makes the writer a no-op} -setup recover_reset -body {
+    set id [els::new_doc] ; [els::W $id] insert end "x" ; set ::els::dirtySince($id) 1
+    set ::els::swap_suspend 1
+    set rc [els::swap_flush_doc $id]
+    set ::els::swap_suspend 0
+    list $rc [file exists [els::swap_path [els::session_id] $id]]
+} -result {0 0}
+
+test swap-untitled-1.1 {untitled dirty doc gets a path-"" swap; pristine empty gets none} -setup recover_reset -body {
+    set id [els::new_doc]
+    set rcEmpty [els::swap_flush_doc $id]
+    [els::W $id] insert end "a note" ; set ::els::dirtySince($id) 1
+    set rcDirty [els::swap_flush_doc $id]
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    list $rcEmpty $rcDirty [dict get $rec path] [dict get $rec savedSig]
+} -result {0 1 {} {}}
+
+# ===== clear-on-clean ======================================================
+
+test swap-cleanup-1.1 {a clean save deletes the doc's swap} -setup recover_reset -body {
+    set p [file join $::ELS_TMP clean.txt] ; raw_write $p "orig\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "more" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set f [els::swap_path [els::session_id] $id]
+    set existed [file exists $f]
+    els::save
+    list $existed [file exists $f]
+} -result {1 0}
+
+test swap-cleanup-1.2 {a clean (discarded) close deletes the doc's swap} -setup recover_reset -body {
+    set id [els::new_doc] ; [els::W $id] insert end "buf" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set f [els::swap_path [els::session_id] $id]
+    set existed [file exists $f]
+    set ::els_test_mbanswer no       ;# discard the unsaved changes on close
+    els::close_doc $id
+    list $existed [file exists $f]
+} -result {1 0}
+
+# ===== reconcile against the file's current on-disk state ==================
+
+test reconcile-1.1 {branch selection: match / changed / missing / untitled} -setup recover_reset -body {
+    set p [file join $::ELS_TMP rec.txt] ; raw_write $p "content\n"
+    set sig [els::file_sig $p]
+    list [els::recover_reconcile [dict create path $p savedSig $sig]] \
+         [els::recover_reconcile [dict create path $p savedSig "1:1:1"]] \
+         [els::recover_reconcile [dict create path [file join $::ELS_TMP gone.txt] savedSig ""]] \
+         [els::recover_reconcile [dict create path "" savedSig ""]]
+} -result {match changed missing untitled}
+
+# ===== recovery loads a DIRTY buffer and never writes the user's file ======
+
+test recover-apply-1.1 {recover loads a dirty buffer, applies record metadata, never writes disk} -setup recover_reset -body {
+    set p [file join $::ELS_TMP doc.txt] ; raw_write $p "ON DISK\n"
+    set sig [els::file_sig $p]
+    set f [forge_swap "host-9-dead" d0 "RECOVERED BODY" $p $sig cp1252 crlf]
+    els::recover_apply [list $f [els::swap_read $f] match] recover
+    set id ""
+    foreach d $::els::docs {
+        if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set id $d }
+    }
+    list [els::doc_dirty $id] [els_text $id] [raw_read $p] \
+         [file exists $f] $::els::docEnc($id) $::els::docEol($id)
+} -result [list 1 {RECOVERED BODY} "ON DISK\n" 0 cp1252 crlf]
+
+test recover-apply-1.2 {discard deletes the swap, opens no tab, leaves disk intact} -setup recover_reset -body {
+    set p [file join $::ELS_TMP doc2.txt] ; raw_write $p "DISK\n"
+    set f [forge_swap "host-9-dead" d0 "body" $p [els::file_sig $p]]
+    set before [llength $::els::docs]
+    els::recover_apply [list $f [els::swap_read $f] match] discard
+    list [file exists $f] [expr {[llength $::els::docs] == $before}] [raw_read $p]
+} -result [list 0 1 "DISK\n"]
+
+# ===== precedence: merge onto a restored tab, never clobber a dirty one =====
+
+test recover-precedence-1.1 {a swap for an already-open CLEAN tab merges onto it (no duplicate)} -setup recover_reset -body {
+    set p [file join $::ELS_TMP pre.txt] ; raw_write $p "disk\n"
+    els::open $p ; set rid $::els::active
+    set before [llength $::els::docs]
+    set f [forge_swap "host-x-dead" d0 "swapped body" $p [els::file_sig $p]]
+    els::recover_apply [list $f [els::swap_read $f] match] recover
+    list [expr {[llength $::els::docs] == $before}] [els_text $rid]
+} -result {1 {swapped body}}
+
+test recover-precedence-1.2 {a user-dirtied tab is NOT clobbered; recovery opens a separate tab} -setup recover_reset -body {
+    set p [file join $::ELS_TMP pre2.txt] ; raw_write $p "disk\n"
+    els::open $p ; set rid $::els::active
+    [els::W $rid] insert end "USER EDIT"          ;# dirtied post-relaunch
+    set before [llength $::els::docs]
+    set f [forge_swap "host-y-dead" d0 "swap body" $p [els::file_sig $p]]
+    els::recover_apply [list $f [els::swap_read $f] match] recover
+    list [expr {[llength $::els::docs] == $before + 1}] \
+         [expr {[els_text $rid] ne "swap body"}]
+} -result {1 1}
+
+# ===== liveness + multi-instance ===========================================
+
+test liveness-1.1 {a live-lock swap is skipped; a stale-lock swap is an orphan} -setup recover_reset -body {
+    forge_swap "host-1-live" d0 "live edits" "" "" ; forge_lock "host-1-live" 1
+    forge_swap "host-2-dead" d0 "dead edits" "" "" ; forge_lock "host-2-dead" 0
+    set sids {}
+    foreach o [els::swap_scan_orphans] { lappend sids [dict get [lindex $o 1] sessionId] }
+    lsort $sids
+} -result host-2-dead
+
+test liveness-1.2 {an own-session swap is never scanned as an orphan} -setup recover_reset -body {
+    set id [els::new_doc] ; [els::W $id] insert end "mine" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id            ;# writes under [els::session_id] (ours)
+    forge_swap "host-3-dead" d0 "theirs" "" "" ; forge_lock "host-3-dead" 0
+    set sids {}
+    foreach o [els::swap_scan_orphans] { lappend sids [dict get [lindex $o 1] sessionId] }
+    lsort $sids
+} -result host-3-dead
+
+test multiinstance-1.1 {a live peer's swap file is left untouched on disk} -setup recover_reset -body {
+    set fLive [forge_swap "host-A-live" d0 "A unsaved" "" ""] ; forge_lock "host-A-live" 1
+    set fDead [forge_swap "host-B-dead" d0 "B unsaved" "" ""] ; forge_lock "host-B-dead" 0
+    set plans [els::recover_scan]
+    set sids {} ; foreach p $plans { lappend sids [dict get [lindex $p 1] sessionId] }
+    list $sids [file exists $fLive] [file exists $fDead]
+} -result [list host-B-dead 1 1]
+
+test claim-1.1 {orphan_claim is exclusive -- a second claim of the same sid loses} -setup recover_reset -body {
+    list [els::orphan_claim "host-7-dead"] [els::orphan_claim "host-7-dead"]
+} -result {1 0}
+
+test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies them all} -setup recover_reset -body {
+    foreach s {host-a-dead host-b-dead host-c-dead} {
+        forge_swap $s d0 "body-$s" "" "" ; forge_lock $s 0
+    }
+    set plans [els::recover_scan]
+    set before [llength $::els::docs]
+    set ::els::recover_auto 1
+    els::recover_offer $plans
+    list [llength $plans] [expr {[llength $::els::docs] - $before}]
+} -result {3 3}
+
+# ===== sweep: stale temp/claim litter from dead sessions ===================
+
+# ---- user-issues batch C: single instance + file handoff ------------------
+
+# primary_running resolves config via config_candidates (it runs BEFORE
+# config_path is set), so set up under the pinned LOCALAPPDATA candidate.
+proc single_setup_primary {} {
+    lassign [els::config_candidates] near appdata
+    if {[file exists $near]} { return "" }     ;# a portable config is present: not testable here
+    file mkdir [file dirname $appdata]
+    raw_write $appdata "geometry 800x600"
+    set swapd [file join [file dirname $appdata] swap] ; file mkdir $swapd
+    set lp [file join $swapd host-prim-live.lock]
+    raw_write $lp "pid 0"
+    file mtime $lp [clock seconds]             ;# fresh -> live under the mtime path
+    return $appdata
+}
+
+test single-c.1 {a live session lock in the config dir means a primary is running} -setup recover_reset -body {
+    set appdata [single_setup_primary]
+    if {$appdata eq ""} { return {1 0} }
+    set live [els::primary_running]
+    file delete -force [file dirname $appdata]
+    set none [els::primary_running]
+    list $live $none
+} -result {1 0}
+
+test single-c.2 {ELS_NO_SINGLE_INSTANCE forces multi-instance} -setup recover_reset -body {
+    set appdata [single_setup_primary]
+    if {$appdata eq ""} { return {0 1} }
+    set ::env(ELS_NO_SINGLE_INSTANCE) 1
+    set off [els::primary_running]
+    unset ::env(ELS_NO_SINGLE_INSTANCE)
+    set on [els::primary_running]
+    file delete -force [file dirname $appdata]
+    list $off $on
+} -result {0 1}
+
+test single-c.3 {handoff round-trip: send spools the file, drain opens it and clears the spool} -setup recover_reset -body {
+    set p [file join $::ELS_TMP handed.txt] ; raw_write $p "from a second launch\n"
+    els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+    set hd [file join $::ELS_TMP handoff]
+    set spooled [llength [glob -nocomplain -directory $hd *.open]]
+    set before [llength $::els::docs]
+    els::handoff_drain
+    set opened 0
+    foreach d $::els::docs {
+        if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set opened 1 }
+    }
+    set left [llength [glob -nocomplain -directory $hd *.open]]
+    list $spooled $opened $left
+} -result {1 1 0}
+
+test single-c.4 {a stale handoff spool file is swept} -setup recover_reset -body {
+    set hd [file join $::ELS_TMP handoff] ; file mkdir $hd
+    set old [file join $hd old-1.open] ; raw_write $old ""
+    file mtime $old [expr {[clock seconds] - 9999}]
+    set fresh [file join $hd fresh-1.open] ; raw_write $fresh ""
+    els::swap_sweep
+    list [file exists $old] [file exists $fresh]
+} -result {0 1}
+
+# ---- bug-hunt wave 3: clean docs never swap; metadata + claims ------------
+
+test swap-clean-2.1 {swap_touch on a CLEAN doc latches nothing and writes nothing} -setup recover_reset -body {
+    set p [file join $::ELS_TMP cl.txt] ; raw_write $p "clean content\n"
+    els::open $p ; set id $::els::active
+    els::swap_touch                          ;# arrow key / PgUp on a clean doc
+    set latched [info exists ::els::dirtySince($id)]
+    set rc [els::swap_flush_doc $id]
+    list $latched $rc [file exists [els::swap_path [els::session_id] $id]]
+} -result {0 0 0}
+
+test swap-clean-2.2 {after a save, the Ctrl+S key release does not re-create the swap} -setup recover_reset -body {
+    set p [file join $::ELS_TMP cl2.txt] ; raw_write $p "v1\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "edit" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    els::save                                 ;# clears the swap
+    els::swap_touch                           ;# the key-release after Ctrl+S
+    els::swap_flush_all
+    file exists [els::swap_path [els::session_id] $id]
+} -result 0
+
+test swap-undo-2.1 {undo back to the saved state deletes the swap (nothing left to protect)} -setup recover_reset -body {
+    set p [file join $::ELS_TMP un.txt] ; raw_write $p "base\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "X" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set had [file exists [els::swap_path [els::session_id] $id]]
+    [els::W $id] edit modified 0              ;# back to the saved state
+    els::on_modified [els::W $id]             ;# the 1->0 transition event
+    list $had [file exists [els::swap_path [els::session_id] $id]]
+} -result {1 0}
+
+test swap-meta-2.1 {an encoding change on an already-dirty doc reaches the swap} -setup recover_reset -body {
+    set id [els::new_doc]
+    [els::W $id] insert end "text" ; set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id                   ;# swap with enc utf-8
+    els::switch_to $id
+    els::save_with cp1252 0                   ;# metadata-only change
+    els::swap_flush_doc $id                   ;# must rewrite despite same content
+    dict get [els::swap_read [els::swap_path [els::session_id] $id]] enc
+} -result cp1252
+
+test scan-keys-2.1 {one incomplete (validly framed) swap doesn't abort recovery for the batch} -setup recover_reset -body {
+    set d [dict create schema 1 sessionId host-i-dead docId d0]   ;# missing most keys
+    set payload [encoding convertto utf-8 $d]
+    raw_write [file join [els::swap_dir] swp-host-i-dead-d0.swp] \
+        "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+    forge_lock "host-i-dead" 0
+    forge_swap "host-g-dead" d0 "good body" "" "" ; forge_lock "host-g-dead" 0
+    set plans [els::recover_scan]
+    set sids {} ; foreach p $plans { lappend sids [dict get [lindex $p 1] sessionId] }
+    list [llength $::els_test_bgerrors] $sids
+} -result {0 host-g-dead}
+
+test scan-clean-2.1 {a clean-doc swap whose file is unchanged is reclaimed, not offered} -setup recover_reset -body {
+    set p [file join $::ELS_TMP sc.txt] ; raw_write $p "same\n"
+    set d [dict create schema 1 sessionId host-c2-dead docId d0 path $p enc utf-8 \
+               bom 0 eol lf cursor 1.0 dirty 0 savedSig [els::file_sig $p] \
+               mtime [clock seconds] host forged bodyCrc 0 text "same\n"]
+    set payload [encoding convertto utf-8 $d]
+    set f [file join [els::swap_dir] swp-host-c2-dead-d0.swp]
+    raw_write $f "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+    forge_lock "host-c2-dead" 0
+    set plans [els::recover_scan]
+    list [llength $plans] [file exists $f]
+} -result {0 0}
+
+test claims-2.1 {released claim markers let the next scan re-offer deferred swaps} -setup recover_reset -body {
+    forge_swap "host-l-dead" d0 "deferred" "" "" ; forge_lock "host-l-dead" 0
+    set n1 [llength [els::recover_scan]]      ;# claims host-l-dead
+    set marker [file join [els::swap_dir] host-l-dead.claimed]
+    set m1 [file exists $marker]
+    set n2 [llength [els::recover_scan]]      ;# still claimed -> withheld
+    els::recover_release_claims               ;# the "Later" path
+    set m2 [file exists $marker]
+    set n3 [llength [els::recover_scan]]      ;# re-claims -> re-offered
+    list $n1 $m1 $n2 $m2 $n3
+} -result {1 1 0 0 1}
+
+test swap-surrogate-1.1 {an unpaired surrogate in the buffer does not kill autosave} -setup recover_reset -body {
+    set id [els::new_doc]
+    [els::W $id] insert end "abc\uD800def"     ;# Tk holds it; strict convertto would throw
+    set ::els::dirtySince($id) 1
+    set rc [els::swap_flush_doc $id]
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    list $rc [expr {$rec ne ""}] \
+        [string match "abc?def" [dict get $rec text]] [llength $::els_test_bgerrors]
+} -result {1 1 1 0}
+
+test sweep-1.1 {swap_sweep removes stale .swp temp + claim litter, keeps fresh} -setup recover_reset -body {
+    set d [els::swap_dir]
+    raw_write [file join $d .swp-old-d0.tmp] "x" ; file mtime [file join $d .swp-old-d0.tmp] [expr {[clock seconds]-9999}]
+    raw_write [file join $d .swp-new-d0.tmp] "y"          ;# fresh -> kept
+    raw_write [file join $d host-q-dead.claimed] "z" ; file mtime [file join $d host-q-dead.claimed] [expr {[clock seconds]-9999}]
+    els::swap_sweep
+    list [file exists [file join $d .swp-old-d0.tmp]] \
+         [file exists [file join $d .swp-new-d0.tmp]] \
+         [file exists [file join $d host-q-dead.claimed]]
+} -result {0 1 0}
+
+# ===== regressions found by the adversarial code review ====================
+
+test review-docraw-1.1 {merging a swap onto an open clean tab preserves its cached disk bytes (so Reopen-with stays usable)} -setup recover_reset -body {
+    set p [file join $::ELS_TMP rw.txt] ; raw_write $p "disk bytes here\n"
+    els::open $p ; set rid $::els::active
+    set rawBefore [string length $::els::docRaw($rid)]
+    set f [forge_swap "host-z-dead" d0 "recovered" $p [els::file_sig $p]]
+    els::recover_apply [list $f [els::swap_read $f] match] recover
+    list [expr {$rawBefore > 0}] [expr {$::els::docRaw($rid) eq [raw_read $p]}]
+} -result {1 1}
+
+test review-reopen-1.1 {reopen_with refuses to blank a recovered tab with no cached disk bytes} -setup recover_reset -body {
+    set p [file join $::ELS_TMP ro.txt] ; raw_write $p "ON DISK\n"
+    set f [forge_swap "host-w-dead" d0 "recovered text" $p [els::file_sig $p]]
+    els::recover_apply [list $f [els::swap_read $f] match] recover   ;# new tab -> docRaw ""
+    set id ""
+    foreach d $::els::docs { if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set id $d } }
+    els::switch_to $id ; set ::els_test_mbcount 0
+    els::reopen_with utf-8 0
+    list $::els::docRaw($id) [els_text $id] [expr {$::els_test_mbcount >= 1}]
+} -result [list {} {recovered text} 1]
+
+test review-filesig-1.1 {file_sig returns a valid sampled sig above the crc cap (no return-in-catch)} -setup recover_reset -body {
+    set saved $::els::SWAP_FILE_CRC_CAP
+    set ::els::SWAP_FILE_CRC_CAP 100000          ;# exercise the >cap sampled branch
+    set p [file join $::ELS_TMP big.txt]
+    raw_write $p [string repeat "ABCDEFGH" 25000]   ;# 200000 bytes > cap and > 128 KiB
+    set sig [els::file_sig $p]
+    set ::els::SWAP_FILE_CRC_CAP $saved
+    list [expr {$sig ne ""}] [llength [split $sig :]]
+} -result {1 3}
+
+test review-bufsig-1.1 {a length-changing edit above the sig cap is caught without a dirtySince poke} -setup recover_reset -body {
+    set saved $::els::SWAP_SIG_FULL_CAP
+    set ::els::SWAP_SIG_FULL_CAP 10
+    set id [els::new_doc]
+    [els::W $id] insert end [string repeat "x" 50]   ;# > cap
+    set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id                          ;# caches swapSig, clears dirtySince
+    set sig1 [els::buf_sig $id]
+    [els::W $id] insert end "MORE"                    ;# length change, dirtySince NOT set
+    set sig2 [els::buf_sig $id]
+    set ::els::SWAP_SIG_FULL_CAP $saved
+    expr {$sig1 ne $sig2}
+} -result 1
+
+test review-swaptouch-1.1 {swap_touch latches dirtySince for a DIRTY active doc (the Replace fix)} -setup recover_reset -body {
+    set id [els::new_doc] ; els::switch_to $id
+    [els::W $id] insert end "edited"          ;# Replace always edits before touching
+    unset -nocomplain ::els::dirtySince($id)
+    els::swap_touch
+    info exists ::els::dirtySince($id)
+} -result 1
+
+test review-undo-clean-1.1 {on_modified clears dirtySince when the buffer returns to clean (undo-to-clean)} -setup recover_reset -body {
+    set id [els::new_doc]
+    [els::W $id] insert end "x"
+    els::on_modified [els::W $id]            ;# dirty -> latch set
+    set had [info exists ::els::dirtySince($id)]
+    [els::W $id] edit modified 0             ;# undo back to clean
+    els::on_modified [els::W $id]            ;# clean -> latch cleared
+    list $had [info exists ::els::dirtySince($id)]
+} -result {1 0}
+
+test review-scan-keep-1.1 {an unreadable swap with a FRESH mtime is NOT deleted by the scan} -setup recover_reset -body {
+    set f [file join [els::swap_dir] swp-host-c-dead-d0.swp]
+    raw_write $f "ELSSWAP v1\ncorrupt, no trailer"    ;# swap_read -> ""
+    forge_lock "host-c-dead" 0
+    list [llength [els::swap_scan_orphans]] [file exists $f]
+} -result {0 1}
+
+test review-sweep-corrupt-1.1 {swap_sweep reclaims an OLD corrupt swap, keeps a FRESH one} -setup recover_reset -body {
+    set old [file join [els::swap_dir] swp-host-old-d0.swp]
+    set new [file join [els::swap_dir] swp-host-new-d0.swp]
+    raw_write $old "ELSSWAP v1\ncorrupt" ; file mtime $old [expr {[clock seconds]-9999}]
+    raw_write $new "ELSSWAP v1\ncorrupt"
+    els::swap_sweep
+    list [file exists $old] [file exists $new]
+} -result {0 1}
+
+test review-recovered-label-1.1 {a recovered tab is labelled "(recovered)"; saving clears the marker} -setup recover_reset -body {
+    set f [forge_swap "host-r-dead" d0 "recovered note"]      ;# untitled
+    els::recover_apply [list $f [els::swap_read $f] untitled] recover
+    set id [lindex $::els::docs end]
+    set labelled [string match "*(recovered)*" [els::tab_text $id]]
+    els::switch_to $id
+    set ::els_test_savefile [file join $::ELS_TMP saved-recovered.txt]
+    els::save
+    list $labelled [info exists ::els::docRecovered($id)]
+} -result {1 0}
