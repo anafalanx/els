@@ -90,6 +90,25 @@ test dirty-1.1 {an edit marks the document dirty and bullets the tab} -setup {el
     list $clean [els::doc_dirty $::els::active] [els::tab_text $::els::active]
 } -result {0 1 {• untitled}}
 
+# ---- user-issues batch A ---------------------------------------------------
+
+test issue-a.8 {new documents default to the platform EOL (CRLF on Windows)} -setup {els_reset} -body {
+    set id [els::new_doc]
+    set eol $::els::docEol($id)
+    [els::W $id] insert end "one\ntwo"
+    set ::els_test_savefile [file join $::ELS_TMP ia8.txt]
+    els::switch_to $id ; els::save
+    list $eol [string match "*one\r\ntwo*" [raw_read [file join $::ELS_TMP ia8.txt]]]
+} -result {crlf 1}
+
+test issue-a.9 {files opened from disk keep their detected EOL (no CRLF takeover)} -setup {els_reset} -body {
+    set p [file join $::ELS_TMP ia9.txt] ; raw_write $p "a\nb\n"
+    els::open $p
+    [els::T] insert end "c"
+    els::save
+    list $::els::docEol($::els::active) [raw_read $p]
+} -result [list lf "a\nb\nc"]
+
 # ---- bug-hunt wave 4: numeric-looking names + failed-open behavior --------
 
 test name-4.1 {numeric-looking file names are not canonicalized (007 stays 007, nan does not throw)} -setup {els_reset} -body {

@@ -238,3 +238,19 @@ test adaptcase-3.1 {adapt-case works for non-ASCII (Unicode) matches} \
         -setup {find_reset ; set ::els::find_adapt 1} -body {
     list [els::adapt_case ПРИВЕТ hello] [els::adapt_case привет HELLO] [els::adapt_case Привет hello]
 } -result {HELLO hello Hello}
+
+# ---- user-issues batch A ---------------------------------------------------
+
+test wrapfeedback-a.1 {stepping past the last match announces the wrap; normal steps stay quiet} -setup {find_reset} -body {
+    [els::T] insert end "x x x"
+    set ::els::find_q x ; els::find_update      ;# at match 0
+    els::find_step 1                             ;# 0 -> 1: no wrap
+    set quiet $::els::find_count
+    els::find_step 1                             ;# 1 -> 2: no wrap
+    els::find_step 1                             ;# 2 -> 0: WRAP
+    set noisy $::els::find_count
+    els::find_step -1                            ;# 0 -> 2: wrap backwards
+    set back $::els::find_count
+    list [string match "*(wrapped)*" $quiet] [string match "*(wrapped)*" $noisy] \
+         [string match "*(wrapped)*" $back]
+} -result {0 1 1}

@@ -411,15 +411,20 @@ test ui-8.3b {opening an already-open file switches to its tab} -setup {ui_reset
          [expr {$::els::active ne $id2}]
 } -result {2 2 1 1}
 
-test ui-8.3c {encoding popup reserves room for cascades inside the window} -setup {ui_reset} -body {
+test ui-8.3c {encoding popup hugs its button: the MENU stays inside the window, the cascade reserve only uses slack} -setup {ui_reset} -body {
     event generate .sb.enc <ButtonPress-1> -x 5 -y 5
     update
     set menu [lindex $::els_test_popup_args 0]
     set x [lindex $::els_test_popup_args 1]
-    set reserve [els::menu_cascade_reserve $menu]
-    set right [expr {[winfo rootx .] + [winfo width .]}]
-    expr {$reserve > 0 && $x + [winfo reqwidth $menu] + $reserve <= $right}
-} -result 1
+    set mw [winfo reqwidth $menu]
+    set winl [winfo rootx .]
+    set winr [expr {$winl + [winfo width .]}]
+    set btnx [winfo rootx .sb.enc]
+    # never left of the button unless the menu itself wouldn't fit (the old
+    # full-cascade reserve shoved the menu far left of the picker)
+    set want [expr {max($winl, min($btnx, $winr - $mw))}]
+    list [expr {$x == $want}] [expr {$x + $mw <= $winr}]
+} -result {1 1}
 
 test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "keep" ; $w edit separator
@@ -1242,7 +1247,62 @@ test session-4.2 {a session-owning run persists its open docs as the session} -s
     expr {[dict get $data session_files] eq [list [file normalize $p]]}
 } -result 1
 
-# ---- regression: bug-hunt fixes (data loss / corruption) ----------------
+# ---- user-issues batch A ---------------------------------------------------
+
+test issue-a.1 {cancelling the first-run dialog postpones, never adopts a location} -setup {ui_reset} -body {
+    set ::els::config_path ""
+    els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
+    catch {wm withdraw .cfgask}
+    els::config_postpone_choice .cfgask        ;# the WM close / Escape path
+    list $::els::config_path [winfo exists .cfgask]
+} -cleanup {
+    set ::els::config_path [file join $::ELS_TMP els.conf]
+} -result {{} 0}
+
+test issue-a.2 {Markdown is not offered in the open/save filetypes} -body {
+    string match -nocase "*markdown*" [els::filetypes]
+} -result 0
+
+test issue-a.3 {Help menu links to the GitHub repo} -setup {ui_reset} -body {
+    set found 0
+    for {set i 0} {$i <= [.menu.help index end]} {incr i} {
+        if {[.menu.help type $i] eq "command" &&
+            [.menu.help entrycget $i -label] eq "els on GitHub"} { set found 1 }
+    }
+    set found
+} -result 1
+
+test issue-a.4 {goto entry rejects non-numeric input at the keyboard} -setup {ui_reset} -body {
+    els::goto_line
+    catch {wm withdraw .goto}
+    .goto.f.e insert 0 abc                     ;# validated: rejected
+    set bad [.goto.f.e get]
+    .goto.f.e insert 0 42
+    set good [.goto.f.e get]
+    catch {destroy .goto}
+    list $bad $good
+} -result {{} 42}
+
+test issue-a.5 {statusbar shows the path length in its normal depiction} -setup {ui_reset} -body {
+    els::open [els_tmpfile ia5.txt "x\n"]
+    update idletasks
+    els::update_namelabel
+    set t [.sb.name cget -text]
+    set want [string length [els::display_path $::els::docPath($::els::active)]]
+    list [string match "*\\\[$want\\\]" $t] [string match "*ia5.txt*" $t]
+} -result {1 1}
+
+test issue-a.6 {the update indicator has a hover state} -setup {ui_reset} -body {
+    list [expr {[bind .sb.update <Enter>] ne ""}] [expr {[bind .sb.update <Leave>] ne ""}]
+} -result {1 1}
+
+test issue-a.7 {find/replace entries grow a clear button while non-empty} -setup {ui_reset} -body {
+    els::find_show find ; update idletasks
+    set ::els::find_q "needle" ; update idletasks
+    set shown [winfo ismapped .find.fr.q.clearx]
+    event generate .find.fr.q.clearx <Button-1> ; update
+    list $shown $::els::find_q [winfo ismapped .find.fr.q.clearx]
+} -result {1 {} 0}
 test reg-1.1 {Reopen-with-Encoding keeps edits saved since open (docRaw refreshed on save)} -setup {ui_reset} -body {
     set p [els_tmpfile reg11.txt "original line\n"]
     els::open $p

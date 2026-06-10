@@ -281,6 +281,10 @@ proc els::config_first_run {} {
     if {$::els::selftest} { set ::els::config_path $appdata ; return }
     els::config_choice_dialog $near $appdata
 }
+proc els::config_postpone_choice {top} {
+    catch {grab release $top}
+    catch {destroy $top}
+}
 proc els::config_apply_choice {near appdata} {
     els::set_config_path [expr {$::els::cfg_radio eq "near" ? $near : $appdata}]
     els::save_geometry
@@ -299,7 +303,12 @@ proc els::config_choice_dialog {near appdata} {
     wm transient $top .
     wm resizable $top 0 0
     set apply [list els::config_apply_choice $near $appdata]
-    wm protocol $top WM_DELETE_WINDOW $apply
+    # closing the dialog is a POSTPONE, not consent: it used to run $apply and
+    # silently adopt the default location as if Continue had been clicked.
+    # Postponing leaves config_path unset for this session (no config written,
+    # autosave/recovery stay off) and the choice is asked again next launch.
+    wm protocol $top WM_DELETE_WINDOW [list els::config_postpone_choice $top]
+    bind $top <Escape> [list els::config_postpone_choice $top]
     ttk::frame $top.f -padding 20 ; pack $top.f
     ttk::label $top.f.h -text "Where should els keep its settings?" \
         -font elsUIb -foreground $::els::INK
@@ -1108,6 +1117,8 @@ proc els::build {} {
     .menu add cascade -label Help -menu .menu.help
     .menu.help add command -label "Keyboard Shortcuts" -command els::shortcuts
     .menu.help add command -label "File Associations..." -command els::file_associations
+    .menu.help add command -label "els on GitHub" \
+        -command {els::open_url "https://github.com/anafalanx/els"}
     .menu.help add separator
     .menu.help add command -label "About els" -command els::about
 
@@ -1163,6 +1174,10 @@ proc els::build {} {
     bind .sb.enc  <Leave>     {els::status_link_leave .sb.enc}
     bind .sb.name <Configure> {els::update_namelabel}
     bind .sb.update <Button-1> {els::tip_cancel ; els::open_url "https://github.com/anafalanx/els/releases/latest"}
+    # hover affordance like the other status-bar links, but keeping the red
+    # accent (status_link_leave would reset it to MUTED)
+    bind .sb.update <Enter> {.sb.update configure -background $::els::TABBG}
+    bind .sb.update <Leave> {.sb.update configure -background $::els::CHROME}
     els::tooltip_for .sb.name els::name_tip
 
     # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter+vscroll ·
@@ -1301,12 +1316,18 @@ proc els::new_doc {{path ""}} {
     set docPath($id) $path
     set ::els::docEnc($id) utf-8
     set ::els::docBom($id) 0
-    set ::els::docEol($id) lf
+    set ::els::docEol($id) [els::default_eol]   ;# platform-native for NEW docs
     set ::els::docRaw($id) ""
     lappend docs $id
     els::make_tab $id
     els::switch_to $id
     return $id
+}
+# EOL for documents born in els (files opened from disk keep their detected
+# one): the platform convention — CRLF on Windows, LF elsewhere.
+proc els::default_eol {} {
+    if {$::tcl_platform(platform) eq "windows"} { return crlf }
+    return lf
 }
 proc els::doc_dirty {id} {
     set w [els::W $id]
@@ -1489,9 +1510,12 @@ proc els::update_namelabel {} {
     }
     set p $::els::docPath($active)
     if {$p eq ""} { .sb.name configure -text "untitled" ; return }
-    set avail [expr {[winfo width .sb.name] - 4}]
-    if {$avail < 24} { .sb.name configure -text [file tail $p] ; return }  ;# unrealized
-    .sb.name configure -text [els::elide_path $p $avail]
+    # the path's length rides along in the normal depiction (same [N] the hover
+    # tip shows), not only in the tooltip once the path elides
+    set suffix "  \[[string length [els::display_path $p]]\]"
+    set avail [expr {[winfo width .sb.name] - 4 - [font measure elsUI $suffix]}]
+    if {$avail < 24} { .sb.name configure -text [file tail $p]$suffix ; return }  ;# unrealized
+    .sb.name configure -text [els::elide_path $p $avail]$suffix
 }
 # Strip a Windows extended-length prefix (\\?\ or //?/, incl. the UNC form) from
 # a path.  Tcl's `file normalize` adds it for paths over MAX_PATH (260), and it
@@ -2056,7 +2080,13 @@ proc els::popup_up {menu widget} {
     set mw [winfo reqwidth $menu] ; set mh [winfo reqheight $menu]
     set nx [winfo rootx $widget]  ; set ny [expr {[winfo rooty $widget] - $mh}]
     set winl [winfo rootx .] ; set winr [expr {$winl + [winfo width .]}]
+    # Reserve room for a cascade submenu only as far as the slack allows: the
+    # full reserve used to shove the whole menu far LEFT of its button (the
+    # encoding picker's "Other (all)" cascade is wide).  The menu itself stays
+    # inside the window; a cascade may overflow it and Tk keeps that on screen.
     set reserve [els::menu_cascade_reserve $menu]
+    set slack [expr {$winr - $mw - $nx}]
+    if {$reserve > $slack} { set reserve [expr {$slack > 0 ? $slack : 0}] }
     set maxx [expr {$winr - $mw - $reserve}]
     if {$nx > $maxx} { set nx $maxx }
     if {$nx < $winl}           { set nx $winl }
@@ -2156,7 +2186,6 @@ proc els::filetypes {} {
     return {
         {{Text}           {.txt}}
         {{All files}      *}
-        {{Markdown}       {.md .markdown}}
         {{Tcl}            {.tcl}}
         {{C / C++}        {.c .h .cpp .hpp .cc}}
         {{Web}            {.html .htm .css .js .json .xml}}
@@ -3281,6 +3310,42 @@ proc els::build_findbar {} {
     # search/replacement text.  A widget-level binding with break pre-empts it.
     bind .find.fr.q <Control-h>    { els::find_show replace ; break }
     bind .find.rr.r <Control-h>    { els::find_show replace ; break }
+
+    els::entry_clear_button .find.fr.q ::els::find_q
+    els::entry_clear_button .find.rr.r ::els::find_r
+}
+
+# In-entry clear button: a small "×" hugging the entry's right edge, shown
+# only while the field has text; clicking empties the field (and re-runs the
+# search so stale highlights vanish with the query).
+proc els::entry_clear_button {entry var} {
+    set x $entry.clearx
+    set bg [ttk::style lookup TEntry -fieldbackground {} $::els::PAGE]
+    label $x -text "×" -font elsUI -cursor hand2 -bg $bg -fg $::els::MUTED \
+        -padx 2 -pady 0 -borderwidth 0
+    bind $x <Enter>    [list $x configure -fg $::els::INK]
+    bind $x <Leave>    [list $x configure -fg $::els::MUTED]
+    bind $x <Button-1> [list els::entry_clear $entry $var]
+    # re-installed on every els::build: drop the previous trace first so test
+    # rebuilds don't accumulate duplicates
+    catch {trace remove variable $var write [list els::entry_clear_sync $entry $var]}
+    trace add variable $var write [list els::entry_clear_sync $entry $var]
+    els::entry_clear_sync $entry $var
+}
+proc els::entry_clear_sync {entry var args} {
+    set x $entry.clearx
+    if {![winfo exists $x]} { return }
+    if {[set $var] ne ""} {
+        place $x -in $entry -relx 1.0 -x -3 -rely 0.5 -anchor e
+        raise $x
+    } else {
+        place forget $x
+    }
+}
+proc els::entry_clear {entry var} {
+    set $var ""
+    catch {focus $entry}
+    els::find_update
 }
 
 # ---- find-bar polish: tooltips, flash, regex help, history --------------
@@ -3667,7 +3732,12 @@ proc els::find_step {dir} {
     set idx [expr {(($find_current + $dir) % $n + $n) % $n}]
     lassign [lindex $find_matches $idx] s e
     if {![els::find_span_ok $w $s $e]} { els::find_update ; return }
+    # stepping past either end wraps — say so, instead of silently teleporting
+    # across the end-of-file border
+    set wrapped [expr {($dir > 0 && $idx <= $find_current) || \
+                       ($dir < 0 && $idx >= $find_current)}]
     els::find_highlight $idx
+    if {$wrapped && $n > 1} { append ::els::find_count "  (wrapped)" }
 }
 
 # Make a match's case template carry to its replacement (when Adapt case is on).
@@ -3761,7 +3831,10 @@ proc els::goto_line {} {
     wm transient $top .
     ttk::frame $top.f -padding 12
     ttk::label $top.f.l -text "Line (1 - $max):" -font elsUI
-    ttk::entry $top.f.e -width 10 -font elsMono
+    # digits only at the KEYBOARD: rejecting non-numeric input beats silently
+    # ignoring it at Go time
+    ttk::entry $top.f.e -width 10 -font elsMono \
+        -validate key -validatecommand {string is digit %P}
     ttk::frame $top.f.b
     ttk::button $top.f.b.ok     -text "Go"     -style Dialog.TButton -command [list els::goto_do $top]
     ttk::button $top.f.b.cancel -text "Cancel" -style Dialog.TButton -command [list destroy $top]
