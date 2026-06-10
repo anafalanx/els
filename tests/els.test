@@ -423,3 +423,130 @@ test as-1.10 {turning auto-save ON saves dirty pathed documents immediately} -se
     els::set_autosave 0                         ;# ...then its -command (no persist)
     list [els::doc_dirty $id] [raw_read $p]
 } -result [list 0 "base\nnow"]
+
+# ---- backups: previous versions ---------------------------------------------
+
+proc bk_dir {} { return [file join [file dirname $::els::config_path] backups] }
+proc bk_ring {p} { lsort [glob -nocomplain -directory [bk_dir] "[els::backup_stem $p].*.bak"] }
+
+test bk-1.1 {an overwriting save preserves the previous version} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0
+    set p [els_tmpfile bk11.txt "version one\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "and two"
+    els::save
+    set ring [bk_ring $p]
+    list [llength $ring] [raw_read [lindex $ring 0]] [string match "*and two*" [raw_read $p]]
+} -result [list 1 "version one\n" 1]
+
+test bk-1.2 {the first save of a new file makes no backup (nothing to preserve)} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0
+    set id [els::new_doc]
+    [els::W $id] insert end "fresh"
+    set p [file join $::ELS_TMP bk12.txt]
+    catch {file delete -force $p}      ;# truly new: not left over from a prior run
+    set ::els_test_savefile $p
+    els::save
+    list [file exists $p] [llength [bk_ring $p]]
+} -result {1 0}
+
+test bk-1.3 {the ring keeps only the newest BK_RING versions} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0 ; set ::els::BK_RING 3
+    set p [els_tmpfile bk13.txt "v0\n"]
+    set id [els::open $p]
+    for {set i 1} {$i <= 6} {incr i} {
+        [els::W $id] insert end "v$i\n"
+        els::save
+    }
+    llength [bk_ring $p]
+} -result 3
+
+test bk-1.4 {a fresh newest backup suppresses churn (min spacing)} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 3600
+    set p [els_tmpfile bk14.txt "original\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "a" ; els::save
+    [els::W $id] insert end "b" ; els::save
+    [els::W $id] insert end "c" ; els::save
+    set ring [bk_ring $p]
+    # one backup only, and it is the PRE-burst version
+    list [llength $ring] [raw_read [lindex $ring 0]]
+} -result [list 1 "original\n"]
+
+test bk-1.5 {auto-save also produces backups} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0 ; set ::els::autosave 1
+    set p [els_tmpfile bk15.txt "base\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "auto"
+    els::autosave_flush_doc $id
+    list [llength [bk_ring $p]] [raw_read [lindex [bk_ring $p] 0]]
+} -result [list 1 "base\n"]
+
+test bk-1.6 {backups off means no backup} -setup {els_reset} -body {
+    set ::els::backups 0
+    set p [els_tmpfile bk16.txt "one\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "two" ; els::save
+    list [llength [bk_ring $p]] [string match "*two*" [raw_read $p]]
+} -result {0 1}
+
+test bk-1.7 {a failing backup is a quiet note, the save still succeeds} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0
+    # make the backups DIR path unusable: a plain file sits where the dir goes
+    raw_write [bk_dir] "not a directory"
+    set p [els_tmpfile bk17.txt "one\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "two"
+    set ok [els::save]
+    set note [string match "backup failed:*" [.sb.name cget -text]]
+    file delete -force [bk_dir]
+    list $ok [string match "*two*" [raw_read $p]] $note $::els_test_mbcount
+} -result {1 1 1 0}
+
+test bk-1.8 {old backups age out via the sweep} -setup {els_reset} -body {
+    set ::els::backups 1
+    file mkdir [bk_dir]
+    set old [file join [bk_dir] "old.txt.00000000.20250101-000000.bak"]
+    raw_write $old "ancient"
+    file mtime $old [expr {[clock seconds] - $::els::BK_MAXAGE - 100}]
+    set fresh [file join [bk_dir] "new.txt.00000000.20990101-000000.bak"]
+    raw_write $fresh "recent"
+    set ::els::swap_enabled 1
+    els::swap_sweep
+    set ::els::swap_enabled 0
+    list [file exists $old] [file exists $fresh]
+} -result {0 1}
+
+test bk-1.9 {the Keep Backups choice persists through the config round-trip} -setup {els_reset} -body {
+    set ::els::backups 0
+    els::save_geometry
+    set ::els::backups 1
+    els::load_geometry
+    set v $::els::backups
+    catch {file delete -force $::els::config_path}
+    set v
+} -result 0
+
+test bk-1.10 {menu carries Keep Backups and Open Backups Folder} -setup {els_reset} -body {
+    set cb 0 ; set cmd 0
+    for {set i 0} {$i <= [.menu.file index end]} {incr i} {
+        set t [.menu.file type $i]
+        if {$t in {command checkbutton}} {
+            switch -- [.menu.file entrycget $i -label] {
+                "Keep Backups"        { set cb 1 }
+                "Open Backups Folder" { set cmd 1 }
+            }
+        }
+    }
+    list $cb $cmd
+} -result {1 1}
+
+test bk-1.11 {same-named files in different folders keep separate rings} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0
+    file mkdir [file join $::ELS_TMP bkA] [file join $::ELS_TMP bkB]
+    set pa [file join $::ELS_TMP bkA same.txt] ; raw_write $pa "AAA\n"
+    set pb [file join $::ELS_TMP bkB same.txt] ; raw_write $pb "BBB\n"
+    set ia [els::open $pa] ; [els::W $ia] insert end "a" ; els::save
+    set ib [els::open $pb] ; els::switch_to $ib ; [els::W $ib] insert end "b" ; els::save
+    list [raw_read [lindex [bk_ring $pa] 0]] [raw_read [lindex [bk_ring $pb] 0]]
+} -result [list "AAA\n" "BBB\n"]

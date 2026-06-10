@@ -43,6 +43,9 @@ in **Settings > Default apps**.
 - **Auto-save, opt-in** (File > Auto-save, off by default): documents that
   have a file are saved a moment after you stop typing, on tab switch, on
   focus loss, and on exit.
+- **Backups, on by default** (File > Keep Backups): every save that
+  overwrites a file first preserves the previous version in a bounded
+  `backups` folder next to `els.conf`.
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
   state under a flat tab strip; drag a tab to reorder.
 - **Find & replace** (Ctrl+F / Ctrl+H): Tcl ARE regex with live match
@@ -124,6 +127,21 @@ character), save anyway with substitute characters (your choice is remembered
 for that document until you pick another encoding), or cancel. The dialog
 names the first offending character and where it is.
 
+**Previous versions (backups).** Saving is the one moment els overwrites
+your data with new content, so every save that replaces an existing file
+first preserves what the file held, as a plain copy in a `backups` folder
+next to `els.conf` (for a portable install that is right next to `els.exe`).
+The folder is bounded, not an archive: a handful of versions per file, a
+burst of rapid saves keeps the version from before the burst rather than
+churning, very large files are skipped, and copies age out after about a
+month. Restoring is deliberately low-tech: **File > Open Backups Folder**,
+open the version you want (the name carries the original filename and a
+timestamp), and save it where it belongs. Backups never block a save: if one
+cannot be written, you get a quiet statusbar note and the save proceeds.
+**File > Keep Backups** turns the whole thing off; worth knowing either way
+is that copies of edited files linger there until they age out, including
+files you later delete or move.
+
 **Auto-save (optional).** **File > Auto-save** is off by default. When you
 turn it on, every document that has a file is saved automatically: a moment
 after you stop typing, when you switch tabs, when the els window loses focus,
@@ -131,10 +149,10 @@ and when you close a file or exit, always through the same atomic save.
 Untitled notes are never auto-saved (no filename is invented; crash recovery
 protects them), a save that would lose characters pauses auto-saving for that
 document until one manual save settles the question, and a failing auto-save
-shows a quiet statusbar note instead of a dialog. Be aware of what you are
-choosing: with auto-save on, the file on disk follows the buffer, so closing
-without saving stops being a way to discard an editing accident. That is
-exactly why it is opt-in.
+shows a quiet statusbar note instead of a dialog. With auto-save on, the file
+on disk follows the buffer, so closing without saving stops being a way to
+discard an editing accident; the backups folder above is what makes such an
+accident recoverable anyway.
 
 ![Find and replace with visible whitespace](docs/img/find-whitespace.png)
 

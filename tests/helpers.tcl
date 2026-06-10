@@ -149,6 +149,12 @@ proc els_reset {} {
     set ::els::handoff_after ""
     set ::els::autosave 0 ; set ::els::autosave_pending {}
     catch {after cancel $::els::autosave_after} ; set ::els::autosave_after ""
+    # backups OFF in the suite (the product default is on): save tests stay
+    # litter-free; backup tests enable + retune the knobs per test
+    set ::els::backups 0
+    set ::els::BK_RING 8 ; set ::els::BK_MININT 60
+    set ::els::status_note_after ""   ;# afters were cancelled above; unblock namelabel
+    catch {file delete -force [file join [file dirname $::els::config_path] backups]}
     # Release a held session lock BEFORE blanking the variables: the cfg tests
     # acquire a real one via set_config_path, and dropping the only reference
     # without closing leaked the channel and made their cleanup deletes fail

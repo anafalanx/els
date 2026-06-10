@@ -36,6 +36,11 @@ namespace eval els {
     variable autosave 0             ;# File ▸ Auto-save (opt-in, persisted)
     variable autosave_after ""      ;# debounced auto-save flush timer
     variable autosave_pending {}    ;# doc ids awaiting the debounced flush
+    variable backups 1              ;# File ▸ Keep Backups (on by default, persisted)
+    variable BK_RING 8              ;# previous versions kept per file
+    variable BK_MININT 60           ;# s: skip a backup if the newest is this fresh
+    variable BK_MAXAGE 2592000      ;# s: prune backups older than 30 days
+    variable BK_MAXSIZE 20971520    ;# bytes: don't back up files larger than 20 MB
     # ---- crash-recovery / autosave subsystem (R2 / docs robustness P0-b) ----
     # A swap file per dirty doc under <configdir>/swap/, written atomically and
     # often, so a crash / power-loss / kill never loses unsaved edits; on the next
@@ -388,6 +393,9 @@ proc els::load_geometry {} {
     if {![catch {dict get $data autosave} asv] && [string is boolean -strict $asv]} {
         set ::els::autosave [expr {$asv ? 1 : 0}]
     }
+    if {![catch {dict get $data backups} bkv] && [string is boolean -strict $bkv]} {
+        set ::els::backups [expr {$bkv ? 1 : 0}]
+    }
     if {![catch {dict get $data always_on_top} t] && [string is boolean -strict $t]} {
         set ::els::always_on_top [expr {$t ? 1 : 0}]
         catch {els::set_always_on_top 0}
@@ -429,6 +437,7 @@ proc els::save_geometry {} {
                          show_whitespace $::els::show_ws \
                          line_numbers $::els::show_linenos \
                          autosave $::els::autosave \
+                         backups $::els::backups \
                          always_on_top $::els::always_on_top \
                          font_size $::els::font_size \
                          restore_session $::els::restore_session \
@@ -1128,6 +1137,9 @@ proc els::build {} {
     .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
     .menu.file add checkbutton -label "Auto-save" -variable ::els::autosave \
         -command els::set_autosave
+    .menu.file add checkbutton -label "Keep Backups" -variable ::els::backups \
+        -command els::set_backups
+    .menu.file add command -label "Open Backups Folder" -command els::backups_open
     .menu.file add separator
     .menu.file add command -label "Close File" -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
@@ -1590,6 +1602,7 @@ proc els::settitle {} {
 proc els::update_namelabel {} {
     variable active
     if {![winfo exists .sb.name]} { return }
+    if {$::els::status_note_after ne ""} { return }   ;# a transient note holds the slot
     if {$active eq "" || ![info exists ::els::docPath($active)]} {
         .sb.name configure -text "" ; return
     }
@@ -2944,6 +2957,13 @@ proc els::swap_sweep {} {
                 catch {file delete -force $f}
             }
         }
+        # previous-version backups age out after BK_MAXAGE (default 30 days)
+        set bd [file join [file dirname $::els::config_path] backups]
+        foreach f [glob -nocomplain -directory $bd *.bak] {
+            if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::BK_MAXAGE} {
+                catch {file delete -force $f}
+            }
+        }
         # orphan locks: dead session with no surviving swaps
         foreach f [glob -nocomplain -directory $d *.lock] {
             set sid [file rootname [file tail $f]]
@@ -3224,7 +3244,80 @@ proc els::status_note {msg} {
     if {![winfo exists .sb.name]} { return }
     catch {after cancel $::els::status_note_after}
     .sb.name configure -text $msg
-    set ::els::status_note_after [after 4000 els::update_namelabel]
+    # while the timer is pending, update_namelabel leaves the note alone (a
+    # successful save calls settitle right after, which must not clobber it)
+    set ::els::status_note_after [after 4000 els::status_note_clear]
+}
+proc els::status_note_clear {} {
+    set ::els::status_note_after ""
+    catch {els::update_namelabel}
+}
+
+# ---- backups: previous versions ---------------------------------------------
+# Every save that OVERWRITES an existing file first preserves that file's
+# current content in <configdir>/backups/ (next to els.conf -- which is next
+# to the exe for a portable install).  Bounded: a ring of BK_RING versions per
+# file, a new backup is skipped while the newest is younger than BK_MININT
+# seconds (so an auto-save burst keeps the pre-burst version instead of
+# churning), files over BK_MAXSIZE are not backed up, and anything older than
+# BK_MAXAGE is pruned by the periodic sweep.  Best-effort by design: a failing
+# backup notes itself in the statusbar and never blocks the save.
+proc els::backup_dir {} {
+    if {$::els::config_path eq "" || $::els::selftest} { return "" }
+    return [file join [file dirname $::els::config_path] backups]
+}
+# Stable per-file ring key: the filename stays human-readable, a hash of the
+# full (case-folded) path keeps same-named files from different folders apart.
+proc els::backup_stem {path} {
+    set h [format %08x [zlib crc32 [encoding convertto -profile replace utf-8 \
+        [string tolower [file normalize $path]]]]]
+    return "[file tail $path].$h"
+}
+proc els::backup_keep {path} {
+    if {!$::els::backups} { return }
+    set dir [els::backup_dir]
+    if {$dir eq ""} { return }
+    if {[catch {file size $path} sz] || $sz > $::els::BK_MAXSIZE} { return }
+    # NO `return` inside this catch body: catch traps TCL_RETURN too, which
+    # would route the skip path into the "backup failed" note
+    if {[catch {
+        file mkdir $dir
+        set stem [els::backup_stem $path]
+        set ring [lsort [glob -nocomplain -directory $dir "$stem.*.bak"]]
+        # a fresh-enough newest backup already preserves the interesting
+        # (pre-burst) version: skip
+        set newest [lindex $ring end]
+        set fresh [expr {$newest ne "" && ![catch {file mtime $newest} mt] \
+                         && [clock seconds] - $mt < $::els::BK_MININT}]
+        if {!$fresh} {
+            set stamp [clock format [clock seconds] -format %Y%m%d-%H%M%S]
+            set target [file join $dir "$stem.$stamp.bak"]
+            set n 2
+            while {[file exists $target]} {     ;# same-second saves
+                set target [file join $dir "$stem.$stamp-$n.bak"]
+                incr n
+            }
+            set fh [::open $path rb] ; set bytes [read $fh] ; close $fh
+            set werr [els::write_atomic $target $bytes]
+            if {$werr ne ""} { error $werr }
+            # prune the ring to the newest BK_RING entries
+            set ring [lsort [glob -nocomplain -directory $dir "$stem.*.bak"]]
+            foreach old [lrange $ring 0 end-$::els::BK_RING] {
+                catch {file delete -force $old}
+            }
+        }
+    } err]} {
+        els::status_note "backup failed: $err"
+    }
+}
+proc els::backups_open {} {
+    set dir [els::backup_dir]
+    if {$dir eq ""} { return }
+    catch {file mkdir $dir}
+    catch {exec explorer.exe [file nativename $dir] &}
+}
+proc els::set_backups {{persist 1}} {
+    if {$persist} { els::save_geometry }
 }
 
 # ---- auto-save (opt-in) ----------------------------------------------------
@@ -3323,6 +3416,9 @@ proc els::save {{id ""} {quiet 0}} {
             utf-32be { set bytes "\x00\x00\xFE\xFF$bytes" }
         }
     }
+    # an overwriting save first preserves the file's CURRENT content as a
+    # backup (best-effort; never blocks the save)
+    if {[file exists $docPath($id)]} { els::backup_keep $docPath($id) }
     if {[set err [els::write_atomic $docPath($id) $bytes]] ne ""} {
         if {$quiet} {
             els::status_note "auto-save failed: [file tail $docPath($id)]"
