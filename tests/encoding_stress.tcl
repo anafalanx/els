@@ -17,6 +17,12 @@
 
 source [file join [file dirname [info script]] helpers.tcl]
 
+# The stress deliberately saves text under WRONG encodings (mojibake torture),
+# so the lossy-save guard fires constantly: consent to lossy, exactly as a
+# user hammering "Save anyway" would.  (A proc override, not the canned-answer
+# variable: els_reset restores that variable to "cancel" between samples.)
+proc ::els::lossy_ask {id enc line col uhex count} { return lossy }
+
 set ::BUDGET_MS 2000           ;# any single UI op slower than this is a failure
                                ;# (real ops are ~40 ms; a true hang is seconds+)
 set ::FAIL {}                  ;# collected failures

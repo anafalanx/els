@@ -385,3 +385,93 @@ test enc-6.6 {a 0x81-bearing file round-trips byte-exact through open + save} -s
     set ::els::have_detect $saved
     string equal [raw_read $p] $bytes
 } -result 1
+
+# ---- lossy-save guard (roadmap #4): never silently drop characters ---------
+
+# Scaffold: a saved ascii-encoded file whose buffer then gains a char ascii
+# cannot hold.  Returns the doc id (the file path is in docPath).
+proc lossy_doc {} {
+    set p [els_tmpfile lossy.txt "plain\n"]
+    set id [els::open $p]
+    set ::els::docEnc($id) ascii
+    [els::T] insert end "café"      ;# é is not ascii
+    return $id
+}
+
+test lossy-1.1 {cancel writes nothing and keeps the document dirty} -setup {els_reset} -body {
+    set id [lossy_doc]
+    set ::els_test_lossy_answer cancel
+    set ok [els::save]
+    list $ok [llength $::els_test_lossy_calls] [els::doc_dirty $id] [raw_read $::els::docPath($id)]
+} -result [list 0 1 1 "plain\n"]
+
+test lossy-1.2 {Save as UTF-8 keeps every character and switches the document} -setup {els_reset} -body {
+    set id [lossy_doc]
+    set ::els_test_lossy_answer utf8
+    set ok [els::save]
+    list $ok $::els::docEnc($id) [els::doc_dirty $id] \
+        [string match "*caf\xC3\xA9*" [raw_read $::els::docPath($id)]] \
+        [.sb.enc cget -text]
+} -result {1 utf-8 0 1 UTF-8}
+
+test lossy-1.3 {Save anyway replaces, and the consent latches for the session} -setup {els_reset} -body {
+    set id [lossy_doc]
+    set ::els_test_lossy_answer lossy
+    set ok1 [els::save]
+    set first [raw_read $::els::docPath($id)]
+    [els::T] insert end " ü"        ;# more non-ascii; must NOT re-ask
+    set ok2 [els::save]
+    list $ok1 $ok2 [string match "*caf?*" $first] [llength $::els_test_lossy_calls] \
+        [info exists ::els::docLossyOk($id)]
+} -result {1 1 1 1 1}
+
+test lossy-1.4 {clean text saves without any question} -setup {els_reset} -body {
+    set p [els_tmpfile lossyclean.txt "plain\n"]
+    set id [els::open $p]
+    set ::els::docEnc($id) ascii
+    [els::T] insert end "more"
+    set ok [els::save]
+    list $ok [llength $::els_test_lossy_calls] [raw_read $p]
+} -result [list 1 0 "plain\nmore"]
+
+test lossy-1.5 {describe pinpoints line, column, codepoint, and count} -body {
+    lassign [els::lossy_describe ascii "ab\ncdé xü é"] line col uhex count
+    list $line $col $uhex $count
+} -result {2 3 00E9 3}
+
+test lossy-1.5b {describe stays correct where -failindex lies (gb2312-raw byte-index quirk)} -body {
+    # gb2312-raw encodes CJK but NOT ASCII, and Tcl 9.0.3's convertto
+    # -failindex reports a BYTE index into the internal UTF-8 rep for it
+    # (contradicting encoding(n)) -- lossy_first must locate the failure
+    # itself.  Here: 你(0) 好(1) A(2) 界(3) \n(4) -> first fail is "A" at
+    # char 2 = line 1 col 3; "A" and "\n" both fail -> count 2.
+    lassign [els::lossy_describe gb2312-raw "你好A界\n"] line col uhex count
+    list $line $col $uhex $count
+} -result {1 3 0041 2}
+
+test lossy-1.6 {quiet mode (auto-save) pauses instead of asking} -setup {els_reset} -body {
+    set id [lossy_doc]
+    set ok [els::save $id 1]
+    list $ok [llength $::els_test_lossy_calls] [info exists ::els::docLossyPause($id)] \
+        [raw_read $::els::docPath($id)]
+} -result [list 0 0 1 "plain\n"]
+
+test lossy-1.7 {choosing a new encoding clears the lossy consent latch} -setup {els_reset} -body {
+    set id [lossy_doc]
+    set ::els_test_lossy_answer lossy
+    els::save
+    set latched [info exists ::els::docLossyOk($id)]
+    els::save_with cp1252 0                  ;# é IS representable here
+    set cleared [info exists ::els::docLossyOk($id)]
+    els::save
+    list $latched $cleared [llength $::els_test_lossy_calls] \
+        [string match "*caf\xE9*" [raw_read $::els::docPath($id)]]
+} -result {1 0 1 1}
+
+test lossy-1.8 {close-with-save aborts the close when the guard is cancelled} -setup {els_reset} -body {
+    set id [lossy_doc]
+    set ::els_test_lossy_answer cancel
+    set ::els_test_mbanswer yes              ;# "Save changes?" -> yes -> guard -> cancel
+    els::close_doc $id
+    list [expr {$id in $::els::docs}] [els::doc_dirty $id]
+} -result {1 1}

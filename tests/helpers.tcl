@@ -98,6 +98,15 @@ set ::els_test_mbqueue {}
 proc raw_write {path bytes} { set fh [::open $path wb] ; puts -nonewline $fh $bytes ; close $fh }
 proc raw_read  {path}       { set fh [::open $path rb] ; set d [read $fh] ; close $fh ; return $d }
 
+# Stub the lossy-save dialog (a vwait modal) with a canned answer, recording
+# each call so tests can assert "asked once, with these facts".
+set ::els_test_lossy_answer cancel
+set ::els_test_lossy_calls {}
+proc ::els::lossy_ask {id enc line col uhex count} {
+    lappend ::els_test_lossy_calls [list $enc $line $col $uhex $count]
+    return $::els_test_lossy_answer
+}
+
 # Stub the OS-level menu post.  A real `tk_popup` in an unfocused/automated
 # context blocks (waiting on a grab) and would flash a grabbing menu on the
 # user's screen.  The real <Button-1> bindings still fire and build/configure
@@ -122,10 +131,13 @@ proc els_reset {} {
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    foreach a {docPath docEnc docBom docEol docRaw docRecovered swapSig savedSig dirtySince loading} {
+    foreach a {docPath docEnc docBom docEol docRaw docRecovered swapSig savedSig
+               dirtySince loading docLossyOk docLossyPause} {
         array unset ::els::$a
         array set ::els::$a {}
     }
+    set ::els_test_lossy_answer cancel
+    set ::els_test_lossy_calls {}
     # Crash-recovery subsystem: cancel any pending timers and reset all state so a
     # stray swap `after` can't fire into the next test.  swap_enabled/swap_test_mtime
     # must be restored here too — recover.test enables them per-test, and a leak

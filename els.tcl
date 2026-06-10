@@ -30,6 +30,9 @@ namespace eval els {
     variable docEol ; array set docEol {}   ;# id -> lf | crlf | cr
     variable docRaw ; array set docRaw {}   ;# id -> exact bytes as loaded ("" = never from disk)
     variable docRecovered ; array set docRecovered {}  ;# id -> 1 if this tab is crash-recovered (unsaved)
+    variable docLossyOk   ; array set docLossyOk {}    ;# id -> user accepted lossy saves (this session)
+    variable docLossyPause; array set docLossyPause {} ;# id -> auto-save paused (unencodable chars)
+    variable status_note_after ""   ;# transient statusbar note timer
     # ---- crash-recovery / autosave subsystem (R2 / docs robustness P0-b) ----
     # A swap file per dirty doc under <configdir>/swap/, written atomically and
     # often, so a crash / power-loss / kill never loses unsaved edits; on the next
@@ -1446,6 +1449,7 @@ proc els::close_doc {id} {
     destroy [els::W $id]
     destroy [els::tabW $id]
     unset -nocomplain ::els::docRecovered($id)
+    unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
         ::els::docEol($id) ::els::docRaw($id) \
         ::els::savedSig($id) ::els::loading($id)
@@ -2209,6 +2213,8 @@ proc els::reopen_with {enc bom} {
     set ::els::docEnc($id) $enc
     set ::els::docBom($id) $bom
     set ::els::docEol($id) $eol
+    # a NEW encoding voids any earlier "lossy is fine" consent for the old one
+    unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     $w edit reset
     $w edit modified 0
     els::update_tab $id
@@ -2221,6 +2227,8 @@ proc els::save_with {enc bom} {
     if {$::els::docEnc($id) eq $enc && $::els::docBom($id) == $bom} { return }
     set ::els::docEnc($id) $enc
     set ::els::docBom($id) $bom
+    # a NEW encoding voids any earlier "lossy is fine" consent for the old one
+    unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     [els::W $id] edit modified 1
     els::swap_meta_touch $id       ;# the swap must carry the new encoding
     els::update_tab $id
@@ -3108,22 +3116,156 @@ proc els::recover_dialog_apply {top decision} {
     # were left unchecked (it re-claims them then)
     els::recover_dialog_close $top
 }
-proc els::save {} {
+# ---- lossy-save guard ----------------------------------------------------
+# A save must never silently drop characters the document's encoding cannot
+# represent.  Strict encoding via -failindex detects the first unencodable
+# character without throwing; the user then chooses: switch the document to
+# UTF-8 (keeps everything), save anyway with replacement characters (latched
+# per document for the session), or cancel (nothing is written).
+
+# First unencodable character, located by binary search on prefix length.
+# We deliberately do NOT use the -failindex VALUE as a position: in Tcl 9.0.3
+# it is a character index for some encodings but a byte index into the
+# internal UTF-8 representation for others (e.g. gb2312-raw), contradicting
+# encoding(n).  Only its sign ("did it fail") is trustworthy.
+proc els::lossy_first {enc text} {
+    set lo 0 ; set hi [string length $text]
+    # invariant: the prefix of length lo encodes cleanly, the one of hi fails
+    while {$lo + 1 < $hi} {
+        set mid [expr {($lo + $hi) / 2}]
+        encoding convertto -profile strict -failindex f $enc \
+            [string range $text 0 [expr {$mid - 1}]]
+        if {$f < 0} { set lo $mid } else { set hi $mid }
+    }
+    return [expr {$hi - 1}]
+}
+
+# Where and how big is the damage: line/col + codepoint of the first
+# unencodable character, and how many there are.  The count walks per
+# character from the first failure, capped (100 failures / 10000 chars) --
+# it is dialog garnish, not bookkeeping.
+proc els::lossy_describe {enc text} {
+    set fi [els::lossy_first $enc $text]
+    set before [string range $text 0 [expr {$fi - 1}]]
+    set line [expr {1 + [regexp -all {\n} $before]}]
+    set col  [expr {$fi - [string last \n $before]}]
+    set uhex [format %04X [scan [string index $text $fi] %c]]
+    set count 0
+    set n [string length $text]
+    set stop [expr {min($n, $fi + 10000)}]
+    for {set i $fi} {$i < $stop && $count < 100} {incr i} {
+        encoding convertto -profile strict -failindex f $enc [string index $text $i]
+        if {$f >= 0} { incr count }
+    }
+    return [list $line $col $uhex $count]
+}
+
+# Modal three-way choice (utf8 | lossy | cancel).  The test suite replaces
+# this proc with a canned-answer stub, like the native dialogs.
+proc els::lossy_ask {id enc line col uhex count} {
+    set top .lossy
+    catch {destroy $top}
+    toplevel $top -background $::els::PAGE
+    wm withdraw $top
+    wm title $top els
+    wm transient $top .
+    set countTxt [expr {$count >= 100 ? "100 or more" : $count}]
+    set noun [expr {$count == 1 ? "character" : "characters"}]
+    ttk::label $top.msg -justify left -text \
+"This document contains $countTxt $noun that cannot be written
+as [els::enc_label $enc 0] (first at line $line, column $col: U+$uhex).
+
+Save as UTF-8 to keep every character, save anyway to replace
+the unsupported ones with substitutes, or cancel."
+    ttk::frame $top.b
+    ttk::button $top.b.utf8   -text "Save as UTF-8" -command {set ::els::lossy_answer utf8}
+    ttk::button $top.b.lossy  -text "Save anyway"   -command {set ::els::lossy_answer lossy}
+    ttk::button $top.b.cancel -text Cancel          -command {set ::els::lossy_answer cancel}
+    pack $top.b.utf8 $top.b.lossy $top.b.cancel -side left -padx 4
+    pack $top.msg -padx 16 -pady {14 10}
+    pack $top.b   -padx 16 -pady {0 12}
+    wm protocol $top WM_DELETE_WINDOW {set ::els::lossy_answer cancel}
+    bind $top <Escape> {set ::els::lossy_answer cancel}
+    update idletasks
+    set x [expr {[winfo rootx .] + ([winfo width .] - [winfo reqwidth $top]) / 2}]
+    set y [expr {[winfo rooty .] + 120}]
+    wm geometry $top +$x+$y
+    if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
+    wm deiconify $top
+    raise $top
+    focus $top.b.utf8
+    grab $top
+    set ::els::lossy_answer ""
+    vwait ::els::lossy_answer
+    set ans $::els::lossy_answer
+    catch {grab release $top}
+    catch {destroy $top}
+    if {$ans ni {utf8 lossy cancel}} { set ans cancel }
+    return $ans
+}
+
+# A transient, quiet status message in the name slot (never a dialog) -- used
+# by auto-save for failures.  The next update_namelabel restores the path.
+proc els::status_note {msg} {
+    if {![winfo exists .sb.name]} { return }
+    catch {after cancel $::els::status_note_after}
+    .sb.name configure -text $msg
+    set ::els::status_note_after [after 4000 els::update_namelabel]
+}
+
+# Save a document (default: the active one).  quiet=1 is the auto-save mode:
+# no dialog may ever appear -- an unencodable character pauses auto-saving for
+# the document and a write error becomes a statusbar note.
+proc els::save {{id ""} {quiet 0}} {
     variable active
     variable docPath
-    if {$active eq ""} { return 0 }
-    if {$docPath($active) eq ""} { return [els::saveas] }
-    set w [els::W $active]
+    if {$id eq ""} { set id $active }
+    if {$id eq ""} { return 0 }
+    if {$docPath($id) eq ""} {
+        if {$quiet} { return 0 }      ;# auto-save never invents a filename
+        return [els::saveas]
+    }
+    set w [els::W $id]
     set text [$w get 1.0 "end - 1 char"]
     # re-apply the document's original EOL (buffer is LF-internal)
-    switch $::els::docEol($active) {
+    switch $::els::docEol($id) {
         crlf { set text [string map [list \n \r\n] $text] }
         cr   { set text [string map [list \n \r]   $text] }
     }
-    # encode in the document's original encoding, restoring a BOM if it had one
-    set bytes [encoding convertto -profile replace $::els::docEnc($active) $text]
-    if {$::els::docBom($active)} {
-        switch $::els::docEnc($active) {
+    # encode in the document's encoding -- NEVER silently lossy: characters the
+    # encoding cannot hold either switch the doc to UTF-8, are replaced with
+    # the user's explicit consent, or cancel the save
+    set enc $::els::docEnc($id)
+    # only the SIGN of -failindex is trusted (see lossy_first for why)
+    set bytes [encoding convertto -profile strict -failindex fi $enc $text]
+    if {$fi >= 0} {
+        if {[info exists ::els::docLossyOk($id)]} {
+            set bytes [encoding convertto -profile replace $enc $text]
+        } elseif {$quiet} {
+            set ::els::docLossyPause($id) 1
+            els::status_note "auto-save paused: characters not in [els::enc_label $enc 0] (save manually once)"
+            return 0
+        } else {
+            lassign [els::lossy_describe $enc $text] line col uhex count
+            switch [els::lossy_ask $id $enc $line $col $uhex $count] {
+                utf8 {
+                    set ::els::docEnc($id) utf-8
+                    # replace-profile only for the pathological unpaired-
+                    # surrogate case, which NO file encoding can hold
+                    set bytes [encoding convertto -profile replace utf-8 $text]
+                }
+                lossy {
+                    set ::els::docLossyOk($id) 1
+                    set bytes [encoding convertto -profile replace $enc $text]
+                }
+                cancel { return 0 }
+            }
+        }
+    }
+    unset -nocomplain ::els::docLossyPause($id)
+    # restore a BOM if the document carries one
+    if {$::els::docBom($id)} {
+        switch $::els::docEnc($id) {
             utf-8    { set bytes "\xEF\xBB\xBF$bytes" }
             utf-16le { set bytes "\xFF\xFE$bytes" }
             utf-16be { set bytes "\xFE\xFF$bytes" }
@@ -3131,8 +3273,12 @@ proc els::save {} {
             utf-32be { set bytes "\x00\x00\xFE\xFF$bytes" }
         }
     }
-    if {[set err [els::write_atomic $docPath($active) $bytes]] ne ""} {
-        tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
+    if {[set err [els::write_atomic $docPath($id) $bytes]] ne ""} {
+        if {$quiet} {
+            els::status_note "auto-save failed: [file tail $docPath($id)]"
+        } else {
+            tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
+        }
         return 0
     }
     $w edit modified 0
@@ -3140,11 +3286,11 @@ proc els::save {} {
     # "Reopen with Encoding" re-decodes the SAVED content rather than reverting
     # to the bytes loaded at open time (which silently discarded saved edits, and
     # blanked a Save-As'd new document whose docRaw was still empty)
-    set ::els::docRaw($active) $bytes
-    els::cache_saved_sig $active
-    unset -nocomplain ::els::docRecovered($active)   ;# saved -> no longer a recovered tab
-    els::swap_clear $active   ;# the file is safely on disk now -> drop the swap
-    els::update_tab $active
+    set ::els::docRaw($id) $bytes
+    els::cache_saved_sig $id
+    unset -nocomplain ::els::docRecovered($id)   ;# saved -> no longer a recovered tab
+    els::swap_clear $id   ;# the file is safely on disk now -> drop the swap
+    els::update_tab $id
     els::settitle
     return 1
 }
