@@ -14,17 +14,17 @@
 # large generated sample files for manual testing (regenerate via tools/gen_sample.tcl)
 /samples/
 
-# compiled C extensions / build output (rebuilt via `x build-ext` / `x build`).
-# The native build's generated PE resource inputs (els.rc, els.exe.manifest,
-# els.ico — emitted from Tcl by tools/genres.tcl + tools/mkico.tcl) land here too.
+# BUILD LAYOUT (the convention, enforced by tools/x.tcl):
+#   dist/els.exe  = THE final artifact: what you run, what gets released
+#   build/        = compiler intermediates only (objects, .res, els-bare.exe,
+#                   generated els.rc/manifest/ico, dev-built extension DLLs)
+#   repo root     = no binaries
 /build/
-
-# the fused single-file exe (rebuilt via `x build`; ship via releases)
-/els.exe
-
-# release staging dir: `x build` writes dist/els.exe here so a running els.exe
-# is never disturbed; holds the exe + scratch shots, none of it committed
 /dist/
+
+# belt-and-suspenders: a root els.exe (pre-0.60 build layout, or an explicit
+# `x build els.exe`) must never be committed either
+/els.exe
 
 # a "portable" config chosen during a dev run lands next to els.tcl (the repo
 # root here); real builds write it next to els.exe instead

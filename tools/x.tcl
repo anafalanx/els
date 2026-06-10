@@ -131,13 +131,16 @@ proc task_help {args} {
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
   shot <out> [file]  screenshot the editor to <out> (twapi)
   readme-shots       regenerate docs/img screenshots used by README.md
-  build [out]        build the native els.exe — a custom C23 WinMain with Tcl+Tk
-                     +icudet statically linked in and PE icon/manifest/version
-                     baked via windres (see docs/native-port-study.md)
-  build-wish [--with-ext]  legacy fallback: fuse els.exe onto a copy of wish90s
-                     (--with-ext embeds build/*.dll); superseded by `build`
-  probe-exe [exe]    launch the fused exe in a temp config home and verify
-                     first-run prompt + session restore startup
+  build [out]        build the native exe -> dist/els.exe (the ONE artifact:
+                     run it, ship it; build/ holds only intermediates) — a
+                     custom C23 WinMain with Tcl+Tk+icudet statically linked,
+                     PE icon/manifest/version via windres; safe to rebuild
+                     while dist/els.exe is running (old exe is parked aside)
+  build-wish [--with-ext]  legacy fallback: fuse dist/els.exe onto a copy of
+                     wish90s (--with-ext embeds build/*.dll); superseded by `build`
+  probe-exe [exe]    launch the fused exe (default dist/els.exe) in a temp
+                     config home and verify first-run + session + recovery +
+                     single-instance startup behaviour
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
   fetch-twapi        vendor the twapi extension into .toolchain/
   fetch-git          vendor MinGit into .toolchain/git/
@@ -180,7 +183,8 @@ proc task_build-wish {args} {
     foreach a $args {
         if {[string match -* $a]} { lappend rest $a } elseif {$out eq ""} { set out $a } else { lappend rest $a }
     }
-    if {$out eq ""} { set out [P els.exe] }
+    if {$out eq ""} { set out [P dist els.exe] }
+    file mkdir [file dirname $out]
     # Icon the WRAPPER first: stamp the awl into a wish90s copy's PE resources,
     # then mkimg appends the zip AFTER it so both icon and payload survive.
     # (Editing the finished exe would strip the appended zipfs archive.)
@@ -202,7 +206,7 @@ proc task_build-wish {args} {
 proc task_probe-exe {args} {
     need tclsh
     set exe [lindex $args 0]
-    if {$exe eq ""} { set exe [P els.exe] }
+    if {$exe eq ""} { set exe [P dist els.exe] }
     stream [tclsh] [P tools probe_exe.tcl] $exe
 }
 
@@ -321,7 +325,10 @@ proc task_build-ext {args} {
 proc task_build {args} {
     need gcc tclsh
     if {![file exists [tclshs]]} { error "static tclsh missing (.toolchain/tcl9s) — run `x toolcheck`" }
-    set out [lindex $args 0] ; if {$out eq ""} { set out [P els.exe] }
+    # THE build artifact home: dist/els.exe.  dist/ holds the final exe (what
+    # you run, what gets released); build/ holds intermediates only; the repo
+    # root holds no binaries.
+    set out [lindex $args 0] ; if {$out eq ""} { set out [P dist els.exe] }
     # a mistyped flag must not become the OUTPUT PATH: `x build --fast` used to
     # succeed and write the fused exe to a file literally named "--fast",
     # leaving els.exe stale while reporting success
@@ -365,7 +372,25 @@ proc task_build {args} {
     catch {stream [strip-exe] $bare}      ;# shrink before the payload append
     # 5. append the zipfs payload (tcl_library/tk_library/main.tcl/resources) onto
     #    OUR exe.  No --with-ext: icudet is compiled in, so no DLL is embedded.
-    stream [tclshs] [P tools package.tcl] --wrapper $bare $out
+    #    Stage next to the target, then swap into place: the developer RUNS
+    #    dist/els.exe as a daily editor, and Windows locks a running exe against
+    #    overwrite but allows renaming it — so a rebuild parks the old one aside
+    #    instead of failing.
+    file mkdir [file dirname $out]
+    set staged "$out.new"
+    stream [tclshs] [P tools package.tcl] --wrapper $bare $staged
+    catch {file delete -force "$out.old"}    ;# stale parking from a prior swap
+    if {[catch {file rename -force $staged $out}]} {
+        if {[catch {
+            file rename -force $out "$out.old"
+            file rename -force $staged $out
+        } e]} {
+            catch {file delete -force $staged}
+            error "cannot place $out (locked?): $e"
+        }
+        puts "note: $out was in use; the running copy is parked as [file tail $out.old]\n      (cleaned up on the next build — restart els to pick up the new exe)"
+    }
+    puts "placed $out ([file size $out] bytes)"
 }
 
 # Verify a download against a pinned SHA-256 (vendored msys64 sha256sum).  An

@@ -130,23 +130,30 @@ x run [file...] # launch the editor
 x test          # in-process test suite (tcltest + Tk event generate)
 x shot out.png  # screenshot the editor (twapi, all-Tcl, no AutoIt)
 x readme-shots  # regenerate the README screenshots
-x probe-exe     # process-level startup checks for the built exe
-x build         # build the native els.exe (custom C WinMain, static Tcl+Tk+icudet)
-x build-wish    # legacy fallback: fuse els.exe onto wish90s (--with-ext embeds DLLs)
+x probe-exe     # process-level startup checks for the built exe (dist/els.exe)
+x build         # build the native exe -> dist/els.exe (custom C WinMain, static Tcl+Tk+icudet)
+x build-wish    # legacy fallback: fuse dist/els.exe onto wish90s (--with-ext embeds DLLs)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
 x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
 x shell         # a shell with the vendored toolchain on PATH
 x env           # show the resolved toolchain
 ```
 
-`x build` produces one self-contained native `els.exe` (~5.1 MB, zero non-system
+`x build` produces one self-contained native exe (~5.1 MB, zero non-system
 DLLs): a real Windows PE with our own C23 `WinMain`, Tcl + Tk + the charset
 detector statically linked in, and `els.tcl` + the Tcl/Tk script libraries riding
 inside an appended `zipfs` image (`els.tcl` itself is unchanged). The PE icon,
-manifest, and version info are baked in via `windres`. Users only need the
-resulting `els.exe`; developers can move the whole repo folder around because the
-vendored `.toolchain/` is relocatable. (`x build-wish` is the pre-native wrapper
-build, kept as a fallback.)
+manifest, and version info are baked in via `windres`.
+
+Build artifacts have exactly one home: **`dist/els.exe`** is the final exe (the
+one you run, and the one a release ships), while `build/` holds compiler
+intermediates only and the repo root holds no binaries. A rebuild stages the new
+exe and swaps it into place, so it works even while `dist/els.exe` is running
+(the old copy is parked as `els.exe.old` until the next build; restart els to
+pick up the new one). Users only need the released `els.exe`; developers can
+move the whole repo folder around because the vendored `.toolchain/` is
+relocatable. (`x build-wish` is the pre-native wrapper build, kept as a
+fallback.)
 
 The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
 (`x.cmd`): no bash, PowerShell, or Python. See

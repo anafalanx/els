@@ -92,8 +92,8 @@ All tooling. Run `x help`:
 x test               in-process test suite (tcltest + Tk event generate)
 x run [file ...]     launch the editor (wish + els.tcl)
 x shot <out> [file]  screenshot the editor (twapi, all-Tcl)
-x build              build the native els.exe (custom C23 WinMain, static Tcl+Tk+icudet)
-x build-wish [--with-ext]  legacy: fuse els.exe onto wish90s (--with-ext embeds DLLs)
+x build              build the native exe -> dist/els.exe (C23 WinMain, static Tcl+Tk+icudet)
+x build-wish [--with-ext]  legacy: fuse dist/els.exe onto wish90s (--with-ext embeds DLLs)
 x build-ext          compile src/*.c C23 extensions -> build/*.dll
 x fetch-twapi        vendor twapi into .toolchain/
 x fetch-git          vendor MinGit into .toolchain/git/
