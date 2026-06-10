@@ -243,6 +243,9 @@ proc task_stress {args} {
 
 proc task_run {args} {
     need wish
+    # a DEV instance, not a handoff: without the opt-out, single-instance would
+    # pass the args to (and raise) the user's running els instead
+    set ::env(ELS_NO_SINGLE_INSTANCE) 1
     exec [wish] [P els.tcl] {*}$args &
     puts "launched els"
 }
