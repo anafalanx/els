@@ -250,6 +250,53 @@ test scroll-5.1 {a tab switch re-feeds the scrollbar thumb from the live view} -
     expr {$f > 0.3}
 } -result 1
 
+# ---- user-issues batch B ---------------------------------------------------
+
+test linenos-b.1 {Line Numbers toggle hides/shows the gutter} -setup {els_reset} -body {
+    update idletasks
+    set on [winfo ismapped .ln]
+    set ::els::show_linenos 0 ; els::set_linenos 0 ; update idletasks
+    set off [winfo ismapped .ln]
+    set ::els::show_linenos 1 ; els::set_linenos 0 ; update idletasks
+    list $on $off [winfo ismapped .ln]
+} -result {1 0 1}
+
+test linenos-b.2 {the Line Numbers choice persists through the config round-trip} -setup {els_reset} -body {
+    set ::els::show_linenos 0
+    els::save_geometry
+    set ::els::show_linenos 1                  ;# simulate a fresh start
+    els::load_geometry
+    set v $::els::show_linenos
+    set ::els::show_linenos 1 ; els::set_linenos 0
+    catch {file delete -force $::els::config_path}
+    set v
+} -result 0
+
+test linenos-b.3 {hiding the gutter skips its drawing work entirely} -setup {els_reset} -body {
+    [els::T] insert end "one\ntwo\nthree"
+    set ::els::show_linenos 0 ; els::set_linenos 0
+    .ln delete all
+    els::draw_gutter
+    set items [llength [.ln find all]]
+    set ::els::show_linenos 1 ; els::set_linenos 0
+    set items
+} -result 0
+
+test tabreorder-b.1 {dragging a tab past a neighbour's midpoint reorders docs and the strip} -setup {els_reset} -body {
+    set a $::els::active
+    set b [els::new_doc]
+    set c [els::new_doc]
+    update idletasks
+    # drag A to the far right (beyond C's midpoint): order becomes B C A
+    set beyond [expr {[winfo rootx [els::tabW $c]] + [winfo width [els::tabW $c]] + 20}]
+    els::tab_drag $a $beyond
+    els::tab_drag $a $beyond                    ;# second motion: past C too
+    set order $::els::docs
+    set packed [pack slaves .tabs]
+    list [expr {$order eq [list $b $c $a]}] \
+         [expr {$packed eq [list [els::tabW $b] [els::tabW $c] [els::tabW $a]]}]
+} -result {1 1}
+
 test scroll-5.2 {non-multiple-of-120 wheel deltas scroll symmetrically} -setup {els_reset} -body {
     # NOTE: the manual says `yview scroll N units` wants an integer, but Tk
     # 9.0.3's text widget genuinely does smooth fractional unit scrolling

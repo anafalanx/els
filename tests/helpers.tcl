@@ -156,7 +156,7 @@ proc els_reset {} {
     set ::els::lock_handle "" ; set ::els::lock_chan ""
     set ::els::last_recover 0 ; set ::els::recover_auto 0
     set ::els::recover_claims {}
-    set ::els::show_ws 0 ; set ::els::word_wrap 0
+    set ::els::show_ws 0 ; set ::els::word_wrap 0 ; set ::els::show_linenos 1
     set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}
     set ::els::restore_session 1
     set ::els::session_files {}

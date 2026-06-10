@@ -1303,6 +1303,23 @@ test issue-a.7 {find/replace entries grow a clear button while non-empty} -setup
     event generate .find.fr.q.clearx <Button-1> ; update
     list $shown $::els::find_q [winfo ismapped .find.fr.q.clearx]
 } -result {1 {} 0}
+test recentvs-b.1 {the Maintain List scrollbar appears only when the list overflows} -setup {ui_reset} -body {
+    # the dialog is withdrawn for test hygiene, so a child's `winfo ismapped` is
+    # always 0 — assert on grid membership (manager "grid" vs removed "") instead
+    set ::els::recent [list [els_tmpfile rvs1.txt "x\n"]]
+    els::recent_manage ; catch {wm withdraw .recent}
+    update idletasks ; els::recent_vs_apply
+    set few [winfo manager .recent.f.vs]
+    set many {}
+    for {set i 0} {$i < 30} {incr i} { lappend many [file join $::ELS_TMP "rvs_$i.txt"] }
+    set ::els::recent $many
+    els::recent_manage_refresh
+    update idletasks ; els::recent_vs_apply
+    set lots [winfo manager .recent.f.vs]
+    catch {destroy .recent}
+    list $few $lots
+} -result {{} grid}
+
 test reg-1.1 {Reopen-with-Encoding keeps edits saved since open (docRaw refreshed on save)} -setup {ui_reset} -body {
     set p [els_tmpfile reg11.txt "original line\n"]
     els::open $p

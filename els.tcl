@@ -100,6 +100,8 @@ namespace eval els {
     variable find_history {}     ;# recent search terms, newest first (cap 16)
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
+    variable show_linenos 1      ;# View ▸ Line Numbers (persisted)
+    variable recent_vs_after ""  ;# deferred recent-list scrollbar show/hide
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
     variable always_on_top 0     ;# View ▸ Always on Top (wm -topmost)
     variable font_size 11        ;# document text size (points); the family is fixed
@@ -371,6 +373,10 @@ proc els::load_geometry {} {
             catch {els::ws_refresh}
         }
     }
+    if {![catch {dict get $data line_numbers} lnv] && [string is boolean -strict $lnv]} {
+        set ::els::show_linenos [expr {$lnv ? 1 : 0}]
+        catch {els::set_linenos 0}
+    }
     if {![catch {dict get $data always_on_top} t] && [string is boolean -strict $t]} {
         set ::els::always_on_top [expr {$t ? 1 : 0}]
         catch {els::set_always_on_top 0}
@@ -410,6 +416,7 @@ proc els::save_geometry {} {
         set payload [dict create geometry [wm geometry .] \
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
+                         line_numbers $::els::show_linenos \
                          always_on_top $::els::always_on_top \
                          font_size $::els::font_size \
                          restore_session $::els::restore_session \
@@ -579,7 +586,7 @@ proc els::recent_manage {} {
     listbox .recent.f.list -font elsUI -height 10 -activestyle none \
         -borderwidth 0 -highlightthickness 1 -highlightbackground $::els::HAIR \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
-        -bg $bg -fg $::els::INK -yscrollcommand {.recent.f.vs set}
+        -bg $bg -fg $::els::INK -yscrollcommand els::recent_vs
     ttk::scrollbar .recent.f.vs -orient vertical -command {.recent.f.list yview}
     grid .recent.f.list -row 2 -column 0 -columnspan 2 -sticky nsew
     grid .recent.f.vs   -row 2 -column 2 -sticky ns
@@ -686,6 +693,27 @@ proc els::recent_row_motion {x y rx ry} {
     if {[$lb get $i] eq $p} { return }      ;# row not elided -> no tip
     set ::els::tip_after [after 550 \
         [list els::tip_pop_at [els::path_tip $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
+}
+# The Maintain List scrollbar appears only when the list overflows.  The
+# grid/grid-remove is a geometry change, so it is deferred to idle and
+# coalesced (same discipline as the editor's own bars).
+proc els::recent_vs {first last} {
+    if {![winfo exists .recent.f.vs]} { return }
+    .recent.f.vs set $first $last
+    after cancel $::els::recent_vs_after
+    set ::els::recent_vs_after [after idle els::recent_vs_apply]
+}
+proc els::recent_vs_apply {} {
+    if {![winfo exists .recent.f.list]} { return }
+    if {[winfo ismapped .recent.f.list]} {
+        lassign [.recent.f.list yview] first last
+        set need [expr {$first > 0.0001 || $last < 0.9999}]
+    } else {
+        # unmapped (e.g. a withdrawn dialog): yview degenerates to {0 1}, so
+        # fall back to rows-vs-height (the dialog's height is pinned anyway)
+        set need [expr {[.recent.f.list size] > [.recent.f.list cget -height]}]
+    }
+    if {$need} { grid .recent.f.vs } else { grid remove .recent.f.vs }
 }
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
@@ -1105,6 +1133,8 @@ proc els::build {} {
     .menu add cascade -label View -menu .menu.view
     .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \
         -command els::set_wrap
+    .menu.view add checkbutton -label "Line Numbers" -variable ::els::show_linenos \
+        -command els::set_linenos
     .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
         -command els::set_show_ws
     .menu.view add checkbutton -label "Always on Top" -variable ::els::always_on_top \
@@ -1450,11 +1480,43 @@ proc els::make_tab {id} {
     pack $tf -side left -padx {0 1} -pady {2 0} -fill y
     bind $tf       <Button-1> [list els::switch_to $id]
     bind $tf.name  <Button-1> [list els::switch_to $id]
+    # drag a tab left/right to reorder it (crossing a neighbour's midpoint
+    # swaps places; the docs list and the saved session follow the new order)
+    bind $tf       <B1-Motion> [list els::tab_drag $id %X]
+    bind $tf.name  <B1-Motion> [list els::tab_drag $id %X]
     bind $tf.close <Button-1> [list els::close_doc $id]
     bind $tf.close <Enter>    [list els::tab_close_enter $id]
     bind $tf.close <Leave>    [list els::tab_close_leave $id]
     els::tooltip_for $tf      [list els::tab_tip $id] $::els::tab_tip_delay
     els::tooltip_for $tf.name [list els::tab_tip $id] $::els::tab_tip_delay
+}
+# Reorder by drag: when the pointer crosses a neighbouring tab's midpoint,
+# move the dragged doc to that position and repack.  State-free (each motion
+# event re-evaluates), so a plain click never reorders anything.
+proc els::tab_drag {id rootX} {
+    variable docs
+    set idx [lsearch -exact $docs $id]
+    if {$idx < 0} { return }
+    foreach other $docs {
+        if {$other eq $id} continue
+        set tw [els::tabW $other]
+        if {![winfo exists $tw]} continue
+        set mid  [expr {[winfo rootx $tw] + [winfo width $tw] / 2}]
+        set oidx [lsearch -exact $docs $other]
+        if {($oidx < $idx && $rootX < $mid) || ($oidx > $idx && $rootX > $mid)} {
+            set docs [linsert [lreplace $docs $idx $idx] $oidx $id]
+            els::tab_repack
+            break
+        }
+    }
+}
+proc els::tab_repack {} {
+    foreach id $::els::docs {
+        set tf [els::tabW $id]
+        if {![winfo exists $tf]} continue
+        pack forget $tf
+        pack $tf -side left -padx {0 1} -pady {2 0} -fill y
+    }
 }
 proc els::tab_close_enter {id} {
     set w [els::tabW $id].close
@@ -1647,6 +1709,7 @@ proc els::update_current_line {} {
 proc els::draw_gutter {} {
     set w [els::T]
     if {$w eq "" || ![winfo exists .ln]} { return }
+    if {!$::els::show_linenos} { return }   ;# gutter hidden: skip the work too
     .ln delete all
     set lines [els::line_count]
     set digits [expr {max(2, [string length $lines] + 1)}]
@@ -3897,6 +3960,18 @@ proc els::ws_refresh {} {
 
 proc els::set_show_ws {{persist 1}} {
     els::ws_refresh
+    if {$persist} { els::save_geometry }
+}
+# View ▸ Line Numbers: hide/show the gutter (grid remove keeps its options, so
+# a plain `grid .ln` restores it exactly); persisted with the config.
+proc els::set_linenos {{persist 1}} {
+    if {![winfo exists .ln]} { return }
+    if {$::els::show_linenos} {
+        grid .ln
+        els::gutter_schedule
+    } else {
+        grid remove .ln
+    }
     if {$persist} { els::save_geometry }
 }
 # Always on Top: keep the els window above other windows.  Tk maps this to the
