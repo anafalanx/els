@@ -26,12 +26,15 @@ icudet charset detector **statically linked in**, plus the Tcl/Tk script librari
 and `els.tcl` riding inside an appended zipfs image. `els.tcl` is ordinary Tcl,
 unchanged by the C entry point.
 
-- **`x build`** builds it (compile `src/els_main.c` + `src/icudet.c`; the PE
-  icon/manifest/version `.rc`/`.manifest`/`.ico` are **generated from Tcl** by
-  `tools/genres.tcl` + `tools/mkico.tcl` into gitignored `build/`, then `windres`'d;
-  link the static `.toolchain/tcl9s` libs; append the zipfs payload).
-  **`x build-wish`** is the legacy wrapper build (fuse onto `wish90s.exe`),
-  kept as a fallback.
+- **`x build`** builds it into **`dist/els.exe`** — the ONE artifact (what you
+  run, what gets released); `build/` holds intermediates only, the repo root
+  holds no binaries. (Compile `src/els_main.c` + `src/icudet.c` + `src/winfs.c`;
+  the PE icon/manifest/version `.rc`/`.manifest`/`.ico` are **generated from
+  Tcl** by `tools/genres.tcl` + `tools/mkico.tcl` into gitignored `build/`, then
+  `windres`'d; link the static `.toolchain/tcl9s` libs; append the zipfs
+  payload, staged + swapped into place so a running `dist/els.exe` never blocks
+  a rebuild.) **`x build-wish`** is the legacy wrapper build (fuse onto
+  `wish90s.exe`), kept as a fallback.
 - The architecture, the proven static-link recipe, and the pitfalls are in
   [`docs/native-port-study.md`](docs/native-port-study.md); a robustness audit +
   hardening roadmap is in

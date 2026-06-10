@@ -2,7 +2,7 @@
 
 A tiny text editor for Windows: calm, opinionated, no-frills.
 
-![els editing a whimsical plain text note](docs/img/editor-whimsy-0.21.png)
+![els editing a whimsical plain text note](docs/img/editor-whimsy.png)
 
 els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset
@@ -113,7 +113,7 @@ instance keeps its own protected snapshots (a live instance's snapshots are
 guarded by a lock that Windows releases only when that process is truly
 gone, so one instance can never "recover" another's open work).
 
-![Find and replace with visible whitespace](docs/img/find-whitespace-0.21.png)
+![Find and replace with visible whitespace](docs/img/find-whitespace.png)
 
 ## Toolchain & tasks
 
@@ -180,7 +180,7 @@ behind atomic saves and the crash-recovery liveness locks. Tests live in
 
 ## About
 
-<img src="docs/img/about-0.21.png" width="270" align="right" alt="About els">
+<img src="docs/img/about.png" width="270" align="right" alt="About els">
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork

@@ -1,5 +1,7 @@
-# vendored toolchain: MSYS2 + Tcl/Tk 9 build/install + AutoIt — huge, machine-specific.
-# Reproduced from source via scripts/ (the build recipe), not committed.
+# vendored toolchain: MSYS2 + Tcl/Tk 9 build/install + twapi — huge,
+# machine-specific, not committed. Carried by copy-pasting the folder; the
+# build recipe is documented in toolchain.md (`x toolcheck --prep` fetches
+# the auto-installable pieces).
 /.toolchain/
 
 # Claude local settings
