@@ -131,8 +131,10 @@ proc els_reset {} {
     # must be restored here too — recover.test enables them per-test, and a leak
     # leaves autosave running for every later test FILE (timing flakiness).
     catch {els::swap_stop}
+    catch {els::handoff_stop}
     set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    set ::els::handoff_after ""
     # Release a held session lock BEFORE blanking the variables: the cfg tests
     # acquire a real one via set_config_path, and dropping the only reference
     # without closing leaked the channel and made their cleanup deletes fail

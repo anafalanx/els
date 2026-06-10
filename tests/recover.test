@@ -17,6 +17,7 @@ proc recover_reset {} {
     set ::els::swap_test_mtime 1                  ;# force forgeable mtime liveness
     set ::els::session_id_cached "host-self-0000000000000000"
     set ::els::session_token_cached "0000000000000000"
+    catch {file delete -force [file join $::ELS_TMP handoff]}   ;# single-instance spool
     set d [file join $::ELS_TMP swap]
     catch {file delete -force $d}
     file mkdir $d
@@ -242,6 +243,66 @@ test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies
 } -result {3 3}
 
 # ===== sweep: stale temp/claim litter from dead sessions ===================
+
+# ---- user-issues batch C: single instance + file handoff ------------------
+
+# primary_running resolves config via config_candidates (it runs BEFORE
+# config_path is set), so set up under the pinned LOCALAPPDATA candidate.
+proc single_setup_primary {} {
+    lassign [els::config_candidates] near appdata
+    if {[file exists $near]} { return "" }     ;# a portable config is present: not testable here
+    file mkdir [file dirname $appdata]
+    raw_write $appdata "geometry 800x600"
+    set swapd [file join [file dirname $appdata] swap] ; file mkdir $swapd
+    set lp [file join $swapd host-prim-live.lock]
+    raw_write $lp "pid 0"
+    file mtime $lp [clock seconds]             ;# fresh -> live under the mtime path
+    return $appdata
+}
+
+test single-c.1 {a live session lock in the config dir means a primary is running} -setup recover_reset -body {
+    set appdata [single_setup_primary]
+    if {$appdata eq ""} { return {1 0} }
+    set live [els::primary_running]
+    file delete -force [file dirname $appdata]
+    set none [els::primary_running]
+    list $live $none
+} -result {1 0}
+
+test single-c.2 {ELS_NO_SINGLE_INSTANCE forces multi-instance} -setup recover_reset -body {
+    set appdata [single_setup_primary]
+    if {$appdata eq ""} { return {0 1} }
+    set ::env(ELS_NO_SINGLE_INSTANCE) 1
+    set off [els::primary_running]
+    unset ::env(ELS_NO_SINGLE_INSTANCE)
+    set on [els::primary_running]
+    file delete -force [file dirname $appdata]
+    list $off $on
+} -result {0 1}
+
+test single-c.3 {handoff round-trip: send spools the file, drain opens it and clears the spool} -setup recover_reset -body {
+    set p [file join $::ELS_TMP handed.txt] ; raw_write $p "from a second launch\n"
+    els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+    set hd [file join $::ELS_TMP handoff]
+    set spooled [llength [glob -nocomplain -directory $hd *.open]]
+    set before [llength $::els::docs]
+    els::handoff_drain
+    set opened 0
+    foreach d $::els::docs {
+        if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set opened 1 }
+    }
+    set left [llength [glob -nocomplain -directory $hd *.open]]
+    list $spooled $opened $left
+} -result {1 1 0}
+
+test single-c.4 {a stale handoff spool file is swept} -setup recover_reset -body {
+    set hd [file join $::ELS_TMP handoff] ; file mkdir $hd
+    set old [file join $hd old-1.open] ; raw_write $old ""
+    file mtime $old [expr {[clock seconds] - 9999}]
+    set fresh [file join $hd fresh-1.open] ; raw_write $fresh ""
+    els::swap_sweep
+    list [file exists $old] [file exists $fresh]
+} -result {0 1}
 
 # ---- bug-hunt wave 3: clean docs never swap; metadata + claims ------------
 

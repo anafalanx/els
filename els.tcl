@@ -50,6 +50,7 @@ namespace eval els {
     variable lock_handle ""         ;# non-empty once the native lock is held
     variable lock_chan   ""         ;# pure-Tcl fallback: a held channel ("" = none)
     variable probe_quiet 0          ;# probe mode: alpha-0 every toplevel (no desktop flash)
+    variable handoff_after ""       ;# primary's handoff-spool poll (single-instance)
     variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
     variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
     variable recover_claims {}      ;# .claimed markers created by THIS session's scan
@@ -252,6 +253,7 @@ proc els::set_config_path {p} {
         catch {file mkdir [file dirname $p]}
         els::lock_acquire
         els::swap_start
+        els::handoff_start   ;# become the primary: poll for handed-off files
     }
 }
 # Point config_path at whichever location already holds a config; 1 if found,
@@ -2663,6 +2665,7 @@ proc els::swap_start {} {
 proc els::swap_stop {} {
     if {$::els::swap_after ne ""} { after cancel $::els::swap_after; set ::els::swap_after "" }
     if {$::els::swap_touch_after ne ""} { after cancel $::els::swap_touch_after; set ::els::swap_touch_after "" }
+    els::handoff_stop
 }
 
 # ---- liveness lock -------------------------------------------------------
@@ -2709,6 +2712,91 @@ proc els::lock_is_live {sid lp} {
     if {![file exists $lp]} { return 0 }
     if {[catch {file mtime $lp} mt]} { return 0 }
     return [expr {([clock seconds] - $mt) < $::els::STALE_SECS}]
+}
+
+# ---- single instance + file handoff --------------------------------------
+# els is single-instance per config dir: a second launch hands its file args to
+# the running instance (which opens them as tabs and raises itself) and exits.
+# Detection reuses the per-session liveness locks already in the swap dir — no
+# extra lock.  ELS_NO_SINGLE_INSTANCE opts out entirely (tests, probes, and any
+# user who genuinely wants concurrent windows).
+proc els::single_instance_off {} {
+    return [expr {[info exists ::env(ELS_NO_SINGLE_INSTANCE)] && $::env(ELS_NO_SINGLE_INSTANCE) ne ""}]
+}
+proc els::handoff_dir {} {
+    if {$::els::config_path eq "" || $::els::selftest} { return "" }
+    set d [file join [file dirname $::els::config_path] handoff]
+    if {[catch {file mkdir $d}]} { return "" }
+    return $d
+}
+# Is a live els already running in THIS config dir?  Called at startup BEFORE we
+# build / acquire our own session lock, so there is no own-lock to exclude.
+proc els::primary_running {} {
+    if {[els::single_instance_off]} { return 0 }
+    lassign [els::config_candidates] near appdata
+    set cfg ""
+    if {[file exists $near]} { set cfg $near } elseif {[file exists $appdata]} { set cfg $appdata }
+    if {$cfg eq ""} { return 0 }   ;# first run: no primary yet
+    set swapdir [file join [file dirname $cfg] swap]
+    foreach lp [glob -nocomplain -directory $swapdir *.lock] {
+        set sid [file rootname [file tail $lp]]
+        if {[els::lock_is_live $sid $lp]} { return 1 }
+        # native is authoritative; pure-Tcl mtime fallback may false-positive,
+        # but the worst case is a missed handoff (we just open our own window)
+    }
+    return 0
+}
+# Secondary: spool our file args for the primary, then the caller exits.  The
+# file appears atomically (temp+rename) so the primary never reads a partial
+# one.  An empty payload still means "raise yourself" (bare relaunch).
+proc els::handoff_send {cfg fileArgs} {
+    set hd [file join [file dirname $cfg] handoff]
+    if {[catch {file mkdir $hd}]} { return }
+    set norm {}
+    foreach f $fileArgs {
+        if {[string index $f 0] eq "-"} continue
+        if {![catch {file normalize $f} n]} { lappend norm $n }
+    }
+    set target [file join $hd "[pid]-[clock clicks].open"]
+    catch {els::write_atomic $target [join $norm \n] ".ho-[pid]-[clock clicks].tmp"}
+}
+# Primary: drain the spool — open each handed-off path as a tab and raise the
+# window.  Runs on a light poll while single-instance is active.
+proc els::handoff_drain {} {
+    set hd [els::handoff_dir]
+    if {$hd eq ""} { return }
+    set raise 0
+    foreach f [lsort [glob -nocomplain -directory $hd *.open]] {
+        set data ""
+        catch { set fh [::open $f r]; fconfigure $fh -encoding utf-8; set data [read $fh]; close $fh }
+        catch {file delete -force $f}
+        set raise 1
+        foreach p [split $data \n] {
+            if {$p ne "" && [file exists $p]} { catch {els::open $p} }
+        }
+    }
+    if {$raise} { els::raise_window }
+}
+proc els::raise_window {} {
+    catch {wm deiconify .}
+    catch {raise .}
+    # a brief topmost flip reliably pulls the window to the foreground on Windows
+    catch {wm attributes . -topmost 1}
+    after 250 {catch {wm attributes . -topmost [expr {$::els::always_on_top ? 1 : 0}]}}
+    catch {focus -force .}
+}
+proc els::handoff_start {} {
+    if {[els::single_instance_off] || $::els::selftest} { return }
+    if {[els::handoff_dir] eq ""} { return }
+    if {$::els::handoff_after ne ""} { return }
+    els::handoff_tick
+}
+proc els::handoff_tick {} {
+    catch {els::handoff_drain}
+    set ::els::handoff_after [after 500 els::handoff_tick]
+}
+proc els::handoff_stop {} {
+    if {$::els::handoff_after ne ""} { after cancel $::els::handoff_after; set ::els::handoff_after "" }
 }
 
 # ---- orphan enumeration + reconcile --------------------------------------
@@ -2819,6 +2907,13 @@ proc els::swap_sweep {} {
             }
         }
         foreach f [glob -nocomplain -directory $d *.claimed] {
+            if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS} {
+                catch {file delete -force $f}
+            }
+        }
+        # handoff spool files a primary never drained (false-positive liveness)
+        set hd [file join [file dirname $::els::config_path] handoff]
+        foreach f [glob -nocomplain -directory $hd *.open .ho-*.tmp] {
             if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS} {
                 catch {file delete -force $f}
             }
@@ -4107,9 +4202,9 @@ proc els::startup_probe {report} {
 
 # ---- main ---------------------------------------------------------------
 proc els::main {} {
-    els::build
     set a0 [lindex $::argv 0]
     if {$a0 eq "--selftest"} {
+        els::build
         els::selftest [lindex $::argv 1] [lindex $::argv 2]
     } else {
         set envProbe [expr {[info exists ::env(ELS_STARTUP_PROBE)] && $::env(ELS_STARTUP_PROBE) ne ""}]
@@ -4128,6 +4223,16 @@ proc els::main {} {
         } else {
             set fileArgs $::argv
         }
+        # SINGLE-INSTANCE: if an els already owns this config dir, hand our file
+        # args to it (it opens them + raises) and exit BEFORE building any UI or
+        # acquiring our own lock.  Skipped for probes and ELS_NO_SINGLE_INSTANCE.
+        if {!$startupProbe && [els::primary_running]} {
+            lassign [els::config_candidates] near appdata
+            if {[file exists $near]} { set cfg $near } else { set cfg $appdata }
+            els::handoff_send $cfg $fileArgs
+            exit 0
+        }
+        els::build
         if {$startupProbe} {
             # Headless probe: keep the window off the user's screen (alpha 0 still
             # counts as mapped, so the probe's assertions hold) and route any
@@ -4159,7 +4264,11 @@ proc els::main {} {
             after 80 [list els::recover_boot $openedArgs]   ;# session restore + crash recovery
         }
         if {$startupProbe} {
-            after 900 [list els::startup_probe $startupReport]
+            # ELS_PROBE_LINGER keeps the probe alive longer before reporting, so
+            # a SECOND process can hand a file off to it (single-instance test).
+            set linger 0
+            if {[info exists ::env(ELS_PROBE_LINGER)]} { catch {set linger [expr {int($::env(ELS_PROBE_LINGER))}]} }
+            after [expr {900 + $linger}] [list els::startup_probe $startupReport]
             return
         }
         after 1500 els::check_update
