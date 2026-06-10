@@ -282,6 +282,25 @@ test linenos-b.3 {hiding the gutter skips its drawing work entirely} -setup {els
     set items
 } -result 0
 
+test linenos-b.4 {a persisted line_numbers=0 hides the gutter on a FRESH start} -setup {els_reset} -body {
+    # persist "off", then rebuild the way a fresh process starts: load_geometry
+    # runs at the TOP of build, BEFORE .ln exists, so set_linenos can't apply
+    # there (the bug: the later unconditional grid left an EMPTY gutter band)
+    set fh [::open $::els::config_path w]
+    puts -nonewline $fh [dict create geometry 900x620+100+100 line_numbers 0]
+    close $fh
+    catch {. configure -menu {}}
+    foreach w [winfo children .] { destroy $w }
+    set ::els::docs {} ; set ::els::active "" ; set ::els::seq 0
+    set ::els::show_linenos 1            ;# the namespace default of a fresh process
+    els::build ; update idletasks
+    list [winfo manager .ln] $::els::show_linenos
+} -cleanup {
+    catch {file delete -force $::els::config_path}
+    set ::els::show_linenos 1
+    els_reset
+} -result {{} 0}
+
 test tabreorder-b.1 {dragging a tab past a neighbour's midpoint reorders docs and the strip} -setup {els_reset} -body {
     set a $::els::active
     set b [els::new_doc]

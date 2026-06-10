@@ -1218,6 +1218,10 @@ proc els::build {} {
     # line numbers); the bottom-right cell stays an empty page-grey corner.
     grid .tabs -row 0 -column 0 -columnspan 3 -sticky ew
     grid .ln   -row 2 -column 0 -rowspan 2 -sticky ns
+    # honour a persisted Line Numbers = off: load_geometry ran at the TOP of
+    # build, before .ln existed, so its set_linenos call could not apply — and
+    # the unconditional grid above would leave an EMPTY gutter band showing
+    if {!$::els::show_linenos} { grid remove .ln }
     grid .vs   -row 2 -column 2 -sticky ns
     grid .hs   -row 3 -column 1 -sticky ew
     grid .sb   -row 4 -column 0 -columnspan 3 -sticky ew
