@@ -49,6 +49,7 @@ namespace eval els {
     variable session_token_cached ""
     variable lock_handle ""         ;# non-empty once the native lock is held
     variable lock_chan   ""         ;# pure-Tcl fallback: a held channel ("" = none)
+    variable probe_quiet 0          ;# probe mode: alpha-0 every toplevel (no desktop flash)
     variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
     variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
     variable recover_claims {}      ;# .claimed markers created by THIS session's scan
@@ -292,6 +293,8 @@ proc els::config_choice_dialog {near appdata} {
     set top .cfgask
     catch {destroy $top}
     toplevel $top -bg $::els::PAGE
+    # probe runs assert ismapped, so hide via alpha (like the root), not withdraw
+    if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
     wm title $top "Welcome to els"
     wm transient $top .
     wm resizable $top 0 0
@@ -1387,7 +1390,8 @@ proc els::close_doc {id} {
     destroy [els::tabW $id]
     unset -nocomplain ::els::docRecovered($id)
     unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
-        ::els::docEol($id) ::els::docRaw($id)
+        ::els::docEol($id) ::els::docRaw($id) \
+        ::els::savedSig($id) ::els::loading($id)
     if {$active eq $id} { set active "" }
     if {[llength $docs] == 0} {
         els::new_doc
@@ -2857,6 +2861,7 @@ proc els::recover_offer {records} {
     catch {destroy $top}
     toplevel $top -bg $::els::PAGE
     wm withdraw $top
+    if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
     wm title $top "Recover unsaved changes"
     wm transient $top .
     ttk::frame $top.f -padding 16 ; pack $top.f -fill both -expand 1
@@ -3981,6 +3986,10 @@ proc els::main {} {
             # startup error to stderr + exit instead of a modal dialog — the test
             # then fails on a missing report rather than hanging behind a dialog.
             catch {wm attributes . -alpha 0.0}
+            # child toplevels too: the first-run Welcome dialog (and a recovery
+            # offer) inherit no alpha and used to flash as a REAL opaque window
+            # on the desktop during every suite run
+            set ::els::probe_quiet 1
             proc ::bgerror {msg args} { catch {puts stderr "els startup-probe: $msg"} ; exit 3 }
             catch {interp bgerror {} ::bgerror}
         }

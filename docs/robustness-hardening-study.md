@@ -125,7 +125,7 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 |---|---|---|---|---|
 | No swap for unsaved edits (R2) [OBSERVED] | Any abrupt exit with dirty tabs | No swap machinery at all | **Critical** | Debounced+periodic atomic per-doc swap under `<configdir>/swap/` |
 | No reconciliation against on-disk state [CODE-READ] | Recover after file changed/missing on disk | No mtime/sig; naive re-save destroys newer disk version | **High** | `savedSig` (size+mtime+hash) in swap; escalate prompt on mismatch; recover into dirty buffer only |
-| Two instances collide on swaps [INFERRED] | Two els (ELS_NO_SINGLE_INSTANCE) sharing config dir | A naive path-keyed swap → B overwrites A's swap; B treats A's *live* swap as a crash orphan | **Medium** | Per-run `sessionId` (pid + start-time + random token) + liveness lock; scan skips live sessions |
+| Two instances collide on swaps [INFERRED] | Two els processes sharing a config dir (els has NO single-instance machinery — by design, any number may run) | A naive path-keyed swap → B overwrites A's swap; B treats A's *live* swap as a crash orphan | **Medium** | Per-run `sessionId` (pid + random token) + held byte-range liveness lock; scan skips live sessions |
 | Uncaught error exits with no swap flush [OBSERVED] | Background error in shipped app | Tk modal; if it leads to exit, nothing flushed (no swap exists) | **Medium** | Production bgerror flushes swaps first (R6) |
 | C-level segfault loses everything [CODE-READ] | Tcl/Tk C-level crash | The one class pure-Tcl can't pre-empt; nothing survives | **High** (residual) | Capstone (§7): SEH handler blind-writes pre-registered buffers to the **same swap format/dir** |
 

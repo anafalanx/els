@@ -1148,6 +1148,8 @@ test cfg-1.2 {resolve_existing finds the LOCALAPPDATA config when present} -setu
     set ::els::config_path ""
     set found  [els::config_resolve_existing]
     set picked [string equal $::els::config_path $appdata]
+    catch {els::lock_release}   ;# set_config_path acquired a real lock: release
+                                ;# it or the delete below silently fails
     catch {file delete -force [file dirname $appdata]}
     set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
     list $found $picked
@@ -1160,6 +1162,11 @@ test cfg-1.3 {the first-run dialog applies the chosen location and closes} -setu
     .cfgask.f.ok invoke                          ;# default selection -> appdata
     set chosen $::els::config_path
     set gone [expr {![winfo exists .cfgask]}]
+    # config_apply_choice scheduled `after idle recover_boot` and acquired a
+    # session lock: neutralize both, or the callback fires mid-suite (it could
+    # deiconify a REAL recovery dialog) and the delete below silently fails
+    foreach a [after info] { catch {after cancel $a} }
+    catch {els::lock_release}
     catch {file delete -force [file dirname $appdata]}
     set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
     list [string equal $chosen $appdata] $gone
@@ -1175,6 +1182,7 @@ test cfg-1.4 {legacy config.tcl is migrated to els.conf} -setup {els_reset} -bod
     set found [els::config_resolve_existing]
     set migrated [file exists $appdata]
     set picked [string equal $::els::config_path $appdata]
+    catch {els::lock_release}   ;# release the lock set_config_path acquired
     catch {file delete -force [file dirname $appdata]}
     set ::els::config_path [file join $::ELS_TMP els.conf]
     list $found $migrated $picked

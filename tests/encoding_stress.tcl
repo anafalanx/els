@@ -205,8 +205,11 @@ foreach {label enc bom skey} $::SAMPLES {
     foreach senc [rand_encs 5 $sidx] {
         set gpath [file join $::ELS_TMP "g_${label}_$gi.txt"]
         els::switch_to $idA
-        timed saveas   "saveas:$label"          { ui_saveas $gpath }
+        # pick the encoding BEFORE the save: save_with only flips metadata and
+        # writes nothing, so the old order saved the PREVIOUS iteration's pick
+        # (and the last pick per sample never reached disk at all)
         timed savewith "savewith:$label->$senc" { ui_pick sv $senc }
+        timed saveas   "saveas:$label->$senc"   { ui_saveas $gpath }
         timed opengarble "open-garble:$label/$senc" { ui_open $gpath }
         set idB $::els::active
         if {[catch {[els::T] get 1.0 end}]} { lappend ::FAIL "buffer broken: open-garble $label/$senc" }

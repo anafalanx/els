@@ -63,7 +63,7 @@ test winfs-2.2 {try_lock still reads held/free/missing correctly with the tighte
     list $held $free $missing
 } -result {0 1 1}
 
-test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; ui_reset} -body {
+test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
     set p [file join $::ELS_TMP wfs_save.txt]
     set f [open $p w] ; puts -nonewline $f "downloaded content\n" ; close $f
     set f [open "$p:Zone.Identifier" w] ; puts -nonewline $f "\[ZoneTransfer\]\nZoneId=3\n" ; close $f

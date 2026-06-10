@@ -27,6 +27,7 @@ file mkdir $::ELS_TMP
 set ::env(APPDATA)      [file join $::ELS_TMP appdata]
 set ::env(LOCALAPPDATA) [file join $::ELS_TMP localappdata]
 catch {file delete -force $::env(APPDATA)}
+catch {file delete -force $::env(LOCALAPPDATA)}   ;# stale lock/swap litter too
 
 # Load the els library (UI is not launched on source).
 source [file join $::ELS_ROOT els.tcl]
@@ -132,6 +133,11 @@ proc els_reset {} {
     catch {els::swap_stop}
     set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    # Release a held session lock BEFORE blanking the variables: the cfg tests
+    # acquire a real one via set_config_path, and dropping the only reference
+    # without closing leaked the channel and made their cleanup deletes fail
+    # silently (the lock file stayed open).
+    catch {els::lock_release}
     # Cancel every view-layer deferral too: find_after is a 130 ms TIMER and
     # tip_after 550 ms — they survive widget destruction, so one test's pending
     # callback could fire into a LATER test's update (order-dependent flakes).
@@ -140,6 +146,12 @@ proc els_reset {} {
         set ::els::$v ""
     }
     catch {els::tip_cancel}
+    # And as the final backstop, cancel EVERY pending after (e.g. the
+    # `after idle recover_boot` scheduled by config_apply_choice in cfg-1.3,
+    # which otherwise fired mid-suite and could deiconify a REAL recovery
+    # dialog over the desktop).
+    foreach a [after info] { catch {after cancel $a} }
+    set ::els::probe_quiet 0
     set ::els::session_id_cached "" ; set ::els::session_token_cached ""
     set ::els::lock_handle "" ; set ::els::lock_chan ""
     set ::els::last_recover 0 ; set ::els::recover_auto 0
