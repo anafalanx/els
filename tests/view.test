@@ -197,3 +197,73 @@ test wrap-1.5 {current-line wash spans a wrapped logical line; gutter band at it
     list [expr {[lindex $r 0] eq "1.0" && [$w compare [lindex $r 1] >= "1.end"]}] \
          [gutter_bands] [expr {$bandY == [lindex $di 1]}]
 } -result {1 1 1}
+
+# ---- bug-hunt wave 5: gutter band, scrollbar refeed, wheel math -----------
+
+test gutter-5.1 {current-line band covers a wrapped line's FULL extent (all display rows)} -setup {els_reset} -body {
+    set ::els::word_wrap 1 ; els::set_wrap 0
+    set w [els::T]
+    $w insert end "[string repeat {word } 200]\nsecond line"
+    $w mark set insert 1.0
+    update ; els::draw_gutter
+    set band ""
+    foreach id [.ln find all] {
+        if {[.ln type $id] eq "rectangle"} { set band [.ln coords $id] }
+    }
+    set ::els::word_wrap 0 ; els::set_wrap 0
+    lassign $band x0 y0 x1 y1
+    set rowh [font metrics elsMono -linespace]
+    list [expr {$band ne ""}] [expr {($y1 - $y0) > 1.5 * $rowh}]
+} -result {1 1}
+
+test gutter-5.2 {band still drawn when the wrapped current line's first row is scrolled off} -setup {els_reset} -body {
+    set ::els::word_wrap 1 ; els::set_wrap 0
+    set w [els::T]
+    $w insert end "[string repeat {word } 400]\ntail"
+    $w mark set insert 1.0
+    update ; catch {$w sync}           ;# line metrics are async in Tk 9: settle them
+    # scroll until line 1's FIRST display row is genuinely off the top (own the
+    # precondition: update idletasks only, so no stray timer event can snap the
+    # view back mid-test)
+    foreach frac {0.05 0.1 0.15 0.2 0.3} {
+        $w yview moveto $frac
+        catch {$w sync} ; update idletasks
+        if {[$w dlineinfo 1.0] eq ""} break
+    }
+    els::draw_gutter
+    set n [gutter_bands]
+    # capture BEFORE the wrap cleanup below: un-wrapping puts 1.0 back on screen
+    set off [expr {[$w dlineinfo 1.0] eq ""}]
+    set ::els::word_wrap 0 ; els::set_wrap 0
+    list $off [expr {$n >= 1}]
+} -result {1 1}
+
+test scroll-5.1 {a tab switch re-feeds the scrollbar thumb from the live view} -setup {els_reset} -body {
+    set a $::els::active
+    set w [els::W $a]
+    $w insert end [string repeat "line\n" 300]
+    update
+    $w yview moveto 0.5
+    els::new_doc ; update                ;# switch away (view at top)
+    els::switch_to $a ; els::update_vscroll
+    lassign [.vs get] f l
+    expr {$f > 0.3}
+} -result 1
+
+test scroll-5.2 {non-multiple-of-120 wheel deltas scroll symmetrically} -setup {els_reset} -body {
+    # NOTE: the manual says `yview scroll N units` wants an integer, but Tk
+    # 9.0.3's text widget genuinely does smooth fractional unit scrolling
+    # (probed: symmetric, returns to the exact start) — which is what makes
+    # the float division both legal and symmetric.
+    set w [els::T] ; $w insert end [string repeat "line of text\n" 300]
+    update
+    $w yview moveto 0.5
+    set a [lindex [$w yview] 0]
+    els::wheel -40                       ;# was floored to 0 units (dead)
+    set b [lindex [$w yview] 0]
+    els::wheel 40
+    set c [lindex [$w yview] 0]
+    els::wheel 120                       ;# the standard notch still works
+    set d [lindex [$w yview] 0]
+    list [expr {$b > $a}] [expr {$c == $a}] [expr {$d < $c}]
+} -result {1 1 1}

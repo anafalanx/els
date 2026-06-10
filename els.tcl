@@ -127,6 +127,7 @@ namespace eval els {
     variable refresh_after ""    ;# coalesced full-view refresh (resize bursts)
     variable tp_zoom_acc 0       ;# accumulated Ctrl+touchpad zoom delta
     variable recent_row_tip -1   ;# recent-list row whose hover tip is active
+    variable recent_sel_path ""  ;# Maintain List selection, tracked by PATH
     variable boot_script ""      ;# path of this file at source time (see below)
 }
 # Capture the script path NOW, while a `source` is active: `info script` is only
@@ -476,6 +477,11 @@ proc els::recent_add {p} {
     set ::els::recent [els::recent_sanitize [linsert $rest 0 $p]]
     els::recent_rebuild
     els::save_geometry
+    # the Maintain List dialog is modeless and maps row indices into THIS list:
+    # without a refresh (it no-ops when closed), every action past the
+    # insertion point — Remove, Open, the detail label, the hover tip — acted
+    # on a DIFFERENT file than the row displayed
+    els::recent_manage_refresh
 }
 proc els::recent_remove {p} {
     set ::els::recent [lsearch -all -inline -not -exact $::els::recent $p]
@@ -489,14 +495,17 @@ proc els::recent_clear {} {
     els::save_geometry
     els::recent_manage_refresh
 }
+# Open a recent entry; returns the document id, or "" when nothing was opened
+# (missing file, or els::open failed — unreadable/directory/permission).
 proc els::recent_open {p} {
+    if {[winfo exists .recent]} { set par .recent } else { set par . }
     if {![file exists $p]} {
-        set ans [tk_messageBox -parent . -icon question -type yesno -title els \
+        set ans [tk_messageBox -parent $par -icon question -type yesno -title els \
             -message "This file no longer exists:\n[els::display_path $p]\n\nRemove it from the list?"]
         if {$ans eq "yes"} { els::recent_remove $p }
-        return
+        return ""
     }
-    els::open $p
+    return [els::open $p]
 }
 # Elide a path to at most `max` characters in the SAME style as els::elide_path
 # (keep the filename, drop leading directories behind a leading "…/"), but by
@@ -583,8 +592,13 @@ proc els::recent_manage {} {
     bind .recent <Delete> els::recent_manage_remove
     # full native path on hover: per row in the list, and on the detail label
     set ::els::recent_row_tip -1
+    set ::els::recent_sel_path ""
     bind .recent.f.list <Motion> {els::recent_row_motion %x %y %X %Y}
     bind .recent.f.list <Leave>  {els::tip_cancel ; set ::els::recent_row_tip -1}
+    # the row tips are scheduled manually (not via tooltip_for), so the dialog
+    # dying must cancel a pending one itself — else the after-550 fires over a
+    # destroyed dialog and pops an orphan -topmost tip at the old cursor spot
+    bind .recent.f.list <Destroy> {+els::tip_cancel}
     els::tooltip_for .recent.f.path els::recent_detail_tip
 
     els::recent_manage_refresh
@@ -643,6 +657,13 @@ proc els::recent_row_motion {x y rx ry} {
     if {$i eq "" || $i < 0 || $i >= [llength $::els::recent]} {
         els::tip_cancel ; set recent_row_tip -1 ; return
     }
+    # `index @x,y` CLAMPS to the nearest row, so in the empty area below the
+    # last row it still answers the last index — require the pointer to be
+    # inside that row's actual cell before offering its tip
+    set bb [$lb bbox $i]
+    if {$bb eq "" || $y < [lindex $bb 1] || $y >= [lindex $bb 1] + [lindex $bb 3]} {
+        els::tip_cancel ; set recent_row_tip -1 ; return
+    }
     if {$recent_row_tip == $i} { return }   ;# already handling this row
     set recent_row_tip $i
     els::tip_cancel
@@ -654,7 +675,6 @@ proc els::recent_row_motion {x y rx ry} {
 proc els::recent_manage_refresh {} {
     if {![winfo exists .recent.f.list]} { return }
     set lb .recent.f.list
-    set old [lindex [$lb curselection] 0]
     set avail [els::recent_manage_avail]
     $lb delete 0 end
     # elide too-long paths exactly like the status-bar name (keep the filename,
@@ -663,9 +683,11 @@ proc els::recent_manage_refresh {} {
     # selection is read by row index, not by the displayed text.
     foreach p $::els::recent { $lb insert end [els::elide_path $p $avail] }
     if {[llength $::els::recent]} {
-        if {$old eq "" || $old >= [llength $::els::recent]} {
-            set old 0
-        }
+        # restore the selection by PATH (tracked at select time), not by row
+        # index: after the list reordered (recent_add while the dialog is open)
+        # the old index would point at whatever file moved into that row
+        set old [lsearch -exact $::els::recent $::els::recent_sel_path]
+        if {$old < 0} { set old 0 }
         $lb selection set $old
         $lb activate $old
         $lb see $old
@@ -687,14 +709,20 @@ proc els::recent_manage_select {} {
     if {![winfo exists .recent.f.path]} { return }
     set p [els::recent_manage_path]
     set has [expr {$p ne ""}]
+    if {$has} { set ::els::recent_sel_path $p }   ;# track selection by PATH for refresh
     set hasMissing 0
     foreach r $::els::recent {
         if {![file exists $r]} { set hasMissing 1 ; break }
     }
     # elide the detail path too (full native path is on hover) so a long path
-    # can't stretch the dialog wide
-    .recent.f.path configure -text \
-        [expr {$has ? [els::elide_path $p [els::recent_detail_avail]] : "No recent files"}]
+    # can't stretch the dialog wide.  (if/else, not an expr ternary: expr
+    # canonicalizes number-looking operands, mangling a path like "007")
+    if {$has} {
+        set detail [els::elide_path $p [els::recent_detail_avail]]
+    } else {
+        set detail "No recent files"
+    }
+    .recent.f.path configure -text $detail
     foreach b {.recent.f.buttons.open .recent.f.buttons.remove} {
         $b configure -state [expr {$has ? "normal" : "disabled"}]
     }
@@ -704,9 +732,10 @@ proc els::recent_manage_select {} {
 proc els::recent_manage_open {} {
     set p [els::recent_manage_path]
     if {$p eq ""} { return }
-    set exists [file exists $p]
-    els::recent_open $p
-    if {$exists} {
+    # close the dialog only when the open actually SUCCEEDED: `file exists` is
+    # true for directories and unreadable files, and an error used to take the
+    # dialog down with it — exactly when the user came here to clean the list
+    if {[els::recent_open $p] ne ""} {
         catch {destroy .recent}
     } else {
         els::recent_manage_refresh

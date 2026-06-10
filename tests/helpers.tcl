@@ -132,6 +132,14 @@ proc els_reset {} {
     catch {els::swap_stop}
     set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    # Cancel every view-layer deferral too: find_after is a 130 ms TIMER and
+    # tip_after 550 ms — they survive widget destruction, so one test's pending
+    # callback could fire into a LATER test's update (order-dependent flakes).
+    foreach v {find_after refresh_after gutter_after vs_after hs_after ws_after} {
+        catch {after cancel [set ::els::$v]}
+        set ::els::$v ""
+    }
+    catch {els::tip_cancel}
     set ::els::session_id_cached "" ; set ::els::session_token_cached ""
     set ::els::lock_handle "" ; set ::els::lock_chan ""
     set ::els::last_recover 0 ; set ::els::recover_auto 0

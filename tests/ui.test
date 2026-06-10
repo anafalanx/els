@@ -1469,3 +1469,89 @@ test ui-4.16 {the find count label fits a large match count without clipping} -s
     update idletasks
     expr {[winfo reqwidth .find.fr.n] >= [font measure elsUI "15912 of 20631"]}
 } -result 1
+
+# ---- bug-hunt wave 5: recent dialog, tooltips, menu undo -------------------
+
+test recent-5.1 {Maintain List stays path-correct after recent_add reorders it} -setup {ui_reset} -body {
+    set pa [file normalize [els_tmpfile r5a.txt "A\n"]]
+    set pb [file normalize [els_tmpfile r5b.txt "B\n"]]
+    set ::els::recent [list $pa $pb]
+    els::recent_manage ; catch {wm withdraw .recent}
+    .recent.f.list selection clear 0 end
+    .recent.f.list selection set 1             ;# select pb
+    els::recent_manage_select                   ;# selection now tracked by path
+    els::recent_add [file normalize [els_tmpfile r5c.txt "C\n"]]   ;# reorders
+    set agree [string equal [els::recent_manage_path] $pb]
+    set rows [.recent.f.list size]
+    catch {destroy .recent}
+    list $agree [expr {$rows == [llength $::els::recent]}]
+} -result {1 1}
+
+test recent-5.2 {a failed Open keeps the Maintain List dialog up} -setup {ui_reset} -body {
+    set dir [file join $::ELS_TMP r5dir] ; file mkdir $dir
+    set ::els::recent [list $dir]               ;# exists, but cannot be opened
+    els::recent_manage ; catch {wm withdraw .recent}
+    .recent.f.list selection set 0
+    els::recent_manage_open
+    set alive [winfo exists .recent]
+    catch {destroy .recent}
+    list $alive [llength $::els::docs]
+} -result {1 1}
+
+test recent-5.3 {hovering the empty area below the rows schedules no tip} -setup {ui_reset} -body {
+    set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5long.txt]
+    set ::els::recent [list $long]              ;# elided row -> tip applies
+    els::recent_manage ; catch {wm withdraw .recent}
+    update idletasks
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    els::recent_row_motion 5 5 100 100          ;# inside row 0
+    set inRow [info exists ::els::tip_after]
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    set below [expr {[winfo reqheight .recent.f.list] - 5}]
+    els::recent_row_motion 5 $below 100 100     ;# empty area below the row
+    set inGap [info exists ::els::tip_after]
+    catch {destroy .recent}
+    list $inRow $inGap
+} -result {1 0}
+
+test recent-5.4 {destroying the Maintain List dialog cancels a pending row tip} -setup {ui_reset} -body {
+    set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5d.txt]
+    set ::els::recent [list $long]
+    els::recent_manage ; catch {wm withdraw .recent}
+    update idletasks
+    els::tip_cancel ; set ::els::recent_row_tip -1
+    els::recent_row_motion 5 5 100 100          ;# schedules the after-550 tip
+    set pend [info exists ::els::tip_after]
+    destroy .recent                              ;# dialog dies before it fires
+    after 700 {set ::__tipwait 1} ; vwait ::__tipwait
+    list $pend [winfo exists .tip]
+} -result {1 0}
+
+test tip-5.1 {destroying a tooltip's anchor removes a visible tip} -setup {ui_reset} -body {
+    button .tmpb -text x
+    els::tooltip .tmpb "tip text"
+    els::tip_pop .tmpb "tip text"
+    set vis [winfo exists .tip]
+    destroy .tmpb                                ;# <Destroy> hook fires
+    list $vis [winfo exists .tip]
+} -result {1 0}
+
+test tip-5.2 {clicking a tab dismisses its visible tooltip and still switches} -setup {ui_reset} -body {
+    set a $::els::active
+    els::new_doc ; update
+    set tf [els::tabW $a]
+    els::tip_pop $tf "path tip"
+    set vis [winfo exists .tip]
+    event generate $tf <ButtonPress-1> ; update
+    list $vis [winfo exists .tip] [expr {$::els::active eq $a}]
+} -result {1 0 1}
+
+test undo-5.1 {menu Undo refreshes Ln/Col and the current-line wash} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "one\n" ; $w edit separator ; $w insert end "two\n"
+    $w mark set insert 2.3 ; els::refresh_view
+    els::menu_undo ; ui_settle
+    lassign [split [$w index insert] .] L C
+    set fresh [string equal [.sb.pos cget -text] "Ln $L Col [expr {$C + 1}]"]
+    list $fresh [expr {[llength [$w tag ranges currentLine]] > 0}]
+} -result {1 1}
