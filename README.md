@@ -37,8 +37,12 @@ in **Settings > Default apps**.
 ## Features
 
 - **Data safety, built in**: atomic saves that cannot truncate a file,
-  continuous crash protection for unsaved changes, and one editor window that
-  collects everything you open. Explained in [Data safety](#data-safety).
+  continuous crash protection for unsaved changes, a guard against saves that
+  would silently lose characters, and one editor window that collects
+  everything you open. Explained in [Data safety](#data-safety).
+- **Auto-save, opt-in** (File > Auto-save, off by default): documents that
+  have a file are saved a moment after you stop typing, on tab switch, on
+  focus loss, and on exit.
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
   state under a flat tab strip; drag a tab to reorder.
 - **Find & replace** (Ctrl+F / Ctrl+H): Tcl ARE regex with live match
@@ -112,6 +116,25 @@ extra launch: the safety layer was designed for that case too, so each
 instance keeps its own protected snapshots (a live instance's snapshots are
 guarded by a lock that Windows releases only when that process is truly
 gone, so one instance can never "recover" another's open work).
+
+**No save is silently lossy.** A document's encoding is preserved on save,
+and some encodings cannot represent every character you can type. When that
+happens, els stops and asks: switch the document to UTF-8 (keeps every
+character), save anyway with substitute characters (your choice is remembered
+for that document until you pick another encoding), or cancel. The dialog
+names the first offending character and where it is.
+
+**Auto-save (optional).** **File > Auto-save** is off by default. When you
+turn it on, every document that has a file is saved automatically: a moment
+after you stop typing, when you switch tabs, when the els window loses focus,
+and when you close a file or exit, always through the same atomic save.
+Untitled notes are never auto-saved (no filename is invented; crash recovery
+protects them), a save that would lose characters pauses auto-saving for that
+document until one manual save settles the question, and a failing auto-save
+shows a quiet statusbar note instead of a dialog. Be aware of what you are
+choosing: with auto-save on, the file on disk follows the buffer, so closing
+without saving stops being a way to discard an editing accident. That is
+exactly why it is opt-in.
 
 ![Find and replace with visible whitespace](docs/img/find-whitespace.png)
 

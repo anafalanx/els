@@ -33,6 +33,9 @@ namespace eval els {
     variable docLossyOk   ; array set docLossyOk {}    ;# id -> user accepted lossy saves (this session)
     variable docLossyPause; array set docLossyPause {} ;# id -> auto-save paused (unencodable chars)
     variable status_note_after ""   ;# transient statusbar note timer
+    variable autosave 0             ;# File ▸ Auto-save (opt-in, persisted)
+    variable autosave_after ""      ;# debounced auto-save flush timer
+    variable autosave_pending {}    ;# doc ids awaiting the debounced flush
     # ---- crash-recovery / autosave subsystem (R2 / docs robustness P0-b) ----
     # A swap file per dirty doc under <configdir>/swap/, written atomically and
     # often, so a crash / power-loss / kill never loses unsaved edits; on the next
@@ -382,6 +385,9 @@ proc els::load_geometry {} {
         set ::els::show_linenos [expr {$lnv ? 1 : 0}]
         catch {els::set_linenos 0}
     }
+    if {![catch {dict get $data autosave} asv] && [string is boolean -strict $asv]} {
+        set ::els::autosave [expr {$asv ? 1 : 0}]
+    }
     if {![catch {dict get $data always_on_top} t] && [string is boolean -strict $t]} {
         set ::els::always_on_top [expr {$t ? 1 : 0}]
         catch {els::set_always_on_top 0}
@@ -422,6 +428,7 @@ proc els::save_geometry {} {
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
                          line_numbers $::els::show_linenos \
+                         autosave $::els::autosave \
                          always_on_top $::els::always_on_top \
                          font_size $::els::font_size \
                          restore_session $::els::restore_session \
@@ -1119,6 +1126,8 @@ proc els::build {} {
     .menu.file add separator
     .menu.file add command -label Save         -accelerator Ctrl+S -command els::save
     .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
+    .menu.file add checkbutton -label "Auto-save" -variable ::els::autosave \
+        -command els::set_autosave
     .menu.file add separator
     .menu.file add command -label "Close File" -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
@@ -1225,6 +1234,8 @@ proc els::build {} {
     # build, before .ln existed, so its set_linenos call could not apply — and
     # the unconditional grid above would leave an EMPTY gutter band showing
     if {!$::els::show_linenos} { grid remove .ln }
+    # auto-save when the app window loses focus (Deactivate fires on toplevels)
+    bind . <Deactivate> {if {"%W" eq "."} { els::autosave_all }}
     grid .vs   -row 2 -column 2 -sticky ns
     grid .hs   -row 3 -column 1 -sticky ew
     grid .sb   -row 4 -column 0 -columnspan 3 -sticky ew
@@ -1394,6 +1405,7 @@ proc els::switch_to {id} {
     variable docs
     variable active
     if {[lsearch -exact $docs $id] < 0} { return }
+    if {$active ne "" && $active ne $id} { els::autosave_flush_doc $active }
     if {$active ne "" && [winfo exists [els::W $active]]} {
         # clear find highlights on the tab we are leaving so they don't linger as
         # orphaned tints on an inactive document (the search re-applies to the new
@@ -1431,6 +1443,7 @@ proc els::close_doc {id} {
     variable docPath
     set idx [lsearch -exact $docs $id]
     if {$idx < 0} { return }
+    els::autosave_flush_doc $id   ;# auto-save on: a pathed doc closes saved, no prompt
     if {[els::doc_dirty $id]} {
         set ::els::swap_suspend 1
         set ans [tk_messageBox -parent . -icon warning -type yesnocancel \
@@ -1672,6 +1685,7 @@ proc els::on_modified {w} {
     if {$id eq ""} { return }
     if {[$w edit modified]} {
         set ::els::dirtySince($id) 1                          ;# 0->1 dirty latch
+        els::autosave_soon $id                                ;# opt-in; debounced
     } else {
         # back to the saved state (undo-to-clean, save, reopen): there is
         # nothing to protect any more — drop the latch AND the swap file, so a
@@ -3213,6 +3227,42 @@ proc els::status_note {msg} {
     set ::els::status_note_after [after 4000 els::update_namelabel]
 }
 
+# ---- auto-save (opt-in) ----------------------------------------------------
+# File ▸ Auto-save: documents that HAVE a file are saved automatically -- a
+# moment after typing pauses, when switching tabs, when the window loses
+# focus, and on close/quit.  Untitled documents are never auto-saved (crash
+# recovery protects them; els does not invent filenames).  Auto-saves are
+# quiet: a write error becomes a statusbar note, and a document whose
+# encoding cannot hold its characters pauses auto-saving until one manual
+# save settles the question (the lossy guard above).
+proc els::set_autosave {{persist 1}} {
+    if {$::els::autosave} { els::autosave_all }   ;# turning it on saves NOW
+    if {$persist} { els::save_geometry }
+}
+proc els::autosave_soon {id} {
+    if {!$::els::autosave} { return }
+    dict set ::els::autosave_pending $id 1
+    catch {after cancel $::els::autosave_after}
+    set ::els::autosave_after [after 1200 els::autosave_flush_pending]
+}
+proc els::autosave_flush_pending {} {
+    set ::els::autosave_after ""
+    set pend $::els::autosave_pending
+    set ::els::autosave_pending {}
+    foreach id [dict keys $pend] { els::autosave_flush_doc $id }
+}
+proc els::autosave_flush_doc {id} {
+    if {!$::els::autosave} { return }
+    if {$id eq "" || $id ni $::els::docs} { return }
+    if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return }
+    if {[info exists ::els::docLossyPause($id)]} { return }   ;# awaiting a manual save
+    if {![els::doc_dirty $id]} { return }
+    catch {els::save $id 1}
+}
+proc els::autosave_all {} {
+    foreach id $::els::docs { els::autosave_flush_doc $id }
+}
+
 # Save a document (default: the active one).  quiet=1 is the auto-save mode:
 # no dialog may ever appear -- an unencodable character pauses auto-saving for
 # the document and a write error becomes a statusbar note.
@@ -3516,6 +3566,7 @@ proc els::shortcuts {} {
 }
 proc els::quit {} {
     variable docs
+    els::autosave_all   ;# auto-save on: pathed docs leave saved; only the rest prompt
     foreach id $docs {
         if {[els::doc_dirty $id]} {
             els::switch_to $id

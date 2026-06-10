@@ -324,3 +324,102 @@ test save-2.1 {save_with a new encoding, then save, writes that encoding's bytes
     set body [encoding convertfrom utf-16le [string range $raw 2 end]]
     list $dirtyAfterPick $bomhex $body [els::doc_dirty $d]
 } -result {1 fffe hello 0}
+
+# ---- auto-save (opt-in) ------------------------------------------------------
+
+# Scaffold: a saved file whose buffer then gains an edit, with auto-save on.
+proc as_doc {name} {
+    set p [els_tmpfile $name "base\n"]
+    set id [els::open $p]
+    set ::els::autosave 1
+    [els::W $id] insert end "edit"
+    return $id
+}
+
+test as-1.1 {auto-save is OFF by default and lives in the File menu} -setup {els_reset} -body {
+    set found 0
+    for {set i 0} {$i <= [.menu.file index end]} {incr i} {
+        if {[.menu.file type $i] eq "checkbutton" &&
+            [.menu.file entrycget $i -label] eq "Auto-save"} { set found 1 }
+    }
+    list $::els::autosave $found
+} -result {0 1}
+
+test as-1.2 {an edit schedules a debounced flush that saves the file} -setup {els_reset} -body {
+    set id [as_doc as12.txt]
+    [els::W $id] edit modified 1 ; update      ;# fire <<Modified>> -> autosave_soon
+    set scheduled [expr {$::els::autosave_after ne ""}]
+    els::autosave_flush_pending                 ;# what the timer runs
+    list $scheduled [els::doc_dirty $id] [raw_read $::els::docPath($id)]
+} -result [list 1 0 "base\nedit"]
+
+test as-1.3 {untitled documents are never auto-saved (no dialog, no file)} -setup {els_reset} -body {
+    set id [els::new_doc]
+    set ::els::autosave 1
+    [els::W $id] insert end "note"
+    els::autosave_flush_doc $id
+    list [els::doc_dirty $id] $::els_test_save_args
+} -result {1 {}}
+
+test as-1.4 {switching tabs flushes the document being left} -setup {els_reset} -body {
+    set id [as_doc as14.txt]
+    set other [els::new_doc]
+    els::switch_to $other
+    list [els::doc_dirty $id] [raw_read $::els::docPath($id)]
+} -result [list 0 "base\nedit"]
+
+test as-1.5 {losing the app window focus flushes everything} -setup {els_reset} -body {
+    set id [as_doc as15.txt]
+    event generate . <Deactivate>
+    update
+    list [els::doc_dirty $id] [raw_read $::els::docPath($id)]
+} -result [list 0 "base\nedit"]
+
+test as-1.6 {closing a pathed doc with auto-save on saves it without a prompt} -setup {els_reset} -body {
+    set id [as_doc as16.txt]
+    set p $::els::docPath($id)
+    els::close_doc $id
+    list $::els_test_mbcount [expr {$id in $::els::docs}] [raw_read $p]
+} -result [list 0 0 "base\nedit"]
+
+test as-1.7 {a failing auto-save stays quiet: statusbar note, no dialog, still dirty} -setup {els_reset} -body {
+    set id [as_doc as17.txt]
+    # an unopenable target: the parent directory does not exist
+    set ::els::docPath($id) [file join $::ELS_TMP no-such-dir as17.txt]
+    els::autosave_flush_doc $id
+    list $::els_test_mbcount [els::doc_dirty $id] \
+        [string match "auto-save failed:*" [.sb.name cget -text]]
+} -result {0 1 1}
+
+test as-1.8 {an unencodable char pauses auto-save until a manual save settles it} -setup {els_reset} -body {
+    set id [as_doc as18.txt]
+    set ::els::docEnc($id) ascii
+    [els::W $id] insert end "é"
+    els::autosave_flush_doc $id
+    set paused [info exists ::els::docLossyPause($id)]
+    set untouched [raw_read $::els::docPath($id)]
+    els::autosave_flush_doc $id                 ;# paused: silently skipped
+    set ::els_test_lossy_answer utf8
+    set ok [els::save]                          ;# the manual save settles it
+    els::autosave_flush_doc $id
+    list $paused $untouched $ok [info exists ::els::docLossyPause($id)] [els::doc_dirty $id]
+} -result [list 1 "base\n" 1 0 0]
+
+test as-1.9 {the auto-save choice persists through the config round-trip} -setup {els_reset} -body {
+    set ::els::autosave 1
+    els::save_geometry
+    set ::els::autosave 0
+    els::load_geometry
+    set v $::els::autosave
+    catch {file delete -force $::els::config_path}
+    set v
+} -result 1
+
+test as-1.10 {turning auto-save ON saves dirty pathed documents immediately} -setup {els_reset} -body {
+    set p [els_tmpfile as110.txt "base\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "now"
+    set ::els::autosave 1                       ;# what the menu checkbutton does...
+    els::set_autosave 0                         ;# ...then its -command (no persist)
+    list [els::doc_dirty $id] [raw_read $p]
+} -result [list 0 "base\nnow"]

@@ -147,6 +147,8 @@ proc els_reset {} {
     set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
     set ::els::handoff_after ""
+    set ::els::autosave 0 ; set ::els::autosave_pending {}
+    catch {after cancel $::els::autosave_after} ; set ::els::autosave_after ""
     # Release a held session lock BEFORE blanking the variables: the cfg tests
     # acquire a real one via set_config_path, and dropping the only reference
     # without closing leaked the channel and made their cleanup deletes fail
@@ -179,6 +181,7 @@ proc els_reset {} {
     # Per-test hygiene: restore the dialog stubs to their defaults and clear the
     # captured background errors, so one test's answer can't leak into the next.
     set ::els_test_openfile "" ; set ::els_test_savefile ""
+    set ::els_test_open_args {} ; set ::els_test_save_args {}
     set ::els_test_mbanswer "yes" ; set ::els_test_popup_args {}
     set ::els_test_mbcount 0 ; set ::els_test_mbargs {} ; set ::els_test_mbqueue {}
     set ::els_test_bgerrors {}
