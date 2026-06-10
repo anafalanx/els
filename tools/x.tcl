@@ -136,8 +136,6 @@ proc task_help {args} {
                      custom C23 WinMain with Tcl+Tk+icudet statically linked,
                      PE icon/manifest/version via windres; safe to rebuild
                      while dist/els.exe is running (old exe is parked aside)
-  build-wish [--with-ext]  legacy fallback: fuse dist/els.exe onto a copy of
-                     wish90s (--with-ext embeds build/*.dll); superseded by `build`
   probe-exe [exe]    launch the fused exe (default dist/els.exe) in a temp
                      config home and verify first-run + session + recovery +
                      single-instance startup behaviour
@@ -169,39 +167,9 @@ proc task_toolcheck {args} {
     stream [tclsh] [P tools toolcheck.tcl] {*}$args
 }
 
-# LEGACY fallback build: fuse els.exe onto a copy of wish90s (the stock static Tk
-# shell) by stamping the icon then appending the zipfs payload.  Superseded by the
-# native `x build` (task_build below); kept one cycle as a rollback path.  Runs
-# package.tcl under the STATIC tclsh90s so zipfs can append the payload.
-proc task_build-wish {args} {
-    set tclshs [TCp tcl9s bin tclsh90s.exe]
-    if {![file exists $tclshs]} {
-        error "static interpreter missing (.toolchain/tcl9s) — needed for `x build`; see `x toolcheck`"
-    }
-    # split out the output path (first non-flag) from flags like --with-ext
-    set out "" ; set rest {}
-    foreach a $args {
-        if {[string match -* $a]} { lappend rest $a } elseif {$out eq ""} { set out $a } else { lappend rest $a }
-    }
-    if {$out eq ""} { set out [P dist els.exe] }
-    file mkdir [file dirname $out]
-    # Icon the WRAPPER first: stamp the awl into a wish90s copy's PE resources,
-    # then mkimg appends the zip AFTER it so both icon and payload survive.
-    # (Editing the finished exe would strip the appended zipfs archive.)
-    set wargs {}
-    set tmpwrap [TCp _iconwrap.exe]
-    set wish90s [TCp tcl9s bin wish90s.exe]
-    catch {file delete -force $tmpwrap}
-    if {[file exists $wish90s] && ![catch {file copy -force $wish90s $tmpwrap}]} {
-        if {![catch {stream [tclsh] [P tools exeicon.tcl] $tmpwrap} e]} {
-            set wargs [list --wrapper $tmpwrap]
-        } else {
-            puts "warning: PE icon skipped: $e"
-        }
-    }
-    stream $tclshs [P tools package.tcl] $out {*}$wargs {*}$rest
-    catch {file delete -force $tmpwrap}
-}
+# (The legacy `x build-wish` wrapper build — fuse onto an icon-stamped copy of
+# wish90s.exe via tools/exeicon.tcl — was retired after 0.60 shipped native;
+# it lived here as a one-cycle rollback path. History has the code.)
 
 proc task_probe-exe {args} {
     need tclsh
@@ -320,8 +288,7 @@ proc task_build-ext {args} {
 # compiled in and the PE resources (icon + manifest + version) baked via windres,
 # then the same zipfs payload (tcl_library/tk_library/main.tcl/resources) appended.
 # See docs/native-port-study.md.  Headers come from the SHARED tree (tcl9/include —
-# tcl9s has none); libs from the STATIC tree (tcl9s/lib).  The legacy wish-wrapper
-# build is `x build-wish` (task_build-wish above).
+# tcl9s has none); libs from the STATIC tree (tcl9s/lib).
 proc task_build {args} {
     need gcc tclsh
     if {![file exists [tclshs]]} { error "static tclsh missing (.toolchain/tcl9s) — run `x toolcheck`" }

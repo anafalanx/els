@@ -43,7 +43,7 @@ machine-built), so it travels by *copy-paste of the folder*, not by `git clone`.
 | Path | What | Version |
 |---|---|---|
 | `.toolchain/tcl9/` | Tcl/Tk 9 **shared** build: `tclsh90.exe`, `wish90.exe`, stubs (`lib/libtclstub.a`), headers (`include/tcl.h`, `tk.h`) | 9.0.3 |
-| `.toolchain/tcl9s/` | Tcl/Tk 9 **static**, DLL-free: the link libs `lib/libtcl90.a` + `libtcl9tk90.a` (the native `x build` links these into els.exe), plus `tclsh90s.exe` and `wish90s.exe` (the legacy wrapper build) | 9.0.3 |
+| `.toolchain/tcl9s/` | Tcl/Tk 9 **static**, DLL-free: the link libs `lib/libtcl90.a` + `libtcl9tk90.a` (the native `x build` links these into els.exe), plus `tclsh90s.exe` (runs the packaging step) and `wish90s.exe` (packaging extracts `tk_library` from its appended archive) | 9.0.3 |
 | `.toolchain/msys64/ucrt64/` | gcc (C23), binutils, gdb (MSYS2 UCRT64) | gcc 16.1.0 |
 | `.toolchain/msys64/usr/bin/` | `curl.exe` etc. (used by the fetch tasks) | n/a |
 | `.toolchain/twapi-dl/` | twapi: Windows API extension for the GUI tooling | 5.2.0 |
@@ -93,7 +93,6 @@ x test               in-process test suite (tcltest + Tk event generate)
 x run [file ...]     launch the editor (wish + els.tcl)
 x shot <out> [file]  screenshot the editor (twapi, all-Tcl)
 x build              build the native exe -> dist/els.exe (C23 WinMain, static Tcl+Tk+icudet)
-x build-wish [--with-ext]  legacy: fuse dist/els.exe onto wish90s (--with-ext embeds DLLs)
 x build-ext          compile src/*.c C23 extensions -> build/*.dll
 x fetch-twapi        vendor twapi into .toolchain/
 x fetch-git          vendor MinGit into .toolchain/git/
@@ -198,17 +197,16 @@ baked at link time by windres. They survive the zipfs append because the zip lan
 `src/els.ico`); rebuild them, ship the exe via releases. The full rationale and the
 proven link recipe are in `docs/native-port-study.md`.
 
-### Legacy wrapper build: `x build-wish`
+### A PE-resource gotcha worth keeping
 
-Before the native port, `els.exe` was a byte-copy of `wish90s.exe` (the stock
-static Tk shell) with the same zipfs payload appended and the icon post-stamped
-via `tools/exeicon.tcl` (twapi `UpdateResource`). `x build-wish [--with-ext]`
-still produces that (icudet rides inside as a `.dll` and `load`s from zipfs).
-**Order is critical there:** editing PE resources DROPS anything appended after
-the PE image (the whole zipfs payload), so the icon goes into a *copy of the
-wrapper first* and `mkimg` appends the zip after (`package.tcl --wrapper`);
-`exeicon.tcl` refuses to edit an already-packaged exe as a guard. The native
-`x build` supersedes this; it is kept one cycle as a rollback path.
+Editing a packaged exe's PE resources (icon, version info, manifest — e.g. via
+twapi `UpdateResource`) **rewrites the PE image and DROPS anything appended
+after it**, which for els means the entire zipfs payload: the exe shrinks and
+dies with "Cannot find init.tcl". Resources must be baked into the bare PE
+*first* (the native build does this at link time via windres) and the zipfs
+appended *after*. (The pre-0.60 legacy wrapper build, `x build-wish` +
+`tools/exeicon.tcl`, was retired once the native build shipped; git history
+has it.)
 
 ### Testing the exe safely
 

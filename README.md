@@ -132,7 +132,6 @@ x shot out.png  # screenshot the editor (twapi, all-Tcl, no AutoIt)
 x readme-shots  # regenerate the README screenshots
 x probe-exe     # process-level startup checks for the built exe (dist/els.exe)
 x build         # build the native exe -> dist/els.exe (custom C WinMain, static Tcl+Tk+icudet)
-x build-wish    # legacy fallback: fuse dist/els.exe onto wish90s (--with-ext embeds DLLs)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
 x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
 x shell         # a shell with the vendored toolchain on PATH
@@ -152,8 +151,7 @@ exe and swaps it into place, so it works even while `dist/els.exe` is running
 (the old copy is parked as `els.exe.old` until the next build; restart els to
 pick up the new one). Users only need the released `els.exe`; developers can
 move the whole repo folder around because the vendored `.toolchain/` is
-relocatable. (`x build-wish` is the pre-native wrapper build, kept as a
-fallback.)
+relocatable.
 
 The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
 (`x.cmd`): no bash, PowerShell, or Python. See

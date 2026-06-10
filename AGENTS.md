@@ -33,8 +33,7 @@ unchanged by the C entry point.
   Tcl** by `tools/genres.tcl` + `tools/mkico.tcl` into gitignored `build/`, then
   `windres`'d; link the static `.toolchain/tcl9s` libs; append the zipfs
   payload, staged + swapped into place so a running `dist/els.exe` never blocks
-  a rebuild.) **`x build-wish`** is the legacy wrapper build (fuse onto
-  `wish90s.exe`), kept as a fallback.
+  a rebuild.)
 - The architecture, the proven static-link recipe, and the pitfalls are in
   [`docs/native-port-study.md`](docs/native-port-study.md); a robustness audit +
   hardening roadmap is in

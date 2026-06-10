@@ -3,9 +3,9 @@
 # Runs under the STATIC tclsh90s so zipfs can `lmkimg`-append the staged app
 # payload — main.tcl (= els.tcl), resources/, tcl_library/, tk_library/ at the
 # archive root (+ build/*.dll with --with-ext) — onto a Tk-capable wrapper, AFTER
-# the PE image so a baked-in icon/manifest survives.  The wrapper is `--wrapper`:
-#   * native build (`x build`):       build/els-bare.exe (our custom C WinMain)
-#   * legacy build (`x build-wish`):  an icon-stamped copy of wish90s.exe
+# the PE image so a baked-in icon/manifest survives.  The wrapper (`--wrapper`)
+# is the native build's build/els-bare.exe (our custom C WinMain, resources
+# already baked at link time).
 #
 #   tclsh90s.exe tools/package.tcl [out.exe] [--wrapper W] [--with-ext]
 #
@@ -59,7 +59,7 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
     }
 }
 set out [lindex $positional 0]
-if {$out eq ""} { set out [file join $ROOT els.exe] }
+if {$out eq ""} { set out [file join $ROOT dist els.exe] }
 
 # `wish` = the original static wrapper (used to extract tk_library); the mkimg
 # wrapper may be an icon-stamped copy (--wrapper) — its icon survives because
