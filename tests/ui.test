@@ -675,9 +675,10 @@ test assoc-3.5 {assoc_unregister issues exactly the app-registration deletes, ag
 test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
     set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]
     set ::els::docPath($::els::active) $p
-    .sb.name configure -text $p             ;# whole path fits — no tip
+    # the label's real non-elided rendering carries the length suffix
+    .sb.name configure -text "$p  \[[string length $fn]\]"   ;# fits — no tip
     set a [els::name_tip]
-    .sb.name configure -text "…/notes.txt"  ;# elided — show full path + length
+    .sb.name configure -text "…/notes.txt  \[[string length $fn]\]"  ;# elided
     set b [els::name_tip]
     list [expr {$a eq ""}] [expr {$b eq "$fn \[[string length $fn]\]"}]
 } -result {1 1}
@@ -1295,6 +1296,44 @@ test issue-a.5 {statusbar shows the path length in its normal depiction} -setup 
 test issue-a.6 {the update indicator has a hover state} -setup {ui_reset} -body {
     list [expr {[bind .sb.update <Enter>] ne ""}] [expr {[bind .sb.update <Leave>] ne ""}]
 } -result {1 1}
+
+# ---- statusbar regressions: redundant tooltip + narrow-window flicker -------
+
+test sbtip-1.1 {no tooltip while the whole path is shown; tip returns once it elides} -setup {ui_reset} -body {
+    els::open [els_tmpfile tip1.txt "x\n"]
+    update idletasks ; els::update_namelabel
+    set fits [els::name_tip]                       ;# short path in a 900px bar: fits
+    # force elision: a path far wider than the label
+    set ::els::docPath($::els::active) [file join $::ELS_TMP [string repeat verylongsegment/ 20] tip1.txt]
+    els::update_namelabel
+    set elided [els::name_tip]
+    list $fits [expr {$elided eq [els::path_tip $::els::docPath($::els::active)]}] \
+        [string match "…*" [.sb.name cget -text]]
+} -result {{} 1 1}
+
+test sbflick-1.1 {the name label's geometry request is text-independent (no layout feedback)} -setup {ui_reset} -body {
+    els::open [els_tmpfile fl1.txt "x\n"]
+    update idletasks ; els::update_namelabel
+    set short [winfo reqwidth .sb.name]
+    set ::els::docPath($::els::active) [file join $::ELS_TMP [string repeat directory/ 30] fl1.txt]
+    els::update_namelabel ; update idletasks
+    set long [winfo reqwidth .sb.name]
+    expr {$short == $long}
+} -result 1
+
+test sbflick-1.2 {a very narrow window reaches a stable elision (fixed point, no oscillation)} -setup {ui_reset} -body {
+    els::open [els_tmpfile fl2-with-a-longer-name.txt "x\n"]
+    wm geometry . 280x200 ; update
+    els::update_namelabel ; update
+    set t1 [.sb.name cget -text]
+    els::update_namelabel ; update                ;# recompute at the same width:
+    set t2 [.sb.name cget -text]                  ;# must be the identical text
+    els::update_namelabel ; update
+    set t3 [.sb.name cget -text]
+    list [string equal $t1 $t2] [string equal $t2 $t3] [llength $::els_test_bgerrors]
+} -cleanup {
+    wm geometry . 900x620+100+100 ; update
+} -result {1 1 0}
 
 test issue-a.7 {find/replace entries grow a clear button while non-empty} -setup {ui_reset} -body {
     els::find_show find ; update idletasks

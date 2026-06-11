@@ -1201,7 +1201,13 @@ proc els::build {} {
     # the shared status bar — one thin, quiet line under a hairline
     ttk::frame .sb
     frame .sb.hair -height 1 -bg $::els::HAIR
-    ttk::label .sb.name -font elsUI -anchor w -text "untitled" -foreground $::els::MUTED
+    # -width 8 FIXES the requested width: the text must never drive layout.
+    # With a text-following request, a long path in a narrow window inflates
+    # the request, pack squeezes the right cluster, the shrunken allocation
+    # re-elides the text shorter, the request shrinks, pack gives the space
+    # back... a visible flicker loop.  Actual width comes from -fill x/-expand.
+    ttk::label .sb.name -font elsUI -anchor w -text "untitled" -width 8 \
+        -foreground $::els::MUTED
     ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1 Col 1" -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED \
         -cursor hand2 -padding {4 1}
@@ -1661,7 +1667,12 @@ proc els::name_tip {} {
     variable active
     if {$active eq "" || ![info exists ::els::docPath($active)]} { return "" }
     set p $::els::docPath($active)
-    if {$p eq "" || [.sb.name cget -text] eq $p} { return "" }
+    if {$p eq ""} { return "" }
+    # suppress the tip while the label shows the WHOLE path: the displayed text
+    # is "<path>  [N]" since the length suffix rode along, so compare against
+    # that full non-elided rendering, not against the bare path
+    set suffix "  \[[string length [els::display_path $p]]\]"
+    if {[.sb.name cget -text] eq "[els::strip_ext_prefix $p]$suffix"} { return "" }
     return [els::path_tip $p]
 }
 proc els::status_link_enter {w} {
