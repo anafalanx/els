@@ -1,5 +1,5 @@
 # tests/run.tcl — run the whole els test suite in one process.
-#   .toolchain/tcl9/bin/tclsh90.exe tests/run.tcl [--fast]
+#   x test [--fast]
 # --fast skips the slow ~800-op encoding stress test (stress-1.1).
 # Exits non-zero if any test fails.
 

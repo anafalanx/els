@@ -1,31 +1,49 @@
 #!/usr/bin/env tclsh
-# tools/x.tcl — the els task runner.  ALL project tooling lives here (Tcl), plus
-# C built by the vendored gcc.  Normally invoked through x.cmd (which sets PATH
-# to the vendored toolchain first); this script re-asserts PATH itself so it is
-# also robust when run directly with the vendored tclsh.
+# tools/x.tcl - the els task runner. ALL project tooling lives here (Tcl), plus
+# C built by the pinned mal bundle's gcc. Normally invoked through x.cmd (which
+# sets PATH to the pinned bundle first); this script re-asserts PATH itself so it
+# is also robust when run directly with the bundle's tclsh.
 
 proc script_root {} {
     set s [info script]
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-set ROOT [script_root]
-set TC   [file join $ROOT .toolchain]
 
-# Some portable Tcl builds keep their script libraries in the packaged appfull
-# tree rather than beside tclsh90.exe/wish90.exe.  Export those paths so every
-# child Tcl/Tk process can initialize without relying on machine installs.
+proc discover_store {root} {
+    set pinfile [file join $root toolchain.pin]
+    if {![file exists $pinfile]} {
+        error "no toolchain.pin in $root - a mal project pins its bundle by name"
+    }
+    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
+    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
+    set dir $root
+    for {set i 0} {$i < 8} {incr i} {
+        set cand [file join $dir X $pin]
+        if {[file exists [file join $cand BUNDLE.manifest]]} { return [list $cand $pin] }
+        set up [file dirname $dir]
+        if {$up eq $dir} break
+        set dir $up
+    }
+    error "bundle '$pin' not found in any ancestor X/ store from $root"
+}
+
+set ROOT [script_root]
+lassign [discover_store $ROOT] TC PIN
+
 foreach {var rel marker} {
-    TCL_LIBRARY {appfull tcl_library} init.tcl
-    TK_LIBRARY  {appfull tk_library}  tk.tcl
+    TCL_LIBRARY {tcllib tcl_library} init.tcl
+    TK_LIBRARY  {tcllib tk_library}  tk.tcl
 } {
     set p [file join $TC {*}$rel]
     if {[file exists [file join $p $marker]]} { set ::env($var) [file nativename $p] }
 }
+
 set pkgpaths {}
 foreach p [list [file join $ROOT tools tclpkg] \
                 [file join $TC twapi-dl twapi-5.2.0] \
-                [file join $TC twapi-dl]] {
+                [file join $TC twapi-dl] \
+                [file join $ROOT build]] {
     if {[file isdirectory $p]} { lappend pkgpaths $p }
 }
 foreach p [glob -nocomplain [file join $TC tcl9 lib *]] {
@@ -40,52 +58,26 @@ if {[llength $pkgpaths]} {
     set auto_path [concat $pkgpaths $auto_path]
 }
 
-# Make the vendored toolchain win on PATH (idempotent with x.cmd).  Tcl/Tk 9
-# comes BEFORE msys64 (which ships its own Tcl/Tk 8.6 that els must never use).
-# Git is optional (app and core tooling do not use it) — only added if vendored.
 set vbins {}
-foreach b [list [file join $TC tcl9 bin] [file join $TC msys64 ucrt64 bin] \
-                [file join $TC git cmd]] {
+foreach b [list [file join $TC tcl9 bin] [file join $TC msys64 ucrt64 bin]] {
     if {[file isdirectory $b]} { lappend vbins [file nativename $b] }
 }
 if {[llength $vbins]} { set ::env(PATH) "[join $vbins {;}];$::env(PATH)" }
 if {![info exists ::env(MSYSTEM)]} { set ::env(MSYSTEM) UCRT64 }
 
-# the vendored curl (used by the fetch tasks), or PATH curl as a fallback
-proc curl-exe {} {
-    foreach c [list [TCp msys64 usr bin curl.exe] [TCp msys64 ucrt64 bin curl.exe]] {
-        if {[file exists $c]} { return $c }
-    }
-    return curl
-}
-
 # ---- path helpers -------------------------------------------------------
-proc P  {args} { return [file join $::ROOT {*}$args] }
-proc TCp {args} { return [file join $::TC {*}$args] }
-# RULE: always go through these explicit vendored Tcl/Tk 9 paths — NEVER a bare
-# `tclsh`/`wish`, which on PATH could resolve to msys64's Tcl/Tk 8.6.  C builds
-# must likewise pass -I[TCp tcl9 include] (see build-ext / package).
-proc tclsh {} { return [TCp tcl9 bin tclsh90.exe] }
-proc wish  {} { return [TCp tcl9 bin wish90.exe] }
-proc gcc   {} { return [TCp msys64 ucrt64 bin gcc.exe] }
+proc P    {args} { return [file join $::ROOT {*}$args] }
+proc TCp  {args} { return [file join $::TC   {*}$args] }
+proc tclsh   {} { return [TCp tcl9 bin tclsh90.exe] }
+proc wish    {} { return [TCp tcl9 bin wish90.exe] }
+proc tclshs  {} { return [TCp tcl9s bin tclsh90s.exe] }
+proc gcc     {} { return [TCp msys64 ucrt64 bin gcc.exe] }
 proc windres {} { return [TCp msys64 ucrt64 bin windres.exe] }
 proc strip-exe {} { return [TCp msys64 ucrt64 bin strip.exe] }
-proc tclshs {} { return [TCp tcl9s bin tclsh90s.exe] }
 
-# Stream a child's stdout/stderr through to ours.  A non-zero exit from the
-# child is a NORMAL signal here (a failing test, a missing tool), so propagate
-# the child's own exit code rather than letting exec's "child process exited
-# abnormally" bubble up as if the task runner itself had crashed.  A genuine
-# exec failure (could not start, killed by a signal) is re-raised as before.
 proc stream {args} {
     if {[catch {exec {*}$args >@ stdout 2>@ stderr} err opts]} {
         if {[lindex [dict get $opts -errorcode] 0] eq "CHILDSTATUS"} {
-            # SIGNAL the failure instead of `exit`ing: exit cannot be caught,
-            # so every `catch {stream ...}` written to make a step optional
-            # (PE icon, strip) was dead code — the whole task aborted instead
-            # of degrading.  The dispatcher at the bottom maps this errorcode
-            # back to the child's exit code, so non-optional failures still
-            # exit exactly as before.
             set code [lindex [dict get $opts -errorcode] 2]
             return -code error -errorcode [list STREAM CHILD $code] \
                 "child exited with status $code"
@@ -94,9 +86,6 @@ proc stream {args} {
     }
 }
 
-# Cheap per-command guard: a task declares the tool(s) it needs; we only check
-# those exist (a microsecond `file exists`, NOT a full toolchain scan), and
-# point at `x toolcheck` if one is missing.
 proc tool_path {tool} {
     switch $tool {
         tclsh { return [tclsh] }
@@ -110,66 +99,49 @@ proc need {args} {
     foreach tool $args {
         set p [tool_path $tool]
         if {$p eq "" || ![file exists $p]} {
-            error "required tool '$tool' is missing — run: x toolcheck --prep"
+            error "required tool '$tool' is missing - the pinned bundle is incomplete (run: mal verify $::PIN)"
         }
     }
 }
 
 # ---- tasks --------------------------------------------------------------
 proc task_help {args} {
-    puts {els task runner — usage: x <command> [args]
+    puts {els task runner - usage: x <command> [args]
 
   test [--fast]      run the in-process test suite (tcltest + event generate);
-                     --fast skips the slow ~800-op encoding stress test
+                     --fast skips the slow encoding stress test
   probe <f> [args]   run an ad-hoc verification script under the CONSOLE tclsh
-                     with the dialog-quiet preamble (tests/probe.tcl) preloaded,
-                     so a probe error goes to stderr, never a modal dialog
-  stress             UI-driven encoding stress test (open/reopen/save every
-                     encoding, lots of mojibake; proves it never hangs)
+                     with tests/probe.tcl preloaded
+  stress             UI-driven encoding stress test
   run [file ...]     launch the editor (wish + els.tcl)
   colors [name ...]  browse Tk's named colors (swatches + hex)
   icon [size]        regenerate the app icon (the awl) -> resources/icon.png
-  shot <out> [file]  screenshot the editor to <out> (twapi)
+  shot <out> [file]  screenshot the editor to <out> (twapi + PrintWindow)
   readme-shots       regenerate docs/img screenshots used by README.md
-  build [out]        build the native exe -> dist/els.exe (the ONE artifact:
-                     run it, ship it; build/ holds only intermediates) — a
-                     custom C23 WinMain with Tcl+Tk+icudet statically linked,
-                     PE icon/manifest/version via windres; safe to rebuild
-                     while dist/els.exe is running (old exe is parked aside)
-  probe-exe [exe]    launch the fused exe (default dist/els.exe) in a temp
-                     config home and verify first-run + session + recovery +
-                     single-instance startup behaviour
+  build [out]        build the native exe -> dist/els.exe
+  probe-exe [exe]    verify the fused exe's startup/session/recovery behavior
   build-ext          compile the C23 extension(s) in src/ -> build/*.dll
-  fetch-twapi        vendor the twapi extension into .toolchain/
-  fetch-git          vendor MinGit into .toolchain/git/
-  toolcheck [opts]   check the toolchain — --prep fetches/updates, --deep runs
-                     functional checks (compile C, load Tk/twapi, run the chain)
-  shell              open a shell with the vendored toolchain on PATH
-  env                print the resolved toolchain paths + versions
+  toolcheck [--deep] check the pinned bundle (--deep runs functional checks)
+  shell              open a shell with the pinned bundle on PATH
+  env                print the resolved bundle paths + versions
   help               this message}
 }
 
 proc task_env {args} {
     puts "ROOT  = $::ROOT"
+    puts "PIN   = $::PIN"
+    puts "TC    = $::TC"
     foreach {label path} [list tclsh [tclsh] wish [wish] gcc [gcc]] {
         puts [format "  %-6s %s  (%s)" $label $path \
             [expr {[file exists $path] ? "ok" : "MISSING"}]]
     }
-    set git [TCp git cmd git.exe]
-    puts [format "  %-6s %s  (%s)" git $git \
-        [expr {[file exists $git] ? "ok" : "optional — run `x fetch-git`"}]]
     catch {puts "  gcc   [exec [gcc] -dumpversion]"}
     catch {puts "  tcl   [exec [tclsh] << {puts [info patchlevel]}]"}
-    if {[file exists $git]} { catch {puts "  git   [exec $git --version]"} }
 }
 
 proc task_toolcheck {args} {
     stream [tclsh] [P tools toolcheck.tcl] {*}$args
 }
-
-# (The legacy `x build-wish` wrapper build — fuse onto an icon-stamped copy of
-# wish90s.exe via tools/exeicon.tcl — was retired after 0.60 shipped native;
-# it lived here as a one-cycle rollback path. History has the code.)
 
 proc task_probe-exe {args} {
     need tclsh
@@ -183,10 +155,6 @@ proc task_test {args} {
     stream [tclsh] [P tests run.tcl] {*}$args
 }
 
-# Run a throwaway verification probe the controlled way: CONSOLE tclsh (errors
-# -> stderr, never a dialog) with tests/probe.tcl preloaded (transparent root,
-# bgerror -> stderr, modal dialogs stubbed).  Never wish.  This is how all ad-hoc
-# verification should run so a probe can never rain a dialog on the user.
 proc task_probe {args} {
     need tclsh
     if {![llength $args]} { error "usage: x probe <script.tcl> \[args ...]" }
@@ -194,8 +162,6 @@ proc task_probe {args} {
     if {![file exists $script]} { error "probe script not found: $script" }
     set pp [string map {\\ /} [P tests probe.tcl]]
     set sp [string map {\\ /} [file normalize $script]]
-    # build the boot script with `list` (correct quoting for ANY path): string-
-    # interpolating into brace literals broke — or injected — on paths with braces
     set boot [list set ::argv0 $sp]
     append boot \n [list set ::argv [lrange $args 1 end]]
     append boot \n [list source $pp]
@@ -215,8 +181,6 @@ proc task_stress {args} {
 
 proc task_run {args} {
     need wish
-    # a DEV instance, not a handoff: without the opt-out, single-instance would
-    # pass the args to (and raise) the user's running els instead
     set ::env(ELS_NO_SINGLE_INSTANCE) 1
     exec [wish] [P els.tcl] {*}$args &
     puts "launched els"
@@ -235,8 +199,8 @@ proc task_icon {args} {
 
 proc task_shot {args} {
     need tclsh wish twapi
+    if {[lindex $args 0] eq "--selftest"} { stream [tclsh] [P tools shot.tcl] --selftest ; return }
     if {[llength $args] < 1} { error "usage: x shot <out.png> \[file ...\]" }
-    # shot.tcl captures via the cap extension (PrintWindow) — build it on demand
     if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
     set out [lindex $args 0]
     stream [tclsh] [P tools shot.tcl] [wish] [P els.tcl] $out {*}[lrange $args 1 end]
@@ -248,26 +212,18 @@ proc task_readme-shots {args} {
     stream [tclsh] [P tools readme_shots.tcl]
 }
 
-# Compile every src/*.c into build/<name>.dll against the Tcl stubs, and emit a
-# pkgIndex.tcl so `package require <name>` works.  Init proc = Titlecased name
-# (elsx.c -> Elsx_Init), matching Tcl's load convention.
 proc task_build-ext {args} {
     need gcc tclsh
     set inc [TCp tcl9 include]
     set lib [TCp tcl9 lib]
     file mkdir [P build]
-    # els_main.c is the native exe's entry point (a `main`, not a loadable Tcl
-    # stubs extension) — it is compiled+linked by `x build`, never built here.
     set sources {}
     foreach s [lsort [glob -nocomplain [P src *.c]]] {
         if {[file tail $s] eq "els_main.c"} continue
         lappend sources $s
     }
     if {![llength $sources]} { puts "no src/*.c to build"; return }
-    # accumulate the index lines and write the file ONCE after every compile
-    # succeeded: a failed gcc mid-loop used to persist a TRUNCATED pkgIndex.tcl
-    # (missing entries for the later extensions) while stale DLLs stayed behind
-    set lines [list "# auto-generated by `x build-ext` — do not edit"]
+    set lines [list "# auto-generated by `x build-ext` - do not edit"]
     foreach src $sources {
         set name [file rootname [file tail $src]]
         set dll  [P build $name.dll]
@@ -283,44 +239,28 @@ proc task_build-ext {args} {
     puts "built [llength $sources] extension(s); wrote build/pkgIndex.tcl"
 }
 
-# Build the native els.exe (THE canonical build): a custom C23 WinMain
-# (src/els_main.c) statically linked against Tcl+Tk (.toolchain/tcl9s) with icudet
-# compiled in and the PE resources (icon + manifest + version) baked via windres,
-# then the same zipfs payload (tcl_library/tk_library/main.tcl/resources) appended.
-# See docs/native-port-study.md.  Headers come from the SHARED tree (tcl9/include —
-# tcl9s has none); libs from the STATIC tree (tcl9s/lib).
 proc task_build {args} {
     need gcc tclsh
-    if {![file exists [tclshs]]} { error "static tclsh missing (.toolchain/tcl9s) — run `x toolcheck`" }
-    # THE build artifact home: dist/els.exe.  dist/ holds the final exe (what
-    # you run, what gets released); build/ holds intermediates only; the repo
-    # root holds no binaries.
+    if {![file exists [tclshs]]} {
+        error "static tclsh missing in the bundle (tcl9s/bin) - run `mal verify $::PIN`"
+    }
     set out [lindex $args 0] ; if {$out eq ""} { set out [P dist els.exe] }
-    # a mistyped flag must not become the OUTPUT PATH: `x build --fast` used to
-    # succeed and write the fused exe to a file literally named "--fast",
-    # leaving els.exe stale while reporting success
     if {[string match -* $out]} { error "x build takes no flags (got '$out'); usage: x build ?outfile?" }
     set inc [TCp tcl9 include]
     set libd [TCp tcl9s lib]
     file mkdir [P build]
-    # the Win32 system libraries Tk needs (= tkConfig.sh TK_LIBS, proven set)
     set syslibs {
         -lnetapi32 -lkernel32 -luser32 -ladvapi32 -luserenv -lws2_32
         -lgdi32 -lcomdlg32 -limm32 -lcomctl32 -lshell32 -luuid -lole32
         -loleaut32 -lwinspool
     }
-    # 1. generate the PE resource inputs from Tcl into build/ (gitignored), so the
-    #    committed repo stays Tcl + C + one .cmd: the .rc + manifest (version from
-    #    els.tcl) and the .ico packed from the awl PNGs.
     puts "gen  build/els.rc + els.exe.manifest + els.ico"
     stream [tclsh] [P tools genres.tcl] [P build]
     stream [tclsh] [P tools mkico.tcl] [P build els.ico] \
         [P resources icon16.png] [P resources icon32.png] [P resources icon.png]
-    # 2. compile resources (icon + manifest + VERSIONINFO) -> COFF object
     puts "windres build/els.rc -> build/els.res"
     stream [windres] --include-dir [P build] --include-dir $inc \
         [P build els.rc] -O coff -o [P build els.res]
-    # 3. compile the entry point (UNICODE + STATIC + static icudet) and icudet
     puts "cc  els_main.c + icudet.c + winfs.c"
     stream [gcc] -std=c23 -O2 -municode -DUNICODE -D_UNICODE -DSTATIC_BUILD=1 \
         -DELS_STATIC_ICUDET -DELS_STATIC_WINFS -ffunction-sections -fdata-sections \
@@ -329,24 +269,17 @@ proc task_build {args} {
         -c [P src icudet.c] -o [P build icudet.o] -I$inc
     stream [gcc] -std=c23 -O2 -DSTATIC_BUILD=1 -ffunction-sections -fdata-sections \
         -c [P src winfs.c] -o [P build winfs.o] -I$inc
-    # 4. link: GUI subsystem; Tk before Tcl before stub; system libs last
     puts "ld  -> build/els-bare.exe"
     set bare [P build els-bare.exe]
     stream [gcc] -municode -mwindows -static-libgcc -Wl,--gc-sections \
         [P build els_main.o] [P build icudet.o] [P build winfs.o] [P build els.res] \
         [file join $libd libtcl9tk90.a] [file join $libd libtcl90.a] \
         [file join $libd libtclstub.a] {*}$syslibs -o $bare
-    catch {stream [strip-exe] $bare}      ;# shrink before the payload append
-    # 5. append the zipfs payload (tcl_library/tk_library/main.tcl/resources) onto
-    #    OUR exe.  No --with-ext: icudet is compiled in, so no DLL is embedded.
-    #    Stage next to the target, then swap into place: the developer RUNS
-    #    dist/els.exe as a daily editor, and Windows locks a running exe against
-    #    overwrite but allows renaming it — so a rebuild parks the old one aside
-    #    instead of failing.
+    catch {stream [strip-exe] $bare}
     file mkdir [file dirname $out]
     set staged "$out.new"
     stream [tclshs] [P tools package.tcl] --wrapper $bare $staged
-    catch {file delete -force "$out.old"}    ;# stale parking from a prior swap
+    catch {file delete -force "$out.old"}
     if {[catch {file rename -force $staged $out}]} {
         if {[catch {
             file rename -force $out "$out.old"
@@ -355,80 +288,9 @@ proc task_build {args} {
             catch {file delete -force $staged}
             error "cannot place $out (locked?): $e"
         }
-        puts "note: $out was in use; the running copy is parked as [file tail $out.old]\n      (cleaned up on the next build — restart els to pick up the new exe)"
+        puts "note: $out was in use; the running copy is parked as [file tail $out.old]"
     }
     puts "placed $out ([file size $out] bytes)"
-}
-
-# Verify a download against a pinned SHA-256 (vendored msys64 sha256sum).  An
-# empty pin prints the computed digest LOUDLY instead of failing — compute once
-# from a trusted source and pin it next to the URL so later fetches verify.
-proc verify-sha256 {path expected what} {
-    if {[catch {exec [TCp msys64 usr bin sha256sum.exe] [file nativename $path]} out]} {
-        error "cannot hash $what (sha256sum unavailable?): $out"
-    }
-    set sum [string tolower [lindex $out 0]]
-    if {$expected eq ""} {
-        puts "WARNING: $what downloaded UNVERIFIED  sha256=$sum"
-        puts "         pin this digest in tools/x.tcl to verify future fetches"
-        return
-    }
-    if {$sum ne [string tolower $expected]} {
-        file delete -force $path
-        error "$what sha256 mismatch:\n  expected $expected\n  got      $sum\n(download deleted, nothing vendored)"
-    }
-    puts "sha256 verified: $what"
-}
-
-proc task_fetch-twapi {args} {
-    set ver 5.2 ; set zip twapi-5.2.0.zip
-    set sha256 ""   ;# pin the trusted digest here to verify the download
-    set dest [TCp twapi-dl]
-    if {[file exists [file join $dest twapi-5.2.0 pkgIndex.tcl]]} {
-        puts "twapi already vendored at [file join $dest twapi-5.2.0]"
-        return
-    }
-    file mkdir $dest
-    set zpath [file join $dest $zip]
-    puts "downloading twapi $ver ..."
-    stream [curl-exe] -L --fail -o $zpath \
-        "https://github.com/apnadkarni/twapi/releases/download/v$ver/$zip"
-    verify-sha256 $zpath $sha256 "twapi $ver"
-    # extract with Tcl's own zipfs (no external unzip needed)
-    set mp /twapi_extract
-    catch {zipfs unmount $mp}
-    zipfs mount $zpath $mp
-    file copy -force //zipfs:$mp/twapi-5.2.0 [file join $dest twapi-5.2.0]
-    zipfs unmount $mp
-    file delete -force $zpath
-    puts "twapi $ver vendored at [file join $dest twapi-5.2.0]"
-}
-
-# Optional: vendor MinGit (git-for-windows' slim, embeddable, GUI-less build) so
-# the project folder is self-contained on a machine without git.  Not needed by
-# the app or the build/test tooling.  Pass a MinGit zip URL, or use the default.
-proc task_fetch-git {args} {
-    set url [lindex $args 0]
-    if {$url eq ""} {
-        set url "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
-    }
-    set sha256 ""   ;# pin the trusted digest for the default url to verify
-    set dest [TCp git]
-    if {[file exists [TCp git cmd git.exe]]} { puts "git already vendored at $dest"; return }
-    file mkdir $dest
-    set zpath [file join $::TC mingit.zip]
-    puts "downloading MinGit from $url ..."
-    stream [curl-exe] -L --fail -o $zpath $url
-    verify-sha256 $zpath $sha256 "MinGit"
-    set mp /mingit
-    catch {zipfs unmount $mp}
-    zipfs mount $zpath $mp
-    foreach item [glob -nocomplain -tails -directory //zipfs:$mp *] {
-        file copy -force //zipfs:$mp/$item [file join $dest $item]
-    }
-    zipfs unmount $mp
-    file delete -force $zpath
-    puts "MinGit vendored at $dest"
 }
 
 # ---- dispatch -----------------------------------------------------------
@@ -440,8 +302,6 @@ if {[llength [info commands $proc]] == 0} {
     exit 2
 }
 if {[catch {$proc {*}[lrange $argv 1 end]} err opts]} {
-    # a child process's non-zero exit (signalled by `stream`) propagates the
-    # child's own code, exactly as the old in-stream `exit` did
     set ec [dict get $opts -errorcode]
     if {[lindex $ec 0] eq "STREAM" && [lindex $ec 1] eq "CHILD"} {
         exit [lindex $ec 2]

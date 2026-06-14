@@ -1,7 +1,5 @@
-# vendored toolchain: MSYS2 + Tcl/Tk 9 build/install + twapi — huge,
-# machine-specific, not committed. Carried by copy-pasting the folder; the
-# build recipe is documented in toolchain.md (`x toolcheck --prep` fetches
-# the auto-installable pieces).
+# Legacy/private toolchain copies are huge and not committed. els now uses the
+# pinned mal bundle named in toolchain.pin.
 /.toolchain/
 
 # Claude local settings
@@ -13,6 +11,7 @@
 *-shot.png
 /smoke.tcl
 /tests/_tmp/
+
 # large generated sample files for manual testing (regenerate via tools/gen_sample.tcl)
 /samples/
 

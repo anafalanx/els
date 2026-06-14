@@ -3,7 +3,7 @@
   live repo and the vendored Tcl/Tk 9 toolchain, including an EMPIRICAL static-link
   spike (a real C23 program compiled and run against the vendored static libs).
   Every load-bearing claim was adversarially verified against tclConfig.sh/
-  tkConfig.sh, nm/ar on the .a libs, and docs/tcl-tk-9-manual/. Line numbers are
+  tkConfig.sh, nm/ar on the .a libs, and the pinned bundle manual. Line numbers are
   as of els 0.30 and are indicative.
 -->
 

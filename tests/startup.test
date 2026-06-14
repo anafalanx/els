@@ -2,18 +2,35 @@
 source [file join [file dirname [info script]] helpers.tcl]
 namespace import ::tcltest::test
 
+proc startup_bundle {} {
+    set pinfile [file join $::ELS_ROOT toolchain.pin]
+    if {![file exists $pinfile]} { return "" }
+    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
+    if {$pin eq ""} { return "" }
+    set dir $::ELS_ROOT
+    for {set i 0} {$i < 8} {incr i} {
+        set cand [file join $dir X $pin]
+        if {[file exists [file join $cand BUNDLE.manifest]]} { return $cand }
+        set up [file dirname $dir]
+        if {$up eq $dir} break
+        set dir $up
+    }
+    return ""
+}
+
 # Locate a wish to drive the process-level probes.  Prefer one sitting next to
 # the interpreter that is actually running the suite (portable to any layout),
-# then fall back to the vendored toolchain path; return "" if none is found so
+# then fall back to the pinned bundle path; return "" if none is found so
 # the tests SKIP (constraint below) instead of hard-failing the whole suite on a
-# machine without the vendored wish.
+# machine without the pinned wish.
 proc startup_wish {} {
     set dir [file dirname [info nameofexecutable]]
+    set tc [startup_bundle]
     foreach cand [list \
             [file join $dir wish90.exe]  [file join $dir wish90] \
             [file join $dir wish.exe]    [file join $dir wish] \
-            [file join $::ELS_ROOT .toolchain tcl9 bin wish90.exe] \
-            [file join $::ELS_ROOT .toolchain tcl9 bin wish90]] {
+            [file join $tc tcl9 bin wish90.exe] \
+            [file join $tc tcl9 bin wish90]] {
         if {[file executable $cand]} { return $cand }
     }
     return ""

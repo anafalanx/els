@@ -158,12 +158,11 @@ accident recoverable anyway.
 
 ## Toolchain & tasks
 
-The project is **fully self-contained**: a vendored Tcl/Tk 9, the gcc/C23
-toolchain (MSYS2 UCRT64), and twapi all live under `.toolchain/`, so the folder
-is copy-paste portable to any Windows 11+ machine: no installs, no system
-dependencies. One **ignition script**, `x.cmd`, puts the vendored toolchain on
-PATH (relative to itself) and hands off to a Tcl task runner; everything else is
-Tcl or C.
+Inside the mal workspace, the project is **self-contained by pin**: `x.cmd`
+reads `toolchain.pin`, finds the sealed bundle at `X/<pin>/`, puts Tcl/Tk 9,
+gcc/C23 (MSYS2 UCRT64), windres, and twapi on PATH, then hands off to a Tcl task
+runner. The source repo no longer carries a private `.toolchain/`; bundle
+verification and resealing live at the mal layer.
 
 ```
 x help          # list tasks
@@ -174,9 +173,9 @@ x readme-shots  # regenerate the README screenshots
 x probe-exe     # process-level startup checks for the built exe (dist/els.exe)
 x build         # build the native exe -> dist/els.exe (custom C WinMain, static Tcl+Tk+icudet)
 x build-ext     # compile src/*.c C23 extensions -> build/*.dll
-x toolcheck     # check the vendored toolchain (--prep fetches what's missing)
-x shell         # a shell with the vendored toolchain on PATH
-x env           # show the resolved toolchain
+x toolcheck     # check the pinned mal bundle (--deep runs functional probes)
+x shell         # a shell with the pinned bundle on PATH
+x env           # show the resolved bundle
 ```
 
 `x build` produces one self-contained native exe (~5.1 MB, zero non-system
@@ -190,20 +189,17 @@ one you run, and the one a release ships), while `build/` holds compiler
 intermediates only and the repo root holds no binaries. A rebuild stages the new
 exe and swaps it into place, so it works even while `dist/els.exe` is running
 (the old copy is parked as `els.exe.old` until the next build; restart els to
-pick up the new one). Users only need the released `els.exe`; developers can
-move the whole repo folder around because the vendored `.toolchain/` is
-relocatable.
+pick up the new one). Users only need the released `els.exe`; developers need
+the repo inside a mal workspace that contains the pinned bundle.
 
 The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
 (`x.cmd`): no bash, PowerShell, or Python. See
 [`toolchain.md`](toolchain.md) for the full setup.
 
-The toolchain (Tcl/Tk 9, gcc/C23, twapi, MinGit) lives under `.toolchain/` and is
-**relocatable**, verified by copying the folder to a different path and
-rebuilding + testing from there. `x toolcheck` reports each component; `x
-toolcheck --prep` fetches the auto-installable pieces (twapi, git) on a freshly
-cloned checkout. Everyday commands only fast-check the one or two tools they
-need, so they stay instant.
+The pinned bundle provides Tcl/Tk 9, gcc/C23, twapi, the static Tcl/Tk libraries,
+the packaging script libraries, and the Tcl/Tk 9 manual. `x toolcheck` reports
+the components els uses; `x toolcheck --deep` runs functional checks. There are
+no project-local fetch/prep tasks.
 
 ## C extensions (C23)
 

@@ -10,6 +10,23 @@ set ROOT [script_root]
 set TMP  [file join $ROOT tests _tmp readme_shots]
 set OUT  [file join $ROOT docs img]
 
+proc discover_store {root} {
+    set pinfile [file join $root toolchain.pin]
+    if {![file exists $pinfile]} { error "no toolchain.pin in $root" }
+    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
+    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
+    set dir $root
+    for {set i 0} {$i < 8} {incr i} {
+        set cand [file join $dir X $pin]
+        if {[file exists [file join $cand BUNDLE.manifest]]} { return $cand }
+        set up [file dirname $dir]
+        if {$up eq $dir} break
+        set dir $up
+    }
+    error "bundle '$pin' not found in any ancestor X/ store from $root"
+}
+set TC [discover_store $ROOT]
+
 proc write_file {path bytes} {
     file mkdir [file dirname $path]
     set f [open $path w]
@@ -20,7 +37,7 @@ proc write_file {path bytes} {
 }
 
 proc tool {name} {
-    return [file join $::ROOT .toolchain tcl9 bin $name]
+    return [file join $::TC tcl9 bin $name]
 }
 
 proc capture {scene out {title ""}} {

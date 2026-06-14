@@ -1,88 +1,84 @@
 #!/usr/bin/env tclsh
-# tools/toolcheck.tcl — check (and optionally prep) the vendored toolchain.
-#
-#   x toolcheck          report what is present / missing / outdated (+ versions)
-#   x toolcheck --prep    fetch/update the auto-installable pieces
-#
-# The everyday `x` commands do NOT re-verify the whole toolchain (that would tax
-# every invocation); they only fast-check the one or two tools they need and, if
-# something is missing, point here.  This is the thorough, on-demand check.
+# tools/toolcheck.tcl - check the pinned mal bundle has what els needs and,
+# with --deep, that it actually works.
 
 proc script_root {} {
     set s [info script]
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
+proc discover_store {root} {
+    set pinfile [file join $root toolchain.pin]
+    if {![file exists $pinfile]} { error "no toolchain.pin in $root" }
+    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
+    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
+    set dir $root
+    for {set i 0} {$i < 8} {incr i} {
+        set cand [file join $dir X $pin]
+        if {[file exists [file join $cand BUNDLE.manifest]]} { return [list $cand $pin] }
+        set up [file dirname $dir]
+        if {$up eq $dir} break
+        set dir $up
+    }
+    error "bundle '$pin' not found in any ancestor X/ store from $root"
+}
 set ROOT [script_root]
-set TC   [file join $ROOT .toolchain]
-proc TCp {args} { return [file join $::TC {*}$args] }
+lassign [discover_store $ROOT] TC PIN
+proc P   {args} { return [file join $::ROOT {*}$args] }
+proc TCp {args} { return [file join $::TC   {*}$args] }
 
 foreach {var rel marker} {
-    TCL_LIBRARY {appfull tcl_library} init.tcl
-    TK_LIBRARY  {appfull tk_library}  tk.tcl
+    TCL_LIBRARY {tcllib tcl_library} init.tcl
+    TK_LIBRARY  {tcllib tk_library}  tk.tcl
 } {
     set p [TCp {*}$rel]
     if {[file exists [file join $p $marker]]} { set ::env($var) [file nativename $p] }
 }
 set pkgpaths {}
-foreach p [list [file join $ROOT tools tclpkg] \
-                [TCp twapi-dl twapi-5.2.0] \
-                [TCp twapi-dl]] {
-    if {[file isdirectory $p]} { lappend pkgpaths $p }
-}
-foreach p [glob -nocomplain [TCp tcl9 lib *]] {
+foreach p [list [file join $ROOT tools tclpkg] [TCp twapi-dl twapi-5.2.0] [TCp twapi-dl] [P build]] {
     if {[file isdirectory $p]} { lappend pkgpaths $p }
 }
 if {[llength $pkgpaths]} {
-    if {[info exists ::env(TCLLIBPATH)] && $::env(TCLLIBPATH) ne ""} {
-        set ::env(TCLLIBPATH) [concat $pkgpaths $::env(TCLLIBPATH)]
-    } else {
-        set ::env(TCLLIBPATH) $pkgpaths
-    }
+    set ::env(TCLLIBPATH) [expr {[info exists ::env(TCLLIBPATH)] && $::env(TCLLIBPATH) ne "" \
+        ? [concat $pkgpaths $::env(TCLLIBPATH)] : $pkgpaths}]
     set auto_path [concat $pkgpaths $auto_path]
 }
 
-# Component manifest.  kind: core (build/test/run) | opt (extra).  want: the
-# pinned version (empty = don't compare).  prep: {auto <x-task>} | {manual "…"}.
 set ::COMPONENTS {
-    {key tcl   name "Tcl/Tk 9 (shared)"  probe {tcl9 bin tclsh90.exe}              kind core want 9.0.3            prep {manual "rebuild Tcl/Tk 9 from source (build recipe in docs)"}}
-    {key gcc   name "gcc / C23 (UCRT64)" probe {msys64 ucrt64 bin gcc.exe}         kind core want 16.1.0           prep {manual "vendor the MSYS2 UCRT64 toolchain (gcc/binutils/gdb)"}}
-    {key twapi name "twapi"              probe {twapi-dl twapi-5.2.0 pkgIndex.tcl} kind core want 5.2.0            prep {auto fetch-twapi}}
-    {key git   name "Git (MinGit)"       probe {git cmd git.exe}                   kind core want 2.54.0.windows.1 prep {auto fetch-git}}
-    {key tcls  name "Tcl/Tk 9 (static)"  probe {tcl9s bin tclsh90s.exe}            kind core want 9.0.3            prep {manual "static build (--disable-shared); its libs (libtcl90.a/libtcl9tk90.a) link into the native els.exe via `x build`"}}
-    {key curl  name "curl"               probe {msys64 usr bin curl.exe}           kind opt  want {}               prep {manual "ships with MSYS2; used by the fetch tasks"}}
+    {key tcl      name "Tcl/Tk 9 (shared)"      loc tc   probe {tcl9 bin tclsh90.exe}              kind core want 9.0.3}
+    {key wish     name "Tk 9 wish"              loc tc   probe {tcl9 bin wish90.exe}               kind core want {}}
+    {key gcc      name "gcc / C23 (UCRT64)"     loc tc   probe {msys64 ucrt64 bin gcc.exe}         kind core want 16.1.0}
+    {key windres  name "windres"                loc tc   probe {msys64 ucrt64 bin windres.exe}     kind core want {}}
+    {key tcls     name "Tcl/Tk 9 (static)"      loc tc   probe {tcl9s bin tclsh90s.exe}            kind core want 9.0.3}
+    {key tclh     name "Tcl/Tk 9 headers"       loc tc   probe {tcl9 include tcl.h}                kind core want {}}
+    {key tcllib   name "Tcl/Tk script library"  loc tc   probe {tcllib tcl_library init.tcl}       kind core want {}}
+    {key tklib    name "Tk script library"      loc tc   probe {tcllib tk_library tk.tcl}          kind core want {}}
+    {key twapi    name "twapi"                  loc tc   probe {twapi-dl twapi-5.2.0 pkgIndex.tcl} kind core want 5.2.0}
+    {key manual   name "Tcl/Tk + C-API manual"  loc tc   probe {manual INDEX.md}                   kind opt  want {}}
+    {key tclsrc   name "Tcl/Tk 9 source"        loc tc   probe {tclsrc tcl9.0.3 generic tcl.h}     kind opt  want {}}
+    {key tclpkg   name "project tclpkg helper"  loc root probe {tools tclpkg pkgIndex.tcl}         kind opt  want {}}
 }
 
-proc present {comp} { return [file exists [TCp {*}[dict get $comp probe]]] }
+proc comp_path {comp args} {
+    set rel [concat [dict get $comp probe] $args]
+    return [expr {[dict get $comp loc] eq "root" ? [P {*}$rel] : [TCp {*}$rel]}]
+}
+proc present {comp} { return [file exists [comp_path $comp]] }
 
 proc version_of {comp} {
-    set key [dict get $comp key]
     set v ""
-    switch $key {
-        tcl   { if {[catch {exec [TCp tcl9 bin tclsh90.exe]    << {puts [info patchlevel]}} v]} {
-                    return "ERROR: [string map [list \n { }] [string trim $v]]"
-                } }
-        tcls  { if {[catch {exec [TCp tcl9s bin tclsh90s.exe]  << {puts [info patchlevel]}} v]} {
-                    return "ERROR: [string map [list \n { }] [string trim $v]]"
-                } }
+    switch [dict get $comp key] {
+        tcl   { if {[catch {exec [TCp tcl9 bin tclsh90.exe]   << {puts [info patchlevel]}} v]} {
+                    return "ERROR: [string map [list \n { }] [string trim $v]]" } }
+        tcls  { if {[catch {exec [TCp tcl9s bin tclsh90s.exe] << {puts [info patchlevel]}} v]} {
+                    return "ERROR: [string map [list \n { }] [string trim $v]]" } }
         gcc   { catch {exec [TCp msys64 ucrt64 bin gcc.exe] -dumpversion} v }
-        git   { catch {exec [TCp git cmd git.exe] --version} v
-                set v [string trim [string map {{git version} {}} $v]] }
-        twapi { # read the version the vendored pkgIndex actually declares (the
-                # probe IS that pkgIndex), so an in-place twapi update is reported
-                # as drift instead of being masked by a hardcoded constant.
-                set idx [TCp {*}[dict get $comp probe]]
-                if {![catch {open $idx r} fh]} {
-                    set d [read $fh] ; close $fh
-                    regexp {package ifneeded\s+twapi\s+(\S+)} $d -> v
-                } }
-        curl  { catch {exec [TCp msys64 usr bin curl.exe] --version} out
-                regexp {curl (\S+)} $out -> v }
+        twapi { set idx [comp_path $comp]
+                if {![catch {open $idx r} fh]} { set d [read $fh] ; close $fh
+                    regexp {package ifneeded\s+twapi\s+(\S+)} $d -> v } }
     }
     return $v
 }
-
-# {state version}  — state in {ok outdated missing broken}
 proc status_of {comp} {
     if {![present $comp]} { return [list missing ""] }
     set v [version_of $comp]
@@ -94,63 +90,32 @@ proc status_of {comp} {
 
 proc report {} {
     puts ""
-    puts "els toolcheck  —  .toolchain under [file nativename $::TC]"
+    puts "els toolcheck  -  bundle '$::PIN' at [file nativename $::TC]"
     puts ""
-    puts [format "  %-22s %-9s %s" COMPONENT STATUS VERSION/NOTE]
-    puts "  [string repeat - 58]"
+    puts [format "  %-24s %-9s %s" COMPONENT STATUS VERSION/NOTE]
+    puts "  [string repeat - 60]"
     set issues 0
     foreach c $::COMPONENTS {
         lassign [status_of $c] state v
         set kind [dict get $c kind]
-        lassign [dict get $c prep] ptype parg
         switch $state {
-            ok       { set status "OK"       ; set note $v }
-            broken   { set status "BROKEN"   ; set note $v
-                       if {$kind eq "core"} { incr issues } }
-            outdated { set status "UPDATE"   ; set note "have $v, want [dict get $c want]"
+            ok       { set status "OK"     ; set note $v }
+            broken   { set status "BROKEN" ; set note $v ; if {$kind eq "core"} { incr issues } }
+            outdated { set status "UPDATE" ; set note "have $v, want [dict get $c want]"
                        if {$kind eq "core"} { incr issues } }
             missing  { set status [expr {$kind eq "core" ? "MISSING" : "(absent)"}]
-                       set note [expr {$ptype eq "auto" ? "run:  x $parg" : $parg}]
+                       set note [expr {$kind eq "core" ? "bundle incomplete - run:  mal verify $::PIN" : ""}]
                        if {$kind eq "core"} { incr issues } }
         }
-        puts [format "  %-22s %-9s %s" [dict get $c name] $status $note]
+        puts [format "  %-24s %-9s %s" [dict get $c name] $status $note]
     }
     puts ""
     return $issues
 }
 
-proc prep {} {
-    set xtcl [file join $::ROOT tools x.tcl]
-    foreach c $::COMPONENTS {
-        lassign [status_of $c] state v
-        if {$state eq "ok"} continue
-        lassign [dict get $c prep] ptype parg
-        if {$ptype ne "auto"} {
-            if {[dict get $c kind] eq "core"} {
-                puts ">> [dict get $c name]: manual — $parg"
-            }
-            continue
-        }
-        puts ">> $state [dict get $c name]:  x $parg"
-        if {$state eq "outdated"} {
-            # force a re-fetch by removing the old vendored dir (contained to .toolchain)
-            catch {file delete -force [TCp [lindex [dict get $c probe] 0]]}
-        }
-        catch {exec [TCp tcl9 bin tclsh90.exe] $xtcl $parg >@ stdout 2>@ stderr}
-    }
-}
-
-# ---- deep functional checks (--deep): does it actually RUN? ---------------
-# Everything is exercised through the *console* tclsh90, so failures arrive as
-# text on stderr (never a GUI dialog), including the Tk check.
-proc tmpdir {} {
-    set d [expr {[info exists ::env(TEMP)] && $::env(TEMP) ne "" ? $::env(TEMP) : $::TC}]
-    return [file join $d els_toolcheck_[pid]]
-}
+proc tmpdir {} { return [P build _toolcheck_[pid]] }
 proc fwd {p} { return [string map {\\ /} [file nativename $p]] }
-
 proc tcl_eval {script} {
-    # run a script in the vendored shared tclsh; return {ok output}
     if {[catch {exec [TCp tcl9 bin tclsh90.exe] << $script} out]} { return [list 0 $out] }
     return [list 1 $out]
 }
@@ -158,9 +123,6 @@ proc deep_line {name ok detail} {
     puts [format "  %-26s %-5s %s" $name [expr {$ok ? {PASS} : {FAIL}}] $detail]
     return [expr {$ok ? 0 : 1}]
 }
-
-# Compile a tiny stubs extension and load it — proves gcc + headers + stubs +
-# Tcl's `load` all work together (the whole C23<->Tcl chain).
 proc deep_ext {} {
     set gcc [TCp msys64 ucrt64 bin gcc.exe]
     if {![file exists $gcc]} { return [deep_line "C23<->Tcl extension" 0 "gcc missing"] }
@@ -182,25 +144,17 @@ proc deep_ext {} {
     file delete -force $t
     return [deep_line "C23<->Tcl extension" $ok $detail]
 }
-
-# Confirm the C build resolves els's Tcl 9 header — NOT msys64's bundled 8.6.
 proc deep_header {} {
     set gcc [TCp msys64 ucrt64 bin gcc.exe]
     if {![file exists $gcc]} { return [deep_line "C build uses Tcl 9 header" 0 "gcc missing"] }
     set t [tmpdir] ; file delete -force $t ; file mkdir $t
     set c [file join $t hv.c]
-    set fh [open $c w]
-    puts $fh {#include <tcl.h>}
-    puts $fh {const char *V = TCL_PATCH_LEVEL;}
-    close $fh
+    set fh [open $c w] ; puts $fh "#include <tcl.h>" ; puts $fh {const char *V = TCL_PATCH_LEVEL;} ; close $fh
     set v ""
-    if {![catch {exec $gcc -I[TCp tcl9 include] -E $c} out]} {
-        regexp {const char \*V = "([0-9.]+)"} $out -> v
-    }
+    if {![catch {exec $gcc -I[TCp tcl9 include] -E $c} out]} { regexp {const char \*V = "([0-9.]+)"} $out -> v }
     file delete -force $t
     return [deep_line "C build uses Tcl 9 header" [string match 9.* $v] "tcl.h = $v"]
 }
-
 proc deep {} {
     puts ""
     puts "  functional checks (does it actually run?):"
@@ -213,32 +167,18 @@ proc deep {} {
     incr f [deep_line "twapi loads" [expr {$ok && [string match 5.* [string trim $out]]}] [string trim $out]]
     incr f [deep_ext]
     incr f [deep_header]
-    if {[file exists [TCp git cmd git.exe]]} {
-        set ok [expr {![catch {exec [TCp git cmd git.exe] --version}]}]
-        incr f [deep_line "git runs" $ok ""]
-    }
     return $f
 }
 
-# ---- main ---------------------------------------------------------------
-set doPrep [expr {("--prep" in $argv) || ("--fix" in $argv)}]
 set doDeep [expr {"--deep" in $argv}]
 set issues [report]
-if {$doPrep} {
-    if {$issues == 0} {
-        puts "  nothing to do — all core components present and current."
-    } else {
-        prep
-        puts "--- re-check ---"
-        set issues [report]
-    }
-}
 if {$doDeep} { incr issues [deep] }
 puts ""
 if {$issues > 0} {
-    puts "  $issues issue(s). `x toolcheck --prep` fetches/updates; `--deep` runs functional checks."
+    puts "  $issues issue(s). A MISSING core piece means the bundle is incomplete."
+    puts "  Run `mal verify $PIN` from the mal folder."
     exit 1
 }
 puts [expr {$doDeep ? "  all components present, current, and functional." \
-                    : "  all core components present and current.  (run `x toolcheck --deep` to verify they work)"}]
+                    : "  all core components present and current. (`x toolcheck --deep` verifies they work)"}]
 exit 0

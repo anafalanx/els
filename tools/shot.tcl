@@ -22,11 +22,29 @@ proc script_root {} {
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
+# Discover the pinned bundle for twapi.
+proc discover_store {root} {
+    set pinfile [file join $root toolchain.pin]
+    if {![file exists $pinfile]} { error "no toolchain.pin in $root" }
+    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
+    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
+    set dir $root
+    for {set i 0} {$i < 8} {incr i} {
+        set cand [file join $dir X $pin]
+        if {[file exists [file join $cand BUNDLE.manifest]]} { return $cand }
+        set up [file dirname $dir]
+        if {$up eq $dir} break
+        set dir $up
+    }
+    error "bundle '$pin' not found in any ancestor X/ store from $root"
+}
 set ::SHOT_ROOT [script_root]
 if {[info exists ::env(ELS_TWAPI_DIR)] && $::env(ELS_TWAPI_DIR) ne ""} {
     lappend auto_path $::env(ELS_TWAPI_DIR)
 } else {
-    lappend auto_path [file join $::SHOT_ROOT .toolchain twapi-dl]
+    if {![catch {discover_store $::SHOT_ROOT} tc]} {
+        lappend auto_path [file join $tc twapi-dl twapi-5.2.0] [file join $tc twapi-dl]
+    }
 }
 
 # ---- DIB (CF_DIB / BITMAPINFOHEADER) -> Tk photo ------------------------
@@ -86,8 +104,9 @@ proc dib_to_photo {dib} {
 
 # a writable scratch dir (overridable); avoids assuming cwd
 proc ::shot_tmpdir {} {
-    if {[info exists ::env(TEMP)] && $::env(TEMP) ne ""} { return $::env(TEMP) }
-    return $::SHOT_ROOT
+    set d [file join $::SHOT_ROOT build]
+    file mkdir $d
+    return $d
 }
 
 # ---- live capture -------------------------------------------------------
