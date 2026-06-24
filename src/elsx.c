@@ -4,7 +4,7 @@
  * exposed to the Tcl side as ordinary commands.  Built against the Tcl *stubs*
  * (compiler-independent ABI), so the .dll loads into the vendored Tcl 9.
  *
- * Build (see tools/x.tcl `build-ext`):
+ * Build (see tools/tasks.tcl `build-ext`):
  *   gcc -std=c23 -shared -DUSE_TCL_STUBS -I<tcl>/include \
  *       src/elsx.c -o build/elsx.dll -L<tcl>/lib -ltclstub
  * Load:

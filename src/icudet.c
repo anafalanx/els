@@ -5,7 +5,7 @@
  * ucsdet_* charset-detector entry points (the same approach the C-era els used
  * for ICU regex).  els maps the returned ICU name to a Tcl encoding.
  *
- * C23 + Tcl stubs.  Built by `x build-ext`.
+ * C23 + Tcl stubs.  Built by `z build-ext`.
  */
 #include <tcl.h>
 #define WIN32_LEAN_AND_MEAN

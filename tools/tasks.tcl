@@ -1,8 +1,7 @@
 #!/usr/bin/env tclsh
-# tools/x.tcl - the els task runner. ALL project tooling lives here (Tcl), plus
-# C built by the pinned mal bundle's gcc. Normally invoked through x.cmd (which
-# sets PATH to the pinned bundle first); this script re-asserts PATH itself so it
-# is also robust when run directly with the bundle's tclsh.
+# tools/tasks.tcl - the internal els task runner behind z.json. ALL project tooling
+# lives here (Tcl), plus C built by the project-local toolchain's gcc. It is
+# invoked through z.exe, which discovers the project root and command manifest.
 
 proc script_root {} {
     set s [info script]
@@ -11,21 +10,11 @@ proc script_root {} {
 }
 
 proc discover_store {root} {
-    set pinfile [file join $root toolchain.pin]
-    if {![file exists $pinfile]} {
-        error "no toolchain.pin in $root - a mal project pins its bundle by name"
+    set tc [file join $root .toolchain]
+    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
+        return [list $tc .toolchain]
     }
-    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
-    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
-    set dir $root
-    for {set i 0} {$i < 8} {incr i} {
-        set cand [file join $dir X $pin]
-        if {[file exists [file join $cand BUNDLE.manifest]]} { return [list $cand $pin] }
-        set up [file dirname $dir]
-        if {$up eq $dir} break
-        set dir $up
-    }
-    error "bundle '$pin' not found in any ancestor X/ store from $root"
+    error ".toolchain not found in $root - restore the project-local toolchain"
 }
 
 set ROOT [script_root]
@@ -99,32 +88,30 @@ proc need {args} {
     foreach tool $args {
         set p [tool_path $tool]
         if {$p eq "" || ![file exists $p]} {
-            error "required tool '$tool' is missing - the pinned bundle is incomplete (run: mal verify $::PIN)"
+            error "required tool '$tool' is missing - restore the project-local .toolchain"
         }
     }
 }
 
 # ---- tasks --------------------------------------------------------------
 proc task_help {args} {
-    puts {els task runner - usage: x <command> [args]
+    puts {els task runner - invoked through z.exe
 
-  test [--fast]      run the in-process test suite (tcltest + event generate);
-                     --fast skips the slow encoding stress test
-  probe <f> [args]   run an ad-hoc verification script under the CONSOLE tclsh
-                     with tests/probe.tcl preloaded
-  stress             UI-driven encoding stress test
-  run [file ...]     launch the editor (wish + els.tcl)
-  colors [name ...]  browse Tk's named colors (swatches + hex)
-  icon [size]        regenerate the app icon (the awl) -> resources/icon.png
-  shot <out> [file]  screenshot the editor to <out> (twapi + PrintWindow)
-  readme-shots       regenerate docs/img screenshots used by README.md
-  build [out]        build the native exe -> dist/els.exe
-  probe-exe [exe]    verify the fused exe's startup/session/recovery behavior
-  build-ext          compile the C23 extension(s) in src/ -> build/*.dll
-  toolcheck [--deep] check the pinned bundle (--deep runs functional checks)
-  shell              open a shell with the pinned bundle on PATH
-  env                print the resolved bundle paths + versions
-  help               this message}
+  z test [--fast]       run the in-process test suite (tcltest + event generate);
+                        --fast skips the slow encoding stress test
+  z probe <f> [args]    run an ad-hoc verification script under the console tclsh
+                        with tests/probe.tcl preloaded
+  z stress              UI-driven encoding stress test
+  z run [file ...]      launch the editor (wish + els.tcl)
+  z colors [name ...]   browse Tk's named colors (swatches + hex)
+  z icon [size]         regenerate the app icon (the awl) -> resources/icon.png
+  z shot <out> [file]   screenshot the editor to <out> (twapi + PrintWindow)
+  z readme-shots        regenerate docs/img screenshots used by README.md
+  z build [out]         build the native exe -> dist/els.exe
+  z probe-exe [exe]     verify the fused exe's startup/session/recovery behavior
+  z build-ext           compile the C23 extension(s) in src/ -> build/*.dll
+  z check [--deep]      check the project-local .toolchain
+  z tasks env           print resolved toolchain paths + versions}
 }
 
 proc task_env {args} {
@@ -157,7 +144,7 @@ proc task_test {args} {
 
 proc task_probe {args} {
     need tclsh
-    if {![llength $args]} { error "usage: x probe <script.tcl> \[args ...]" }
+    if {![llength $args]} { error "usage: z probe <script.tcl> \[args ...]" }
     set script [lindex $args 0]
     if {![file exists $script]} { error "probe script not found: $script" }
     set pp [string map {\\ /} [P tests probe.tcl]]
@@ -200,7 +187,7 @@ proc task_icon {args} {
 proc task_shot {args} {
     need tclsh wish twapi
     if {[lindex $args 0] eq "--selftest"} { stream [tclsh] [P tools shot.tcl] --selftest ; return }
-    if {[llength $args] < 1} { error "usage: x shot <out.png> \[file ...\]" }
+    if {[llength $args] < 1} { error "usage: z shot <out.png> \[file ...\]" }
     if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
     set out [lindex $args 0]
     stream [tclsh] [P tools shot.tcl] [wish] [P els.tcl] $out {*}[lrange $args 1 end]
@@ -223,7 +210,7 @@ proc task_build-ext {args} {
         lappend sources $s
     }
     if {![llength $sources]} { puts "no src/*.c to build"; return }
-    set lines [list "# auto-generated by `x build-ext` - do not edit"]
+    set lines [list "# auto-generated by `z build-ext` - do not edit"]
     foreach src $sources {
         set name [file rootname [file tail $src]]
         set dll  [P build $name.dll]
@@ -242,10 +229,10 @@ proc task_build-ext {args} {
 proc task_build {args} {
     need gcc tclsh
     if {![file exists [tclshs]]} {
-        error "static tclsh missing in the bundle (tcl9s/bin) - run `mal verify $::PIN`"
+        error "static tclsh missing in .toolchain (tcl9s/bin)"
     }
     set out [lindex $args 0] ; if {$out eq ""} { set out [P dist els.exe] }
-    if {[string match -* $out]} { error "x build takes no flags (got '$out'); usage: x build ?outfile?" }
+    if {[string match -* $out]} { error "z build takes no flags (got '$out'); usage: z build ?outfile?" }
     set inc [TCp tcl9 include]
     set libd [TCp tcl9s lib]
     file mkdir [P build]
@@ -298,7 +285,7 @@ set cmd [lindex $argv 0]
 if {$cmd eq ""} { set cmd help }
 set proc "task_$cmd"
 if {[llength [info commands $proc]] == 0} {
-    puts stderr "x: unknown command '$cmd' (try: x help)"
+    puts stderr "els tasks: unknown command '$cmd' (try: z tasks)"
     exit 2
 }
 if {[catch {$proc {*}[lrange $argv 1 end]} err opts]} {
@@ -306,6 +293,6 @@ if {[catch {$proc {*}[lrange $argv 1 end]} err opts]} {
     if {[lindex $ec 0] eq "STREAM" && [lindex $ec 1] eq "CHILD"} {
         exit [lindex $ec 2]
     }
-    puts stderr "x $cmd: $err"
+    puts stderr "z $cmd: $err"
     exit 1
 }

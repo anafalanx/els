@@ -3,7 +3,7 @@
 #
 # Pure Tcl/Tk: analytic signed-distance-field rendering into a photo image, with
 # per-pixel alpha for anti-aliased edges and transparent rounded corners (Tk's
-# canvas isn't anti-aliased, so we rasterize ourselves).  `x icon [size]`.
+# canvas isn't anti-aliased, so we rasterize ourselves).  `z icon [size]`.
 #
 # The awl on the editor's own page: a light rounded tile (els::PAGE), an ink
 # capsule handle (els::INK), a ferrule band, and a sharp blade — the blade is

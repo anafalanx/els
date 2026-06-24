@@ -155,7 +155,7 @@ set ::SAMPLES {
 set ::REOPEN_SET {utf-8 utf-16le utf-16be cp1252 cp1251 cp932 big5}
 
 # The whole run, wrapped in a proc so the default suite (tests/stress.test) can
-# invoke it and assert on the result; `x stress` runs it standalone (below).
+# invoke it and assert on the result; `z stress` runs it standalone (below).
 # Returns the list of failures — empty means PASS.
 proc els_stress_run {} {
     set ::FAIL {} ; set ::DETECT {}        ;# fresh accumulators for this run
@@ -281,7 +281,7 @@ if {$::els::have_detect} {
 }
 
 # ---- entry points -------------------------------------------------------
-# Standalone (`x stress`): run it, print the verdict, exit with a status.  When
+# Standalone (`z stress`): run it, print the verdict, exit with a status.  When
 # sourced by the default suite, tests/stress.test sets ::els_stress_sourced
 # first and calls els_stress_run itself, so skip the auto-run here.
 if {![info exists ::els_stress_sourced]} {

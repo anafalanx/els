@@ -158,27 +158,27 @@ accident recoverable anyway.
 
 ## Toolchain & tasks
 
-Inside the mal workspace, the project is **self-contained by pin**: `x.cmd`
-reads `toolchain.pin`, finds the sealed bundle at `X/<pin>/`, puts Tcl/Tk 9,
-gcc/C23 (MSYS2 UCRT64), windres, and twapi on PATH, then hands off to a Tcl task
-runner. The source repo no longer carries a private `.toolchain/`; bundle
-verification and resealing live at the mal layer.
+`els` is hosted under `C:\zmal\_els`. zmal is the public front door, while
+the project still carries a private `.toolchain/` used by its Tcl task runner.
+The committed `z.json` invokes `.toolchain\tcl9\bin\tclsh90.exe` directly; no
+project-local launcher script is tracked.
 
 ```
-x help          # list tasks
-x run [file...] # launch the editor
-x test          # in-process test suite (tcltest + Tk event generate)
-x shot out.png  # screenshot the editor (twapi, all-Tcl, no AutoIt)
-x readme-shots  # regenerate the README screenshots
-x probe-exe     # process-level startup checks for the built exe (dist/els.exe)
-x build         # build the native exe -> dist/els.exe (custom C WinMain, static Tcl+Tk+icudet)
-x build-ext     # compile src/*.c C23 extensions -> build/*.dll
-x toolcheck     # check the pinned mal bundle (--deep runs functional probes)
-x shell         # a shell with the pinned bundle on PATH
-x env           # show the resolved bundle
+z tasks           # list tasks
+z run [file...]   # launch the editor
+z test            # in-process test suite (tcltest + Tk event generate)
+z shot out.png    # screenshot the editor (twapi, all-Tcl, no AutoIt)
+z readme-shots    # regenerate the README screenshots
+z probe-exe       # process-level startup checks for the built exe (dist/els.exe)
+z build           # build the native exe -> dist/els.exe
+z build-ext       # compile src/*.c C23 extensions -> build/*.dll
+z check           # check the project-local .toolchain (--deep runs functional probes)
+z tasks env       # show the resolved toolchain
 ```
 
-`x build` produces one self-contained native exe (~5.1 MB, zero non-system
+From the zmal root, use `z in els <command>`, for example `z in els test`.
+
+`z build` produces one self-contained native exe (~5.1 MB, zero non-system
 DLLs): a real Windows PE with our own C23 `WinMain`, Tcl + Tk + the charset
 detector statically linked in, and `els.tcl` + the Tcl/Tk script libraries riding
 inside an appended `zipfs` image (`els.tcl` itself is unchanged). The PE icon,
@@ -190,15 +190,16 @@ intermediates only and the repo root holds no binaries. A rebuild stages the new
 exe and swaps it into place, so it works even while `dist/els.exe` is running
 (the old copy is parked as `els.exe.old` until the next build; restart els to
 pick up the new one). Users only need the released `els.exe`; developers need
-the repo inside a mal workspace that contains the pinned bundle.
+the repo with its `.toolchain/` directory.
 
-The project uses **only C and Tcl 9**, plus one classical-`cmd` boot script
-(`x.cmd`): no bash, PowerShell, or Python. See
+The project uses **only C and Tcl 9** for durable tooling. Avoid adding bash,
+PowerShell, Python, `.bat`, `.cmd`, or `.ps1` glue; use zmal `z` commands
+instead. See
 [`toolchain.md`](toolchain.md) for the full setup.
 
-The pinned bundle provides Tcl/Tk 9, gcc/C23, twapi, the static Tcl/Tk libraries,
-the packaging script libraries, and the Tcl/Tk 9 manual. `x toolcheck` reports
-the components els uses; `x toolcheck --deep` runs functional checks. There are
+`.toolchain/` provides Tcl/Tk 9, gcc/C23, twapi, the static Tcl/Tk libraries,
+the packaging script libraries, and the Tcl/Tk 9 manual. `z check` reports
+the components els uses; `z check --deep` runs functional checks. There are
 no project-local fetch/prep tasks.
 
 ## C extensions (C23)
@@ -206,7 +207,7 @@ no project-local fetch/prep tasks.
 els can drop into **C23** for hot paths or to bind a C library, exposed to Tcl
 as ordinary commands. The native `els.exe` **statically links its extension in**
 (via the `Tcl_AppInit` in `src/els_main.c`); in development each `src/*.c` also
-builds as a stubs `.dll` (`x build-ext`; see `src/elsx.c`). A real example,
+builds as a stubs `.dll` (`z build-ext`; see `src/elsx.c`). A real example,
 **`src/icudet.c`**, dynamically loads the Windows system ICU (`icu.dll`) to expose
 its charset detector to Tcl (the basis of els's encoding auto-detection); it is
 compiled into the shipped exe together with **`src/winfs.c`**, the Win32 helper

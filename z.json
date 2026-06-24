@@ -1,0 +1,18 @@
+{
+  "commands": {
+    "tasks": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl"],
+    "check": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "toolcheck"],
+    "toolcheck": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "toolcheck"],
+    "test": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "test"],
+    "probe": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "probe"],
+    "stress": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "stress"],
+    "run": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "run"],
+    "colors": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "colors"],
+    "icon": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "icon"],
+    "shot": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "shot"],
+    "readme-shots": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "readme-shots"],
+    "build-ext": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "build-ext"],
+    "build": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "build"],
+    "probe-exe": [".toolchain/tcl9/bin/tclsh90.exe", "tools/tasks.tcl", "probe-exe"]
+  }
+}

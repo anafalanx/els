@@ -1,9 +1,14 @@
 # Normalize line endings: store LF, check out LF (no CRLF churn).
 * text=auto eol=lf
 
-# Windows batch scripts must stay CRLF.
-*.cmd text eol=crlf
-*.bat text eol=crlf
+# Project-authored text files are LF, including tooling. Project-local
+# ignition scripts are intentionally not used; commands enter through z.exe.
+*.tcl  text eol=lf
+*.test text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
 
 # Binary assets — never touch.
 *.png  binary

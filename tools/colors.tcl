@@ -1,7 +1,7 @@
 #!/usr/bin/env wish
 # tools/colors.tcl — browse every named color Tk knows, grouped by color family,
 # each with its #RRGGBB.  Scrollable, with a live filter; click a swatch to copy
-# its name.  Run via `x colors`.
+# its name.  Run via `z colors`.
 #
 # Base names are Tk's built-in set (from its xcolors.c table); numbered shades
 # (name1..4) and gray/grey 0..100 are generated, then winfo rgb keeps only what

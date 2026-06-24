@@ -12,7 +12,7 @@
 #
 # Set ELS_SHOT_TITLE to capture a specific toplevel/dialog by title.
 #
-# Requires build/cap.dll (`x build-ext`).
+# Requires build/cap.dll (`z build-ext`).
 
 package require Tk
 wm withdraw .
@@ -22,21 +22,13 @@ proc script_root {} {
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-# Discover the pinned bundle for twapi.
+# Discover the project-local toolchain for twapi.
 proc discover_store {root} {
-    set pinfile [file join $root toolchain.pin]
-    if {![file exists $pinfile]} { error "no toolchain.pin in $root" }
-    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
-    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
-    set dir $root
-    for {set i 0} {$i < 8} {incr i} {
-        set cand [file join $dir X $pin]
-        if {[file exists [file join $cand BUNDLE.manifest]]} { return $cand }
-        set up [file dirname $dir]
-        if {$up eq $dir} break
-        set dir $up
+    set tc [file join $root .toolchain]
+    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
+        return $tc
     }
-    error "bundle '$pin' not found in any ancestor X/ store from $root"
+    error ".toolchain not found in $root - restore the project-local toolchain"
 }
 set ::SHOT_ROOT [script_root]
 if {[info exists ::env(ELS_TWAPI_DIR)] && $::env(ELS_TWAPI_DIR) ne ""} {

@@ -1,5 +1,5 @@
 # tests/elsx.test — verify the C23 Tcl extension loads and runs.
-# Gated on the DLL having been built (`x build-ext`); skipped otherwise, so the
+# Gated on the DLL having been built (`z build-ext`); skipped otherwise, so the
 # suite is green with or without a compiler run.
 
 source [file join [file dirname [info script]] helpers.tcl]

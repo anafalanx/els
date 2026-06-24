@@ -8,7 +8,7 @@
 #
 # ALWAYS run a probe with tclsh90 (a console app: startup errors -> stderr),
 # NEVER wish90 (a GUI-subsystem app with no console: a startup error can only be
-# REPORTED as a modal dialog).  `x probe <script.tcl> [args]` does this for you.
+# REPORTED as a modal dialog).  `z probe <script.tcl> [args]` does this for you.
 
 package require Tk
 catch {wm attributes . -alpha 0.0}

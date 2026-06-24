@@ -3,7 +3,7 @@
   live repo and the vendored Tcl/Tk 9 toolchain, including an EMPIRICAL static-link
   spike (a real C23 program compiled and run against the vendored static libs).
   Every load-bearing claim was adversarially verified against tclConfig.sh/
-  tkConfig.sh, nm/ar on the .a libs, and the pinned bundle manual. Line numbers are
+  tkConfig.sh, nm/ar on the .a libs, and the `.toolchain` manual. Line numbers are
   as of els 0.30 and are indicative.
 -->
 
@@ -38,7 +38,7 @@ The full plan follows in Section 4 because you asked for "the works." It is real
 
 ## 2. Where els Is Today vs. The Target (architecture delta)
 
-**Today (`x build` → `tools/x.tcl task_build`):**
+**Today (`z build` -> `tools/tasks.tcl task_build`):**
 
 1. `tools/exeicon.tcl` copies `wish90s.exe` → a temp `_iconwrap.exe` and stamps the app icon into its PE `.rsrc` (RT_ICON/RT_GROUP_ICON) via twapi `update_resource`.
 2. `tools/package.tcl` runs under static `tclsh90s.exe` and `zipfs lmkimg $out $entries {} $mkimgWrapper` (package.tcl:141) appends a zip **after** the PE image. The `--wrapper` override already exists (package.tcl:48,52,64) and feeds the icon-stamped wrapper in as `mkimgWrapper`.
@@ -94,7 +94,7 @@ gcc -std=c23 -O2 -Wall -DSTATIC_BUILD=1 -I$INC spike.c \
 
 ## 4. The Action Plan — Ordered Phases
 
-> Migration safety throughout: **do not touch the working wrapper build.** Add a *parallel* `task_build-native` in `tools/x.tcl` and a skip-icudet flag in `package.tcl`. Flip the default only after `x probe-exe` + `x test` pass on the native exe. Rollback = keep building the old path behind `x build --wish` for one or two releases.
+> Migration safety throughout: **do not touch the working wrapper build.** Add a *parallel* `task_build-native` in `tools/tasks.tcl` and a skip-icudet flag in `package.tcl`. Flip the default only after `z probe-exe` + `z test` pass on the native exe. Rollback = keep building the old path behind `z build --wish` for one or two releases.
 
 ### Phase 0 — 80/20 first (optional but recommended, ~1 session)
 
@@ -163,7 +163,7 @@ Resources are in the PE from the start, so no post-`mkimg` strip hazard.
 
 ### Phase 4 — Build-system rework — ~1 session
 
-New `task_build-native {out}` in `tools/x.tcl`, beside `task_build-ext`, reusing the `gcc`/`TCp` helpers. **Note:** there is no `tcl9s/include`; use `-I[TCp tcl9 include]` (shared headers) but link `[TCp tcl9s lib ...]`.
+New `task_build-native {out}` in `tools/tasks.tcl`, beside `task_build-ext`, reusing the `gcc`/`TCp` helpers. **Note:** there is no `tcl9s/include`; use `-I[TCp tcl9 include]` (shared headers) but link `[TCp tcl9s lib ...]`.
 
 ```bash
 # (i) entry point  — UNICODE + STATIC + GUI subsystem
@@ -196,15 +196,15 @@ tclsh90s.exe tools/package.tcl --wrapper build/els-bare.exe --skip-icudet  dist/
 
 `exeicon.tcl` is **not** called on the native path (icon now via windres); leave it for the legacy build.
 
-**Files changed:** `tools/x.tcl` (new `task_build-native`), `tools/package.tcl` (new `--skip-icudet` flag). Both additive.
+**Files changed:** `tools/tasks.tcl` (new `task_build-native`), `tools/package.tcl` (new `--skip-icudet` flag). Both additive.
 
 ### Phase 5 — Tests / selftest — ~0.5 session (folded into Phase 4 gate)
 
-The test harness is **packaging-independent** — `tests/run.tcl` sources `els.tcl` in-process under `tclsh90.exe`, so `x test` is unaffected. The two regression gates for the *exe*:
-- **`x probe-exe build/els.exe`** — exercises first-run prompt, session restore, explicit-arg open via `tools/probe_exe.tcl` (file-report channel).
+The test harness is **packaging-independent** — `tests/run.tcl` sources `els.tcl` in-process under `tclsh90.exe`, so `z test` is unaffected. The two regression gates for the *exe*:
+- **`z probe-exe build/els.exe`** — exercises first-run prompt, session restore, explicit-arg open via `tools/probe_exe.tcl` (file-report channel).
 - **`--selftest`** — `els.tcl` writes a report file (GUI subsystem = no console/stderr). This is the *only* verification channel for the native exe and it keeps working because `main.tcl` runs identically under our `Tk_Main`.
 
-Probe under `tclsh90`, never under `wish90`; GUI startup errors "rain" modal dialogs you can't read, so the file-report selftest is mandatory. Flip the `task_build` default to native only after both `x probe-exe` and `x test` pass; rename the old one `task_build-wrapper`. Promote the static-Tcl component in `tools/toolcheck.tcl` from opt to core, and add a deep check that trial-links a 3-line Tk stub against the static libs.
+Probe under `tclsh90`, never under `wish90`; GUI startup errors "rain" modal dialogs you can't read, so the file-report selftest is mandatory. Flip the `task_build` default to native only after both `z probe-exe` and `z test` pass; rename the old one `task_build-wrapper`. Promote the static-Tcl component in `tools/toolcheck.tcl` from opt to core, and add a deep check that trial-links a 3-line Tk stub against the static libs.
 
 ---
 
@@ -276,7 +276,7 @@ Probe under `tclsh90`, never under `wish90`; GUI startup errors "rain" modal dia
 3. *Size regression* → `--gc-sections` + strip-before-append; **measure** `els-bare.exe`.
 4. *Blind GUI crash* → never probe under wish; file-report selftest only.
 
-**Rollback story:** The native path is purely additive (`task_build-native`, `--skip-icudet`). Keep the wish90s-wrapper build behind `x build --wish` for one or two releases. A regression in the custom main ships the old path immediately. Per-phase rollback = revert the additive `tools/x.tcl`/`package.tcl` change; the legacy pipeline is untouched throughout.
+**Rollback story:** The native path is purely additive (`task_build-native`, `--skip-icudet`). Keep the wish90s-wrapper build behind `z build --wish` for one or two releases. A regression in the custom main ships the old path immediately. Per-phase rollback = revert the additive `tools/tasks.tcl`/`package.tcl` change; the legacy pipeline is untouched throughout.
 
 ---
 
@@ -310,18 +310,18 @@ The port was implemented and a transition-risk pass run. Results:
 
 - **Encoding (the headline worry): non-issue, empirically.** A standalone probe linked with and without the `els.res` manifest showed `GetACP` 1252 → **65001** with the manifest, but Tcl 9's **`[encoding system]` is `utf-8` in *both* cases** — Tcl 9 fixes its system encoding to utf-8 on Windows (wide APIs internally) regardless of the OS ANSI codepage. So the native exe and the wish-wrapper exe decode `reg.exe` output (the file-association path) identically; there is no transition delta. The manifest's `activeCodePage=UTF-8` actually *aligns* the OS ANSI codepage with Tcl's utf-8 model (the wrapper has a latent 1252-vs-utf8 mismatch), and els makes no direct narrow Win32 calls (icudet's `LoadLibraryA("icu.dll")` is pure ASCII). **Kept.**
 - **Dropped `Registry_Init`/`Dde_Init`: safe.** `grep` confirms els.tcl uses neither the `registry` nor `dde` package (it shells out to `reg.exe`).
-- **Promoted to the default build.** What the plan calls `task_build-native` shipped as the canonical **`x build`**; the old wish-wrapper build was renamed **`x build-wish`** (kept one cycle as a rollback path). `x build dist/els.exe` works (5.11 MB; selftest `version=0.30 scaling=2.667 detect=1`); same "can't overwrite a running exe" constraint as before.
+- **Promoted to the default build.** What the plan calls `task_build-native` shipped as the canonical **`z build`**; the old wish-wrapper build was renamed **`z build-wish`** (kept one cycle as a rollback path). `z build dist/els.exe` works (5.11 MB; selftest `version=0.30 scaling=2.667 detect=1`); same "can't overwrite a running exe" constraint as before.
 - **Validated:** boots the full GUI from the appended zipfs; `objdump` shows no tcl/tk/zlib/icudet DLL imports; `probe-exe` (first-run + session restore) passes; command-line file-open works (a screenshot opened README.md); the 268-test suite stays green (packaging-independent). `els.tcl` is byte-for-byte unchanged.
-- **Project swept for consistency:** `toolchain.md`, `README.md`, `AGENTS.md`, and `tools/x.tcl` help now describe the native build; `toolcheck.tcl` promotes the static Tcl/Tk to a core component.
+- **Project swept for consistency:** `toolchain.md`, `README.md`, `AGENTS.md`, and `tools/tasks.tcl` help now describe the native build; `toolcheck.tcl` promotes the static Tcl/Tk to a core component.
 - **Closed open questions:** §9.1 (DPI blur) — kept `dpiAware=true`, scaling matches today, no PerMonitorV2 yet; §9.2 (static icudet) — done; §9.7 (does the GUI loop come up) — yes; §3 spike header-path correction — used `tcl9/include`.
-- **Language policy preserved (§9.4 resolved).** The PE resource inputs (`els.rc`, `els.exe.manifest`, `els.ico`) are **generated from Tcl** at build time (`tools/genres.tcl`, `tools/mkico.tcl`) into gitignored `build/`, *not* committed — so the repo stays Tcl + C + one `.cmd`, with no new languages and no new dependency (`windres` was already vendored). The version flows from `els.tcl`'s `variable version` (one source of truth; no `FILEVERSION` to keep in sync).
+- **Language policy preserved (§9.4 resolved).** The PE resource inputs (`els.rc`, `els.exe.manifest`, `els.ico`) are **generated from Tcl** at build time (`tools/genres.tcl`, `tools/mkico.tcl`) into gitignored `build/`, *not* committed — so the repo stays Tcl + C + `z.json`, with no new languages and no new dependency (`windres` was already vendored). The version flows from `els.tcl`'s `variable version` (one source of truth; no `FILEVERSION` to keep in sync).
 
 ## Appendix — Relevant repo files
 
 - `els.tcl` — app; boot guard ~2972, packaged detect ~179/675, FriendlyAppName (assoc_commands), icudet `package require`, selftest report writer, version line 17.
-- `tools/x.tcl` — `task_build` (native, the canonical `x build`); `task_build-wish` (legacy wrapper).
+- `tools/tasks.tcl` — `task_build` (native, the canonical `z build`); `task_build-wish` (legacy wrapper).
 - `tools/package.tcl` — `--wrapper`, `zipfs lmkimg`; appends the payload onto `build/els-bare.exe` (native) or a wish90s copy (legacy).
-- `tools/exeicon.tcl` — legacy icon stamp (used only by `x build-wish`).
+- `tools/exeicon.tcl` — legacy icon stamp (used only by `z build-wish`).
 - `src/icudet.c` — compiled to `build/icudet.o` without `-DUSE_TCL_STUBS`.
 - `.toolchain/tclsrc/tk9.0.3/win/winMain.c` — template for `src/els_main.c`.
 - `.toolchain/tclsrc/tk9.0.3/win/wish.exe.manifest` — template for the generated manifest.

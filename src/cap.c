@@ -6,7 +6,7 @@
  * dance — and returns a DIB (BITMAPINFOHEADER + 32-bpp top-down BGRA pixels) as
  * a Tcl byte array, which tools/shot.tcl turns into a PNG via dib_to_photo.
  *
- * C23 + Tcl stubs; links user32 + gdi32.  Built by `x build-ext`.
+ * C23 + Tcl stubs; links user32 + gdi32.  Built by `z build-ext`.
  */
 #include <tcl.h>
 #define WIN32_LEAN_AND_MEAN

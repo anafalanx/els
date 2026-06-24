@@ -10,7 +10,7 @@
  * Returns "" on success, or a short error string on failure, so els::write_atomic
  * can fall back to its pure-Tcl temp+rename path.
  *
- * C23 + Tcl stubs.  Built by `x build-ext` (-> build/winfs.dll) and compiled
+ * C23 + Tcl stubs.  Built by `z build-ext` (-> build/winfs.dll) and compiled
  * straight into the native els.exe (Winfs_Init, registered in src/els_main.c).
  */
 #include <tcl.h>

@@ -1,7 +1,7 @@
 # tests/winfs.test -- els::win_replace_file (Win32 ReplaceFileW): an atomic,
 # metadata-preserving file replace used by els::write_atomic in the native build
 # (preserves ACLs / alternate data streams / attributes that a rename drops).
-# Gated on build/winfs.dll (`x build-ext`); skipped otherwise, so the suite is
+# Gated on build/winfs.dll (`z build-ext`); skipped otherwise, so the suite is
 # green with or without a compiler run.
 
 source [file join [file dirname [info script]] helpers.tcl]

@@ -51,7 +51,7 @@ set ::els::swap_enabled 0
 # we can read, and capture them in a list tests can assert on.  Nothing appears
 # on screen, ever.
 #
-# Companion rule (enforced by tools/x.tcl `probe`): run tests and probes with
+# Companion rule (enforced by tools/tasks.tcl `probe`): run tests and probes with
 # tclsh90 — a CONSOLE app whose startup errors print to stderr — NEVER wish90, a
 # GUI-subsystem app with no console that can only REPORT a startup error as a
 # modal dialog, before any handler could be installed.

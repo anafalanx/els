@@ -958,7 +958,7 @@ proc els::assoc_register {} {
     set exe [els::association_exe]
     if {$exe eq "" || ![file exists $exe]} {
         tk_messageBox -parent .assoc -icon warning -title els \
-            -message "els can only register itself from the built els.exe.\nBuild it (x build) and run that, then try again."
+            -message "els can only register itself from the built els.exe.\nBuild it (z build) and run that, then try again."
         return
     }
     set errs {}

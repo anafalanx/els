@@ -5,19 +5,19 @@
 # events and menu invokes — and asserts els never hangs, crashes, or corrupts
 # the buffer, that every op stays within the per-op time budget, and that BOM /
 # UTF detection stays correct.  This is the slowest test in the suite by design
-# (the same body `x stress` runs standalone); it is the in-suite safety net
+# (the same body `z stress` runs standalone); it is the in-suite safety net
 # against encoding regressions.
 
 source [file join [file dirname [info script]] helpers.tcl]
 namespace import ::tcltest::test
 
-# Tell encoding_stress.tcl it is being sourced (not run as `x stress`), so it
+# Tell encoding_stress.tcl it is being sourced (not run as `z stress`), so it
 # defines els_stress_run without auto-running + exiting.
 set ::els_stress_sourced 1
 source [file join [file dirname [info script]] encoding_stress.tcl]
 
 # Gate the slow run on the `stress` constraint (run.tcl sets it: ON normally,
-# OFF for `x test --fast`).  Default it ON if run.tcl did not set it.
+# OFF for `z test --fast`).  Default it ON if run.tcl did not set it.
 if {![info exists ::tcltest::testConstraints(stress)]} {
     ::tcltest::testConstraint stress 1
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env tclsh
-# tools/toolcheck.tcl - check the pinned mal bundle has what els needs and,
+# tools/toolcheck.tcl - check the project-local .toolchain has what els needs and,
 # with --deep, that it actually works.
 
 proc script_root {} {
@@ -8,19 +8,11 @@ proc script_root {} {
     return [file dirname [file dirname $s]]
 }
 proc discover_store {root} {
-    set pinfile [file join $root toolchain.pin]
-    if {![file exists $pinfile]} { error "no toolchain.pin in $root" }
-    set fh [open $pinfile r] ; set pin [string trim [read $fh]] ; close $fh
-    if {$pin eq ""} { error "toolchain.pin is empty in $root" }
-    set dir $root
-    for {set i 0} {$i < 8} {incr i} {
-        set cand [file join $dir X $pin]
-        if {[file exists [file join $cand BUNDLE.manifest]]} { return [list $cand $pin] }
-        set up [file dirname $dir]
-        if {$up eq $dir} break
-        set dir $up
+    set tc [file join $root .toolchain]
+    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
+        return [list $tc .toolchain]
     }
-    error "bundle '$pin' not found in any ancestor X/ store from $root"
+    error ".toolchain not found in $root - restore the project-local toolchain"
 }
 set ROOT [script_root]
 lassign [discover_store $ROOT] TC PIN
@@ -90,7 +82,7 @@ proc status_of {comp} {
 
 proc report {} {
     puts ""
-    puts "els toolcheck  -  bundle '$::PIN' at [file nativename $::TC]"
+    puts "els toolcheck  -  .toolchain at [file nativename $::TC]"
     puts ""
     puts [format "  %-24s %-9s %s" COMPONENT STATUS VERSION/NOTE]
     puts "  [string repeat - 60]"
@@ -104,7 +96,7 @@ proc report {} {
             outdated { set status "UPDATE" ; set note "have $v, want [dict get $c want]"
                        if {$kind eq "core"} { incr issues } }
             missing  { set status [expr {$kind eq "core" ? "MISSING" : "(absent)"}]
-                       set note [expr {$kind eq "core" ? "bundle incomplete - run:  mal verify $::PIN" : ""}]
+                       set note [expr {$kind eq "core" ? "restore the project-local .toolchain" : ""}]
                        if {$kind eq "core"} { incr issues } }
         }
         puts [format "  %-24s %-9s %s" [dict get $c name] $status $note]
@@ -138,8 +130,8 @@ proc deep_ext {} {
             $c -o $dll -L[TCp tcl9 lib] -ltclstub -static-libgcc} e]} {
         set ok 0; set detail "compile failed: $e"
     } else {
-        lassign [tcl_eval "load {[fwd $dll]} Tcverify; puts \[tcverify\]"] lok lout
-        if {!$lok || [string trim $lout] ne "1234"} { set ok 0; set detail "load failed: $lout" }
+        lassign [tcl_eval "load {[fwd $dll]} Tcverify; puts \[tcverify\]"] loadOk lout
+        if {!$loadOk || [string trim $lout] ne "1234"} { set ok 0; set detail "load failed: $lout" }
     }
     file delete -force $t
     return [deep_line "C23<->Tcl extension" $ok $detail]
@@ -175,10 +167,9 @@ set issues [report]
 if {$doDeep} { incr issues [deep] }
 puts ""
 if {$issues > 0} {
-    puts "  $issues issue(s). A MISSING core piece means the bundle is incomplete."
-    puts "  Run `mal verify $PIN` from the mal folder."
+    puts "  $issues issue(s). A MISSING core piece means .toolchain is incomplete."
     exit 1
 }
 puts [expr {$doDeep ? "  all components present, current, and functional." \
-                    : "  all core components present and current. (`x toolcheck --deep` verifies they work)"}]
+                    : "  all core components present and current. (`z check --deep` verifies they work)"}]
 exit 0
