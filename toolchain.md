@@ -1,9 +1,10 @@
 # els toolchain
 
-How els is built, tested, packaged, and kept portable with its project-local
-`.toolchain/`. els is hosted under `C:\zmal\_els`; zmal's `z.exe` is the
-public front door, and `z.json` invokes the project-local `.toolchain` Tcl
-directly.
+How els is built, tested, and packaged using zmal's shared runtime payloads.
+els is a hosted zmal project under `C:\zmal\_els`; zmal's `z.exe` is the public
+front door, and [`z.json`](z.json) drives `tools/tasks.tcl` with zmal's
+`tclsh90`. els carries no private toolchain — every payload comes from
+`<zmal>/r`.
 
 ## Language policy
 
@@ -12,7 +13,7 @@ The project and its tooling use only two languages, plus zmal's command surface:
 | Allowed | Used for |
 |---|---|
 | Tcl 9 | the editor (`els.tcl`), tooling (`tools/*.tcl`), tests (`tests/*`) |
-| C23 | native extensions (`src/*.c`), built with the `.toolchain` gcc |
+| C23 | native extensions (`src/*.c`), built with zmal's UCRT64 gcc |
 | zmal command surface | `z.json` |
 
 No bash, no PowerShell, no Python, and no project-local package manager scripts.
@@ -22,48 +23,46 @@ Avoid new `.cmd`, `.bat`, or `.ps1` glue; use `z <command>` from `_els` or
 The native `els.exe` needs Windows PE resources: an icon, an application
 manifest, and version info. els keeps them out of committed source. They are
 generated from Tcl at build time (`tools/genres.tcl`, `tools/mkico.tcl`) into the
-gitignored `build/` directory and compiled with `.toolchain` `windres`.
+gitignored `build/` directory and compiled with zmal's `windres`.
 
-## Project-local toolchain
+## zmal shared runtime payloads
 
-The restored toolchain lives at `.toolchain/`. The repo can move anywhere as
-long as that directory moves with it. The project treats the toolchain as
-read-only and keeps build products under `build/` or `dist/`.
+els builds against zmal's runtime payloads under `<zmal>/r` — owned by zmal,
+shared across projects, never copied into the repo. `tools/tasks.tcl` resolves
+three roots from the `ZMAL_*` environment variables `z.exe` exports, falling back
+to the hosted layout (`<zmal>/_els` → `<zmal>/r/...`). `z tasks env` prints the
+resolved paths:
 
-`.toolchain/` provides:
+| Variable | Root | What | Version / note |
+|---|---|---|---|
+| `ZMAL_TCLTK` | `r/tcltk/9.0.3` | Tcl/Tk 9 shared build (`tcl9/`), static build + link libs (`tcl9s/`), staged script libraries (`tcllib/`), source snippets (`tclsrc/`), and the Markdown manual (`manual/INDEX.md`) | 9.0.3 |
+| `ZMAL_MSYS2` | `r/msys2` | gcc, binutils, windres, strip (`ucrt64/bin`) | gcc 16.1.0 |
+| `ZMAL_TWAPI` | `r/twapi/5.2.0` | Windows API extension used by screenshot tooling | 5.2.0 |
 
-| Bundle path | What | Version / note |
-|---|---|---|
-| `tcl9/` | Tcl/Tk 9 shared build: `tclsh90.exe`, `wish90.exe`, headers, stubs | 9.0.3 |
-| `tcl9s/` | Tcl/Tk 9 static build and link libraries used by `z build` | 9.0.3 |
-| `tcllib/` | script libraries staged for packaging (`tcl_library`, `tk_library`) | pinned |
-| `msys64/ucrt64/` | gcc, binutils, windres, strip | gcc 16.1.0 |
-| `twapi-dl/twapi-5.2.0/` | Windows API extension used by screenshot tooling | 5.2.0 |
-| `manual/` | Tcl/Tk 9 Markdown manual (`manual/INDEX.md`) | generated from the bundle |
-| `tclsrc/` | Tcl/Tk source tree snippets used for headers/reference | 9.0.3 |
-
-`z check` checks the parts els uses. `z check --deep` also runs
+`z check` checks the payload pieces els uses. `z check --deep` also runs
 functional probes: Tcl evaluation, Tk widget creation, twapi loading, C23
 extension compile/load, and Tcl 9 header validation.
 
-## Tcl/Tk version: always 9, never msys64's 8.6
+## Tcl/Tk version: always 9, never msys2's 8.6
 
 MSYS2's `ucrt64` may contain Tcl/Tk 8.6 for its own packages. els never uses it.
 The rule is:
 
-- Tooling invokes interpreters through explicit `.toolchain` paths:
-  `tcl9/bin/tclsh90.exe`, `tcl9/bin/wish90.exe`, and `tcl9s/bin/tclsh90s.exe`.
-- PATH puts `tcl9/bin` ahead of `msys64/ucrt64/bin`.
-- C builds pass `-I.toolchain/tcl9/include`, so `tcl.h` is the 9.x header.
+- Tooling invokes interpreters through explicit payload paths:
+  `r/tcltk/9.0.3/tcl9/bin/tclsh90.exe`, `.../tcl9/bin/wish90.exe`, and
+  `.../tcl9s/bin/tclsh90s.exe`.
+- PATH puts the Tcl/Tk 9 `tcl9/bin` ahead of `r/msys2/ucrt64/bin`.
+- C builds pass `-I<TCLTK>/tcl9/include`, so `tcl.h` is the 9.x header.
 
 `z check --deep` enforces the practical version of that rule.
 
 ## Entry point: `z.json`
 
-`z.json` is the normal entry point. It:
+[`z.json`](z.json) is the normal entry point. It:
 
 1. lets zmal discover the project root;
-2. runs `.toolchain/tcl9/bin/tclsh90.exe tools/tasks.tcl`;
+2. runs each command as `tclsh90 tools/tasks.tcl <task>` (zmal resolves
+   `tclsh90` to `r/tcltk/9.0.3/tcl9/bin/tclsh90.exe`);
 3. keeps project commands visible as `z test`, `z build`, `z check`, etc.
 
 No project-local ignition script is tracked. Durable docs, scripts, and agent
@@ -88,24 +87,24 @@ z readme-shots       regenerate README screenshots
 z build [out]        build the native exe -> dist/els.exe
 z probe-exe [exe]    verify fused exe startup/session/recovery behavior
 z build-ext          compile src/*.c C23 extensions -> build/*.dll
-z check [--deep]     check the project-local .toolchain
-z tasks env          print resolved toolchain paths and versions
+z check [--deep]     check zmal's runtime payloads
+z tasks env          print resolved payload roots and versions
 ```
 
-There are deliberately no fetch/prep tasks here. Missing or outdated bundle
-contents mean `.toolchain/` was not restored completely.
+There are deliberately no fetch/prep tasks here. A missing payload piece means
+zmal's runtime is not fully hydrated — restore it on the zmal side, not in els.
 
 ## C23 and Tcl extensions
 
 els drops into C23 for hot paths or native Windows bindings, exposed to Tcl as
 ordinary commands. The native `els.exe` statically links the product extension
 code. During development, `z build-ext` also builds each loadable extension as a
-stubs DLL under `build/`:
+stubs DLL under `build/` (`<TCLTK>` is the resolved `r/tcltk/9.0.3` payload):
 
 ```
 gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS ^
-    -I.toolchain/tcl9/include src/elsx.c ^
-    -o build/elsx.dll -L.toolchain/tcl9/lib -ltclstub -static-libgcc
+    -I<TCLTK>/tcl9/include src/elsx.c ^
+    -o build/elsx.dll -L<TCLTK>/tcl9/lib -ltclstub -static-libgcc
 ```
 
 `src/icudet.c` dynamically loads the Windows system ICU (`icu.dll`) to expose
@@ -122,10 +121,11 @@ loadable extension.
    `build/els.exe.manifest`; `tools/mkico.tcl` generates `build/els.ico`.
 2. `windres` compiles `build/els.rc` to `build/els.res`.
 3. gcc compiles `src/els_main.c`, `src/icudet.c`, and `src/winfs.c`.
-4. gcc links against the static Tcl/Tk libraries in `<bundle>/tcl9s/lib` plus
+4. gcc links against zmal's static Tcl/Tk libraries in `<TCLTK>/tcl9s/lib` plus
    Win32 system libraries, then strips the bare exe.
 5. `tools/package.tcl` stages `els.tcl`, resources, `tcl_library`, and
-   `tk_library`, then appends the zipfs payload to the native exe.
+   `tk_library` (from `<TCLTK>/tcllib`), then appends the zipfs payload to the
+   native exe.
 
 The final artifact is `dist/els.exe`. `build/` contains intermediates only. A
 rebuild writes `els.exe.new` and swaps it into place so a currently running
@@ -168,6 +168,7 @@ z shot --selftest
 
 ## Distribution
 
-Users only need the released `els.exe`. Developers need the els repo plus its
-`.toolchain/` directory. The multi-hundred-MB toolchain is intentionally ignored
-by git and travels as a local project payload.
+Users only need the released `els.exe`. Developers need the els repo plus a
+hydrated zmal tree (`<zmal>/r/tcltk`, `r/msys2`, `r/twapi`). Those
+multi-hundred-MB payloads belong to zmal, are shared across projects, and are
+never committed to els.

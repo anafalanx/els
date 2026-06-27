@@ -2,9 +2,11 @@
 
 `els` lives as a hosted project under `C:\zmal\_els`. Use zmal as the public
 front door: run `z test`, `z build`, `z check`, or `z tasks` from `_els`, or
-`z in els <task>` from the zmal root. The committed [`z.json`](z.json) invokes
-the project-local `.toolchain` Tcl directly. There is no project-local ignition
-script; do not add `.cmd`, `.bat`, `.ps1`, or shell wrapper entry points.
+`z in els <task>` from the zmal root. The committed [`z.json`](z.json) drives
+`tools/tasks.tcl` with zmal's `tclsh90`; els builds against zmal's shared runtime
+payloads under `<zmal>/r` (Tcl/Tk 9, the UCRT64 gcc, twapi) and carries no
+private toolchain. There is no project-local ignition script; do not add `.cmd`,
+`.bat`, `.ps1`, or shell wrapper entry points.
 
 Treat `z.exe` as zmal's only public entry point. Do not call zmal payload paths
 directly from docs, scripts, or agent commands. Strongly avoid PowerShell and
@@ -13,13 +15,15 @@ project commands in [`z.json`](z.json).
 
 ## Read the Tcl/Tk 9 manual first
 
-This repo uses the complete Tcl 9 and Tk 9 manual from `.toolchain/manual/`.
+This repo uses the complete Tcl 9 and Tk 9 manual that ships in zmal's Tcl/Tk
+payload (`<TCLTK>/manual/`, where `<TCLTK>` is the path `z tasks env` reports,
+currently `C:\zmal\r\tcltk\9.0.3`).
 It includes Tcl commands, Tk commands, the C API, and `tclsh`/`wish`. It is the
 authoritative reference for this codebase; prefer it over training-data recall,
 which may be stale or describe Tcl 8.x behavior.
 
 - Before writing or changing any Tcl/Tk code, consult the manual. Start at
-  `.toolchain/manual/INDEX.md` and read the pages relevant to your change (each
+  `<TCLTK>/manual/INDEX.md` and read the pages relevant to your change (each
   file is named after the command/function, e.g. `commands/text.md`,
   `commands/ttk_treeview.md`, `c-api/Tcl_Obj.md`).
 - Do not try to read all 1293 pages into context. Open the few that matter for
@@ -38,7 +42,7 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   released. `build/` holds intermediates only; the repo root holds no binaries.
   The build compiles `src/els_main.c`, `src/icudet.c`, and `src/winfs.c`;
   generates the PE icon/manifest/version resources from Tcl into `build/`;
-  runs `windres`; links the static `<bundle>/tcl9s` libraries; and appends the
+  runs `windres`; links zmal's static `r/tcltk/9.0.3/tcl9s` libraries; and appends the
   zipfs payload. The final swap is staged so a running `dist/els.exe` does not
   block a rebuild.
 - The architecture, the proven static-link recipe, and the pitfalls are in

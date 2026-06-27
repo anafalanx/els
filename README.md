@@ -158,10 +158,10 @@ accident recoverable anyway.
 
 ## Toolchain & tasks
 
-`els` is hosted under `C:\zmal\_els`. zmal is the public front door, while
-the project still carries a private `.toolchain/` used by its Tcl task runner.
-The committed `z.json` invokes `.toolchain\tcl9\bin\tclsh90.exe` directly; no
-project-local launcher script is tracked.
+`els` is hosted under `C:\zmal\_els`. zmal is the public front door: the
+committed `z.json` drives `tools/tasks.tcl` with zmal's `tclsh90`, and els builds
+against zmal's shared runtime payloads under `<zmal>/r` — it carries no
+project-local toolchain. No project-local launcher script is tracked.
 
 ```
 z tasks           # list tasks
@@ -172,8 +172,8 @@ z readme-shots    # regenerate the README screenshots
 z probe-exe       # process-level startup checks for the built exe (dist/els.exe)
 z build           # build the native exe -> dist/els.exe
 z build-ext       # compile src/*.c C23 extensions -> build/*.dll
-z check           # check the project-local .toolchain (--deep runs functional probes)
-z tasks env       # show the resolved toolchain
+z check           # check zmal's runtime payloads (--deep runs functional probes)
+z tasks env       # show the resolved payload roots
 ```
 
 From the zmal root, use `z in els <command>`, for example `z in els test`.
@@ -190,17 +190,17 @@ intermediates only and the repo root holds no binaries. A rebuild stages the new
 exe and swaps it into place, so it works even while `dist/els.exe` is running
 (the old copy is parked as `els.exe.old` until the next build; restart els to
 pick up the new one). Users only need the released `els.exe`; developers need
-the repo with its `.toolchain/` directory.
+the repo plus a hydrated zmal tree (`<zmal>/r`).
 
 The project uses **only C and Tcl 9** for durable tooling. Avoid adding bash,
 PowerShell, Python, `.bat`, `.cmd`, or `.ps1` glue; use zmal `z` commands
 instead. See
 [`toolchain.md`](toolchain.md) for the full setup.
 
-`.toolchain/` provides Tcl/Tk 9, gcc/C23, twapi, the static Tcl/Tk libraries,
-the packaging script libraries, and the Tcl/Tk 9 manual. `z check` reports
-the components els uses; `z check --deep` runs functional checks. There are
-no project-local fetch/prep tasks.
+zmal's shared runtime (`<zmal>/r`) provides Tcl/Tk 9, the UCRT64 gcc/C23, twapi,
+the static Tcl/Tk libraries, the packaging script libraries, and the Tcl/Tk 9
+manual. `z check` reports the components els uses; `z check --deep` runs
+functional checks. There are no project-local fetch/prep tasks.
 
 ## C extensions (C23)
 

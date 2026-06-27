@@ -4,14 +4,17 @@ The canonical instructions for this repo live in `AGENTS.md`; read it first.
 
 `els` is hosted under `C:\zmal\_els`. Use zmal as the public front door:
 run `z test`, `z build`, `z check`, or `z tasks` from `_els`, or
-`z in els <task>` from the zmal root. The project-local `.toolchain` remains an
-implementation detail invoked through `z.json`.
+`z in els <task>` from the zmal root. els is a full zmal project: it builds
+against zmal's shared runtime payloads under `<zmal>/r` (Tcl/Tk 9, the UCRT64
+gcc, twapi) and carries no private `.toolchain`. `z tasks env` prints the
+resolved payload roots.
 
-Most important: this repo uses the full Tcl 9 and Tk 9 manual from
-`.toolchain/manual/INDEX.md`. It is the authoritative Tcl/Tk reference for this
-codebase. Before writing or changing Tcl/Tk code, open the manual pages relevant
-to your change. Prefer it over training-data recall, which may be stale or
-describe Tcl 8.x.
+Most important: this repo uses the full Tcl 9 and Tk 9 manual that ships in
+zmal's Tcl/Tk payload, at `<TCLTK>/manual/INDEX.md` — where `<TCLTK>` is the
+path `z tasks env` reports (currently `C:\zmal\r\tcltk\9.0.3`). It is the
+authoritative Tcl/Tk reference for this codebase. Before writing or changing
+Tcl/Tk code, open the manual pages relevant to your change. Prefer it over
+training-data recall, which may be stale or describe Tcl 8.x.
 
 Strongly avoid PowerShell and Windows cmd for zmal-backed work. Use `z <tool>`,
 `z bash -c "..."`, or named commands in `z.json`; do not add durable `.ps1`,

@@ -1,7 +1,7 @@
 #!/usr/bin/env tclsh
 # tools/tasks.tcl - the internal els task runner behind z.json. ALL project tooling
-# lives here (Tcl), plus C built by the project-local toolchain's gcc. It is
-# invoked through z.exe, which discovers the project root and command manifest.
+# lives here (Tcl), plus C built by zmal's vendored UCRT64 gcc. It is invoked
+# through z.exe, which discovers the project root and command manifest.
 
 proc script_root {} {
     set s [info script]
@@ -9,16 +9,43 @@ proc script_root {} {
     return [file dirname [file dirname $s]]
 }
 
-proc discover_store {root} {
-    set tc [file join $root .toolchain]
-    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
-        return [list $tc .toolchain]
+# els is a hosted zmal project: it builds against zmal's SHARED runtime payloads
+# under <zmal>/r (Tcl/Tk 9, MSYS2 UCRT64 gcc, twapi) and carries no private
+# .toolchain.  z.exe starts this script with zmal's tclsh90 and exports ZMAL_ROOT;
+# the discovery below resolves each payload from the ZMAL_* env vars or the hosted
+# layout, so the script also works when run directly with the vendored tclsh.
+proc zmal_paths {root args} {
+    set out {}
+    if {[info exists ::env(ZMAL_ROOT)] && $::env(ZMAL_ROOT) ne ""} {
+        lappend out [file join $::env(ZMAL_ROOT) {*}$args]
     }
-    error ".toolchain not found in $root - restore the project-local toolchain"
+    # Hosted layout: <zmal>/_els, so the zmal root is the project parent.
+    lappend out [file join [file dirname $root] {*}$args]
+    return $out
+}
+proc discover_payload {root envs rel marker missingPath} {
+    set candidates {}
+    foreach var $envs {
+        if {[info exists ::env($var)] && $::env($var) ne ""} { lappend candidates $::env($var) }
+    }
+    lappend candidates {*}[zmal_paths $root {*}$rel]
+    foreach p $candidates {
+        set p [file normalize $p]
+        if {[file exists [file join $p {*}$marker]]} { return $p }
+    }
+    return [file normalize $missingPath]
 }
 
 set ROOT [script_root]
-lassign [discover_store $ROOT] TC PIN
+set TC    [discover_payload $ROOT ZMAL_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
+              [file join [file dirname $ROOT] r tcltk 9.0.3]]
+set MSYS2 [discover_payload $ROOT ZMAL_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
+              [file join [file dirname $ROOT] r msys2]]
+set TWAPI [discover_payload $ROOT ZMAL_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
+              [file join [file dirname $ROOT] r twapi 5.2.0]]
+set ::env(ZMAL_TCLTK) [file nativename $TC]
+set ::env(ZMAL_MSYS2) [file nativename $MSYS2]
+set ::env(ZMAL_TWAPI) [file nativename $TWAPI]
 
 foreach {var rel marker} {
     TCL_LIBRARY {tcllib tcl_library} init.tcl
@@ -29,10 +56,7 @@ foreach {var rel marker} {
 }
 
 set pkgpaths {}
-foreach p [list [file join $ROOT tools tclpkg] \
-                [file join $TC twapi-dl twapi-5.2.0] \
-                [file join $TC twapi-dl] \
-                [file join $ROOT build]] {
+foreach p [list [file join $ROOT tools tclpkg] $TWAPI [file join $ROOT build]] {
     if {[file isdirectory $p]} { lappend pkgpaths $p }
 }
 foreach p [glob -nocomplain [file join $TC tcl9 lib *]] {
@@ -47,22 +71,26 @@ if {[llength $pkgpaths]} {
     set auto_path [concat $pkgpaths $auto_path]
 }
 
+# zmal runtime wins on PATH: Tcl/Tk 9 BEFORE MSYS2, which ships its own Tcl/Tk 8.6
+# that els must never use.
 set vbins {}
-foreach b [list [file join $TC tcl9 bin] [file join $TC msys64 ucrt64 bin]] {
+foreach b [list [file join $TC tcl9 bin] [file join $MSYS2 ucrt64 bin] [file join $MSYS2 usr bin]] {
     if {[file isdirectory $b]} { lappend vbins [file nativename $b] }
 }
 if {[llength $vbins]} { set ::env(PATH) "[join $vbins {;}];$::env(PATH)" }
 if {![info exists ::env(MSYSTEM)]} { set ::env(MSYSTEM) UCRT64 }
 
 # ---- path helpers -------------------------------------------------------
-proc P    {args} { return [file join $::ROOT {*}$args] }
-proc TCp  {args} { return [file join $::TC   {*}$args] }
+proc P      {args} { return [file join $::ROOT  {*}$args] }
+proc TCp    {args} { return [file join $::TC    {*}$args] }
+proc MSYSp  {args} { return [file join $::MSYS2 {*}$args] }
+proc TWAPIp {args} { return [file join $::TWAPI {*}$args] }
 proc tclsh   {} { return [TCp tcl9 bin tclsh90.exe] }
 proc wish    {} { return [TCp tcl9 bin wish90.exe] }
 proc tclshs  {} { return [TCp tcl9s bin tclsh90s.exe] }
-proc gcc     {} { return [TCp msys64 ucrt64 bin gcc.exe] }
-proc windres {} { return [TCp msys64 ucrt64 bin windres.exe] }
-proc strip-exe {} { return [TCp msys64 ucrt64 bin strip.exe] }
+proc gcc     {} { return [MSYSp ucrt64 bin gcc.exe] }
+proc windres {} { return [MSYSp ucrt64 bin windres.exe] }
+proc strip-exe {} { return [MSYSp ucrt64 bin strip.exe] }
 
 proc stream {args} {
     if {[catch {exec {*}$args >@ stdout 2>@ stderr} err opts]} {
@@ -80,7 +108,7 @@ proc tool_path {tool} {
         tclsh { return [tclsh] }
         wish  { return [wish] }
         gcc   { return [gcc] }
-        twapi { return [TCp twapi-dl twapi-5.2.0 pkgIndex.tcl] }
+        twapi { return [TWAPIp pkgIndex.tcl] }
         default { return "" }
     }
 }
@@ -88,7 +116,7 @@ proc need {args} {
     foreach tool $args {
         set p [tool_path $tool]
         if {$p eq "" || ![file exists $p]} {
-            error "required tool '$tool' is missing - restore the project-local .toolchain"
+            error "required tool '$tool' is missing - restore zmal's runtime payloads (r/tcltk, r/msys2, r/twapi)"
         }
     }
 }
@@ -110,14 +138,15 @@ proc task_help {args} {
   z build [out]         build the native exe -> dist/els.exe
   z probe-exe [exe]     verify the fused exe's startup/session/recovery behavior
   z build-ext           compile the C23 extension(s) in src/ -> build/*.dll
-  z check [--deep]      check the project-local .toolchain
+  z check [--deep]      check zmal's runtime payloads (r/tcltk, r/msys2, r/twapi)
   z tasks env           print resolved toolchain paths + versions}
 }
 
 proc task_env {args} {
     puts "ROOT  = $::ROOT"
-    puts "PIN   = $::PIN"
-    puts "TC    = $::TC"
+    puts "TCLTK = $::TC"
+    puts "MSYS2 = $::MSYS2"
+    puts "TWAPI = $::TWAPI"
     foreach {label path} [list tclsh [tclsh] wish [wish] gcc [gcc]] {
         puts [format "  %-6s %s  (%s)" $label $path \
             [expr {[file exists $path] ? "ok" : "MISSING"}]]
@@ -229,7 +258,7 @@ proc task_build-ext {args} {
 proc task_build {args} {
     need gcc tclsh
     if {![file exists [tclshs]]} {
-        error "static tclsh missing in .toolchain (tcl9s/bin)"
+        error "static tclsh missing in zmal's Tcl/Tk payload (r/tcltk/9.0.3/tcl9s/bin)"
     }
     set out [lindex $args 0] ; if {$out eq ""} { set out [P dist els.exe] }
     if {[string match -* $out]} { error "z build takes no flags (got '$out'); usage: z build ?outfile?" }

@@ -12,15 +12,28 @@ proc script_root {} {
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-proc discover_store {root} {
-    set tc [file join $root .toolchain]
-    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
-        return $tc
+# els uses zmal's SHARED Tcl/Tk payload (<zmal>/r/tcltk/9.0.3); tasks.tcl exports
+# ZMAL_TCLTK/ZMAL_ROOT into our environment, and we fall back to the hosted layout.
+proc zmal_paths {root args} {
+    set out {}
+    if {[info exists ::env(ZMAL_ROOT)] && $::env(ZMAL_ROOT) ne ""} {
+        lappend out [file join $::env(ZMAL_ROOT) {*}$args]
     }
-    error ".toolchain not found in $root - restore the project-local toolchain"
+    lappend out [file join [file dirname $root] {*}$args]
+    return $out
+}
+proc discover_tcltk {root} {
+    set cands {}
+    if {[info exists ::env(ZMAL_TCLTK)] && $::env(ZMAL_TCLTK) ne ""} { lappend cands $::env(ZMAL_TCLTK) }
+    lappend cands {*}[zmal_paths $root r tcltk 9.0.3]
+    foreach p $cands {
+        set p [file normalize $p]
+        if {[file exists [file join $p tcl9 bin tclsh90.exe]]} { return $p }
+    }
+    error "zmal Tcl/Tk payload not found (r/tcltk/9.0.3) - restore zmal's runtime payloads"
 }
 set ROOT [script_root]
-set TC   [discover_store $ROOT]
+set TC   [discover_tcltk $ROOT]
 proc TCp {args} { return [file join $::TC {*}$args] }
 
 proc copy_tree {src dst} {

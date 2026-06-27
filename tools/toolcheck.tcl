@@ -1,23 +1,44 @@
 #!/usr/bin/env tclsh
-# tools/toolcheck.tcl - check the project-local .toolchain has what els needs and,
-# with --deep, that it actually works.
+# tools/toolcheck.tcl - check that zmal's shared runtime payloads have what els
+# needs and, with --deep, that they actually work.  els carries no private
+# .toolchain: Tcl/Tk 9, the UCRT64 gcc, and twapi all come from <zmal>/r.
 
 proc script_root {} {
     set s [info script]
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-proc discover_store {root} {
-    set tc [file join $root .toolchain]
-    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
-        return [list $tc .toolchain]
+proc zmal_paths {root args} {
+    set out {}
+    if {[info exists ::env(ZMAL_ROOT)] && $::env(ZMAL_ROOT) ne ""} {
+        lappend out [file join $::env(ZMAL_ROOT) {*}$args]
     }
-    error ".toolchain not found in $root - restore the project-local toolchain"
+    lappend out [file join [file dirname $root] {*}$args]
+    return $out
+}
+proc discover_payload {root envs rel marker missingPath} {
+    set candidates {}
+    foreach var $envs {
+        if {[info exists ::env($var)] && $::env($var) ne ""} { lappend candidates $::env($var) }
+    }
+    lappend candidates {*}[zmal_paths $root {*}$rel]
+    foreach p $candidates {
+        set p [file normalize $p]
+        if {[file exists [file join $p {*}$marker]]} { return $p }
+    }
+    return [file normalize $missingPath]
 }
 set ROOT [script_root]
-lassign [discover_store $ROOT] TC PIN
-proc P   {args} { return [file join $::ROOT {*}$args] }
-proc TCp {args} { return [file join $::TC   {*}$args] }
+set TC    [discover_payload $ROOT ZMAL_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
+              [file join [file dirname $ROOT] r tcltk 9.0.3]]
+set MSYS2 [discover_payload $ROOT ZMAL_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
+              [file join [file dirname $ROOT] r msys2]]
+set TWAPI [discover_payload $ROOT ZMAL_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
+              [file join [file dirname $ROOT] r twapi 5.2.0]]
+proc P      {args} { return [file join $::ROOT  {*}$args] }
+proc TCp    {args} { return [file join $::TC    {*}$args] }
+proc MSYSp  {args} { return [file join $::MSYS2 {*}$args] }
+proc TWAPIp {args} { return [file join $::TWAPI {*}$args] }
 
 foreach {var rel marker} {
     TCL_LIBRARY {tcllib tcl_library} init.tcl
@@ -27,7 +48,7 @@ foreach {var rel marker} {
     if {[file exists [file join $p $marker]]} { set ::env($var) [file nativename $p] }
 }
 set pkgpaths {}
-foreach p [list [file join $ROOT tools tclpkg] [TCp twapi-dl twapi-5.2.0] [TCp twapi-dl] [P build]] {
+foreach p [list [file join $ROOT tools tclpkg] $TWAPI [P build]] {
     if {[file isdirectory $p]} { lappend pkgpaths $p }
 }
 if {[llength $pkgpaths]} {
@@ -37,23 +58,28 @@ if {[llength $pkgpaths]} {
 }
 
 set ::COMPONENTS {
-    {key tcl      name "Tcl/Tk 9 (shared)"      loc tc   probe {tcl9 bin tclsh90.exe}              kind core want 9.0.3}
-    {key wish     name "Tk 9 wish"              loc tc   probe {tcl9 bin wish90.exe}               kind core want {}}
-    {key gcc      name "gcc / C23 (UCRT64)"     loc tc   probe {msys64 ucrt64 bin gcc.exe}         kind core want 16.1.0}
-    {key windres  name "windres"                loc tc   probe {msys64 ucrt64 bin windres.exe}     kind core want {}}
-    {key tcls     name "Tcl/Tk 9 (static)"      loc tc   probe {tcl9s bin tclsh90s.exe}            kind core want 9.0.3}
-    {key tclh     name "Tcl/Tk 9 headers"       loc tc   probe {tcl9 include tcl.h}                kind core want {}}
-    {key tcllib   name "Tcl/Tk script library"  loc tc   probe {tcllib tcl_library init.tcl}       kind core want {}}
-    {key tklib    name "Tk script library"      loc tc   probe {tcllib tk_library tk.tcl}          kind core want {}}
-    {key twapi    name "twapi"                  loc tc   probe {twapi-dl twapi-5.2.0 pkgIndex.tcl} kind core want 5.2.0}
-    {key manual   name "Tcl/Tk + C-API manual"  loc tc   probe {manual INDEX.md}                   kind opt  want {}}
-    {key tclsrc   name "Tcl/Tk 9 source"        loc tc   probe {tclsrc tcl9.0.3 generic tcl.h}     kind opt  want {}}
-    {key tclpkg   name "project tclpkg helper"  loc root probe {tools tclpkg pkgIndex.tcl}         kind opt  want {}}
+    {key tcl      name "Tcl/Tk 9 (shared)"      loc tc     probe {tcl9 bin tclsh90.exe}          kind core want 9.0.3}
+    {key wish     name "Tk 9 wish"              loc tc     probe {tcl9 bin wish90.exe}           kind core want {}}
+    {key gcc      name "gcc / C23 (UCRT64)"     loc msys2  probe {ucrt64 bin gcc.exe}            kind core want 16.1.0}
+    {key windres  name "windres"                loc msys2  probe {ucrt64 bin windres.exe}        kind core want {}}
+    {key tcls     name "Tcl/Tk 9 (static)"      loc tc     probe {tcl9s bin tclsh90s.exe}        kind core want 9.0.3}
+    {key tclh     name "Tcl/Tk 9 headers"       loc tc     probe {tcl9 include tcl.h}            kind core want {}}
+    {key tcllib   name "Tcl/Tk script library"  loc tc     probe {tcllib tcl_library init.tcl}   kind core want {}}
+    {key tklib    name "Tk script library"      loc tc     probe {tcllib tk_library tk.tcl}      kind core want {}}
+    {key twapi    name "twapi"                  loc twapi  probe {pkgIndex.tcl}                  kind core want 5.2.0}
+    {key manual   name "Tcl/Tk + C-API manual"  loc tc     probe {manual INDEX.md}               kind opt  want {}}
+    {key tclsrc   name "Tcl/Tk 9 source"        loc tc     probe {tclsrc tcl9.0.3 generic tcl.h} kind opt  want {}}
+    {key tclpkg   name "project tclpkg helper"  loc root   probe {tools tclpkg pkgIndex.tcl}     kind opt  want {}}
 }
 
 proc comp_path {comp args} {
     set rel [concat [dict get $comp probe] $args]
-    return [expr {[dict get $comp loc] eq "root" ? [P {*}$rel] : [TCp {*}$rel]}]
+    switch [dict get $comp loc] {
+        root    { return [P     {*}$rel] }
+        msys2   { return [MSYSp {*}$rel] }
+        twapi   { return [TWAPIp {*}$rel] }
+        default { return [TCp   {*}$rel] }
+    }
 }
 proc present {comp} { return [file exists [comp_path $comp]] }
 
@@ -64,7 +90,7 @@ proc version_of {comp} {
                     return "ERROR: [string map [list \n { }] [string trim $v]]" } }
         tcls  { if {[catch {exec [TCp tcl9s bin tclsh90s.exe] << {puts [info patchlevel]}} v]} {
                     return "ERROR: [string map [list \n { }] [string trim $v]]" } }
-        gcc   { catch {exec [TCp msys64 ucrt64 bin gcc.exe] -dumpversion} v }
+        gcc   { catch {exec [MSYSp ucrt64 bin gcc.exe] -dumpversion} v }
         twapi { set idx [comp_path $comp]
                 if {![catch {open $idx r} fh]} { set d [read $fh] ; close $fh
                     regexp {package ifneeded\s+twapi\s+(\S+)} $d -> v } }
@@ -82,7 +108,10 @@ proc status_of {comp} {
 
 proc report {} {
     puts ""
-    puts "els toolcheck  -  .toolchain at [file nativename $::TC]"
+    puts "els toolcheck  -  zmal shared runtime payloads"
+    puts "    tcltk  [file nativename $::TC]"
+    puts "    msys2  [file nativename $::MSYS2]"
+    puts "    twapi  [file nativename $::TWAPI]"
     puts ""
     puts [format "  %-24s %-9s %s" COMPONENT STATUS VERSION/NOTE]
     puts "  [string repeat - 60]"
@@ -96,7 +125,7 @@ proc report {} {
             outdated { set status "UPDATE" ; set note "have $v, want [dict get $c want]"
                        if {$kind eq "core"} { incr issues } }
             missing  { set status [expr {$kind eq "core" ? "MISSING" : "(absent)"}]
-                       set note [expr {$kind eq "core" ? "restore the project-local .toolchain" : ""}]
+                       set note [expr {$kind eq "core" ? "restore zmal's runtime payloads" : ""}]
                        if {$kind eq "core"} { incr issues } }
         }
         puts [format "  %-24s %-9s %s" [dict get $c name] $status $note]
@@ -116,7 +145,7 @@ proc deep_line {name ok detail} {
     return [expr {$ok ? 0 : 1}]
 }
 proc deep_ext {} {
-    set gcc [TCp msys64 ucrt64 bin gcc.exe]
+    set gcc [MSYSp ucrt64 bin gcc.exe]
     if {![file exists $gcc]} { return [deep_line "C23<->Tcl extension" 0 "gcc missing"] }
     set t [tmpdir]; file delete -force $t; file mkdir $t
     set c [file join $t tcverify.c]; set dll [file join $t tcverify.dll]
@@ -137,7 +166,7 @@ proc deep_ext {} {
     return [deep_line "C23<->Tcl extension" $ok $detail]
 }
 proc deep_header {} {
-    set gcc [TCp msys64 ucrt64 bin gcc.exe]
+    set gcc [MSYSp ucrt64 bin gcc.exe]
     if {![file exists $gcc]} { return [deep_line "C build uses Tcl 9 header" 0 "gcc missing"] }
     set t [tmpdir] ; file delete -force $t ; file mkdir $t
     set c [file join $t hv.c]
@@ -155,7 +184,7 @@ proc deep {} {
     incr f [deep_line "Tcl evaluates a script" [expr {$ok && [string trim $out] eq "42"}] [string trim $out]]
     lassign [tcl_eval {package require Tk; label .l -text hi; puts [winfo class .l]; exit}] ok out
     incr f [deep_line "Tk creates a widget" [expr {$ok && [string match *abel [string trim $out]]}] [string trim $out]]
-    lassign [tcl_eval "lappend auto_path {[fwd [TCp twapi-dl]]}; puts \[package require twapi\]"] ok out
+    lassign [tcl_eval "lappend auto_path {[fwd $::TWAPI]}; puts \[package require twapi\]"] ok out
     incr f [deep_line "twapi loads" [expr {$ok && [string match 5.* [string trim $out]]}] [string trim $out]]
     incr f [deep_ext]
     incr f [deep_header]
@@ -167,7 +196,7 @@ set issues [report]
 if {$doDeep} { incr issues [deep] }
 puts ""
 if {$issues > 0} {
-    puts "  $issues issue(s). A MISSING core piece means .toolchain is incomplete."
+    puts "  $issues issue(s). A MISSING core piece means a zmal runtime payload is incomplete."
     exit 1
 }
 puts [expr {$doDeep ? "  all components present, current, and functional." \

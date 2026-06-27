@@ -1,5 +1,8 @@
-# Project-local toolchain payload copied out of the old mal superstructure.
+# els builds against zmal's shared runtime (<zmal>/r); it has no project-local
+# toolchain.  Ignore any locally-hydrated .toolchain (and moved-aside variants)
+# so the multi-hundred-MB payload can never be committed by accident.
 /.toolchain/
+/.toolchain.*/
 
 # Agent-local client config and Drenn's local memory store stay out of the repo.
 # (The project's MCP server declaration in .mcp.json IS tracked; these are the
