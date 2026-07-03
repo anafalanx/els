@@ -136,6 +136,7 @@ proc task_help {args} {
   z shot <out> [file]   screenshot the editor to <out> (twapi + PrintWindow)
   z readme-shots        regenerate docs/img screenshots used by README.md
   z build [out]         build the native exe -> dist/els.exe
+  z sign [exe]          code-sign the release exe (Certum/SimplySign) + re-probe + verify
   z probe-exe [exe]     verify the fused exe's startup/session/recovery behavior
   z build-ext           compile the C23 extension(s) in src/ -> build/*.dll
   z check [--deep]      check zmal's runtime payloads (r/tcltk, r/msys2, r/twapi)
@@ -164,6 +165,92 @@ proc task_probe-exe {args} {
     set exe [lindex $args 0]
     if {$exe eq ""} { set exe [P dist els.exe] }
     stream [tclsh] [P tools probe_exe.tcl] $exe
+}
+
+# find_signtool locates signtool.exe (from the Windows SDK; not a zmal payload).
+# Prefers the highest installed SDK version, then the zmal r/winsdk junction, then PATH.
+proc find_signtool {} {
+    set sdk [lsort [glob -nocomplain {C:/Program Files (x86)/Windows Kits/10/bin/*/x64/signtool.exe}]]
+    if {[llength $sdk]} { return [lindex $sdk end] }
+    set j {C:/zmal/r/winsdk/10.0.26100.0/signtool.exe}
+    if {[file exists $j]} { return $j }
+    set p [auto_execok signtool]
+    if {[llength $p]} { return [lindex $p 0] }
+    error "signtool.exe not found - install the Windows SDK \"Signing Tools for Desktop Apps\""
+}
+
+# run_capture runs a command capturing BOTH stdout and stderr into one string, and
+# returns [list exitcode text]. (Plain exec drops stderr, where signtool writes its
+# "No certificates" message; and it must not treat stderr output as an error.)
+proc run_capture {args} {
+    set ch [file tempfile tmp]
+    set rc [catch {exec {*}$args >@ $ch 2>@ $ch} err opts]
+    close $ch
+    set f [open $tmp r] ; set text [read $f] ; close $f
+    file delete -force $tmp
+    if {$rc} {
+        set ec [dict get $opts -errorcode]
+        if {[lindex $ec 0] eq "CHILDSTATUS"} { return [list [lindex $ec 2] $text] }
+        return [list 1 [string trim "$text\n$err"]]
+    }
+    return [list 0 $text]
+}
+
+# task_sign - code-sign a release exe with the Certum Open Source cert (SimplySign).
+#   z sign [exe]   (default: dist/els.exe)
+# Holds no secrets and no name: signtool /a auto-selects the machine's code-signing
+# certificate. Prerequisite: SimplySign Desktop must be CONNECTED (tray icon ->
+# Connect to SimplySign, your SimplySign e-mail + the 6-digit phone token) so the cloud
+# cert appears in the Windows store; otherwise this refuses rather than emit an unsigned
+# binary. Because els.exe carries a zipfs payload appended at EOF and Authenticode
+# appends its cert table there too, the signed exe is re-PROBED before it is trusted.
+proc task_sign {args} {
+    need tclsh
+    set signtool [find_signtool]
+    set exe [lindex $args 0]
+    if {$exe eq ""} { set exe [P dist els.exe] }
+    if {![file exists $exe]} { error "file not found: $exe" }
+    set exe [file normalize $exe]
+    puts "file:     $exe"
+    puts "signtool: $signtool"
+
+    # 1) Sign. /a auto-selects the code-signing cert (no identity hardcoded); the
+    # timestamp flags are mandatory - they keep the signature valid past cert expiry.
+    puts "signing (a PIN dialog may pop from SimplySign Desktop on the first sign)..."
+    lassign [run_capture $signtool sign /a /tr http://time.certum.pl /td sha256 /fd sha256 /v $exe] rc out
+    puts [string trim $out]
+    if {$rc != 0} {
+        if {[string match {*No certificates were found*} $out]} {
+            error "no code-signing certificate found - SimplySign is not connected.\n  -> Open SimplySign Desktop, tray icon -> Connect to SimplySign\n     (your SimplySign e-mail + the 6-digit phone token), then re-run.\n     Refusing to emit an unsigned binary."
+        }
+        error "signtool sign failed (exit $rc)"
+    }
+
+    # 2) Prove the signed exe still mounts its zipfs and runs (see the header note).
+    puts "probe: confirming the signed exe still mounts its zipfs + runs..."
+    if {[catch {stream [tclsh] [P tools probe_exe.tcl] $exe} perr]} {
+        error "the SIGNED exe FAILED the probe - refusing to ship a broken binary:\n  $perr"
+    }
+
+    # 3) Verify the signature is valid AND timestamped.
+    lassign [run_capture $signtool verify /pa /all /v $exe] vrc vout
+    if {$vrc != 0} { error "signature verify FAILED:\n$vout" }
+    if {![string match {*timestamp*} $vout]} {
+        error "signature is NOT timestamped - it would expire with the certificate. Aborting."
+    }
+
+    # 4) Report the full-file SHA-256 for the release notes (certutil is a Windows
+    # built-in - no tcllib dependency).
+    set sum ""
+    lassign [run_capture certutil -hashfile $exe SHA256] hrc hout
+    foreach line [split $hout \n] {
+        set t [string map {" " ""} [string trim $line]]
+        if {[regexp {^[0-9a-fA-F]{64}$} $t]} { set sum [string tolower $t] ; break }
+    }
+    puts ""
+    puts "OK - signed, verified, timestamped."
+    puts "  file    $exe"
+    if {$sum ne ""} { puts "  sha256  $sum" }
 }
 
 proc task_test {args} {

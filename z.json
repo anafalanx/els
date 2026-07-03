@@ -13,6 +13,7 @@
     "readme-shots": ["tclsh90", "tools/tasks.tcl", "readme-shots"],
     "build-ext": ["tclsh90", "tools/tasks.tcl", "build-ext"],
     "build": ["tclsh90", "tools/tasks.tcl", "build"],
+    "sign": ["tclsh90", "tools/tasks.tcl", "sign"],
     "probe-exe": ["tclsh90", "tools/tasks.tcl", "probe-exe"]
   }
 }
