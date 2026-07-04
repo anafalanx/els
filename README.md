@@ -176,6 +176,8 @@ accident recoverable anyway.
 
 ![Find and replace with visible whitespace](docs/img/find-whitespace.png)
 
+![Focus Mode dimming every line but the one under the caret](docs/img/focus-mode.png)
+
 ## Requirements & limitations
 
 Stated plainly so you know before you rely on it:

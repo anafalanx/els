@@ -10,31 +10,25 @@ set ROOT [script_root]
 set TMP  [file join $ROOT tests _tmp readme_shots]
 set OUT  [file join $ROOT docs img]
 
-proc discover_store {root} {
-    set tc [file join $root .toolchain]
-    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
-        return $tc
-    }
-    error ".toolchain not found in $root - restore the project-local toolchain"
-}
-set TC [discover_store $ROOT]
+# wish + tclsh come from zmal's shared runtime, passed in by `z readme-shots`
+# (els carries no private .toolchain).  twapi is found by shot.tcl via the
+# TCLLIBPATH this process already inherits from the z front door.
+set WISH  [lindex $argv 0]
+set TCLSH [lindex $argv 1]
+if {$WISH eq "" || $TCLSH eq ""} { error "usage: readme_shots.tcl <wish> <tclsh>" }
 
 proc write_file {path bytes} {
     file mkdir [file dirname $path]
     set f [open $path w]
-    fconfigure $f -translation binary
+    fconfigure $f -encoding utf-8 -translation lf
     puts -nonewline $f $bytes
     close $f
     return $path
 }
 
-proc tool {name} {
-    return [file join $::TC tcl9 bin $name]
-}
-
 proc capture {scene out {title ""}} {
-    set tclsh [tool tclsh90.exe]
-    set wish  [tool wish90.exe]
+    set tclsh $::TCLSH
+    set wish  $::WISH
     set shot  [file join $::ROOT tools shot.tcl]
     set wrap  [file join $::TMP readme_scene.tcl]
     set cmd [list $tclsh $shot $wish $wrap [file join $::OUT $out] $scene]
@@ -89,6 +83,19 @@ Later:
 
 write_file [file join $TMP spacing.txt] "Two  spaces  between  words.\n    four-space indent here\n\t tab-indented line\nline with trailing spaces    \njust normal single spaces ok\n"
 
+write_file [file join $TMP focus.txt] {On writing in a quiet room
+
+A plain page asks for nothing.
+No ribbons, no blinking, no small badges begging to be cleared.
+You set down one sentence, then the next, and the room stays quiet.
+
+Focus mode dims every line but the one you are on:
+the paragraph ahead waits in patient grey,
+and the sentence under your hands is the only one in ink.
+
+A small trick, an old one, and it works.
+}
+
 write_file [file join $TMP els.conf] [dict create geometry 960x640+80+80 \
     recent {} word_wrap 0 restore_session 0 session_files {} session_active ""]
 
@@ -137,11 +144,26 @@ proc readme_stage_about {} {
     update idletasks
 }
 
+proc readme_stage_focus {} {
+    wm geometry . 960x640+80+80
+    els::open [readme_file focus.txt]
+    set w [els::T]
+    set ::els::focus_mode 1
+    # caret on the "only one in ink" line: it stays ink-black while every other
+    # line dims to grey — exactly what Focus Mode does
+    $w mark set insert 9.30
+    els::set_focus_mode 0     ;# apply the dimming (persist 0 — don't touch config)
+    $w see 1.0
+    focus $w
+    els::refresh_view
+}
+
 proc readme_stage {} {
     switch -- $::README_SCENE {
         editor { readme_stage_editor }
         find   { readme_stage_find }
         about  { readme_stage_about }
+        focus  { readme_stage_focus }
         default { error "unknown README screenshot scene: $::README_SCENE" }
     }
     update idletasks
@@ -162,3 +184,4 @@ write_file [file join $TMP readme_scene.tcl] $wrapper
 capture editor editor-whimsy.png
 capture find find-whitespace.png
 capture about about.png "About els"
+capture focus focus-mode.png

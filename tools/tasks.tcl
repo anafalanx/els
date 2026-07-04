@@ -312,7 +312,7 @@ proc task_shot {args} {
 proc task_readme-shots {args} {
     need tclsh wish twapi
     if {![file exists [P build cap.dll]]} { puts "building capture extension..." ; task_build-ext }
-    stream [tclsh] [P tools readme_shots.tcl]
+    stream [tclsh] [P tools readme_shots.tcl] [wish] [tclsh]
 }
 
 proc task_build-ext {args} {
