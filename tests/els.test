@@ -702,3 +702,21 @@ test bigfile-1.6 {a throw during decode/insert (e.g. OOM) restores the busy curs
     if {[llength [info commands _els_decode_real]]} { catch {rename els::decode {}} ; rename _els_decode_real els::decode }
     catch {. configure -cursor ""}
 } -result {{} {}}
+
+# ---- Wave 2: atomic-save-chain hardening (backup-ring glob escape) ---------
+# (the temp-rescue-on-fallback-failure path needs a locked target -> winfs.test)
+
+test bkglob-1.1 {glob_escape backslash-escapes glob metacharacters} -body {
+    els::glob_escape {report[1]{a}*?.txt}
+} -result {report\[1\]\{a\}\*\?.txt}
+
+test bkglob-1.2 {a glob-metachar filename's backup ring is FOUND (freshness-skip works, no per-save churn)} -setup {els_reset} \
+        -cleanup {set ::els::backups 0 ; set ::els::BK_MININT 60} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 3600
+    set p [els_tmpfile {weird[1].txt} "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "e1" ; els::save     ;# backup #1 (ring was empty)
+    [els::W $id] insert end "e2" ; els::save     ;# within BK_MININT: ring found -> SKIP (not churn)
+    set dir [els::backup_dir]
+    llength [glob -nocomplain -directory $dir "[els::glob_escape [els::backup_stem $p]].*.bak"]
+} -result 1

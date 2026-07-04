@@ -73,6 +73,30 @@ test winfs-3.1 {win_virtual_screen returns a 4-int rect covering all monitors} -
          [expr {[lindex $r 2] >= [winfo screenwidth .]}]
 } -result {4 1 1 1}
 
+test winfs-4.1 {a failing in-place fallback keeps + NAMES the temp as a rescue copy (Wave 2)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
+    # Hold the target open WITHOUT share-delete so both ReplaceFileW and the
+    # rename-replace fail, forcing write_atomic to its in-place fallback; stub the
+    # in-place write to fail (simulating dying media) and assert the temp — the only
+    # copy of the new bytes — survives and is named in the error, not deleted first.
+    set p [file join $::ELS_TMP wfs_rescue.txt]
+    set f [open $p wb] ; puts -nonewline $f "old content" ; close $f
+    catch {els::win_unlock_file}
+    els::win_lock_file [file nativename $p]
+    rename els::_write_inplace _els_wip_real
+    proc els::_write_inplace {args} { return "simulated media failure" }
+    set err [els::write_atomic $p "new rescued bytes"]
+    rename els::_write_inplace {} ; rename _els_wip_real els::_write_inplace
+    els::win_unlock_file
+    set gotTmp [regexp {safe at: ([^)]+)\)} $err -> tmp]
+    set tmp [string trim $tmp]
+    set ok [expr {$gotTmp && [file exists $tmp] && [raw_read $tmp] eq "new rescued bytes"}]
+    catch {file delete -force $tmp} ; catch {file delete -force $p}
+    list [string match "*media failure*" $err] $ok
+} -cleanup {
+    if {[llength [info commands _els_wip_real]]} { catch {rename els::_write_inplace {}} ; rename _els_wip_real els::_write_inplace }
+    catch {els::win_unlock_file}
+} -result {1 1}
+
 test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
     set p [file join $::ELS_TMP wfs_save.txt]
     set f [open $p w] ; puts -nonewline $f "downloaded content\n" ; close $f

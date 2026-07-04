@@ -2694,9 +2694,17 @@ proc els::write_atomic {path bytes {tmpHint ""}} {
     # target also blocks it).  The temp holds a full new copy and the original is
     # still intact, so fall back to a direct in-place write — saving never
     # regresses to "can't save where it used to" (non-atomic only for these rare
-    # cases).
-    catch {file delete -force $tmp}
-    return [els::_write_inplace $path $bytes]
+    # cases).  KEEP the temp as a rescue copy THROUGH the in-place write: if that
+    # TRUNC write fails mid-stream (dying USB, media pulled), the original is
+    # truncated but the temp still holds the complete new content — deleting it
+    # first (as this used to) would lose the only good copy.  Delete only on
+    # success; on failure, name the surviving temp so the bytes aren't lost.
+    set err [els::_write_inplace $path $bytes]
+    if {$err eq ""} {
+        catch {file delete -force $tmp}
+        return ""
+    }
+    return "$err\n(a complete copy of the new content is safe at: $tmp)"
 }
 # Direct in-place write (the pre-atomic behavior): only a fallback for when an
 # atomic rename is impossible (very long path / locked target).
@@ -3613,6 +3621,14 @@ proc els::backup_stem {path} {
         [string tolower [file normalize $path]]]]]
     return "[file tail $path].$h"
 }
+# Backslash-escape glob metacharacters so a name with * ? [ ] { } \ is matched
+# LITERALLY by `glob`.  The backup ring's stem embeds the raw filename, so a legal
+# Windows name like "report[1].txt" would otherwise make "$stem.*.bak" a character
+# class that never matches — breaking both the freshness skip (a backup on every
+# save) and ring pruning (unbounded growth until the age sweep).
+proc els::glob_escape {s} {
+    return [regsub -all {[][*?{}\\]} $s {\\&}]
+}
 proc els::backup_keep {path} {
     if {!$::els::backups} { return }
     set dir [els::backup_dir]
@@ -3623,7 +3639,8 @@ proc els::backup_keep {path} {
     if {[catch {
         file mkdir $dir
         set stem [els::backup_stem $path]
-        set ring [lsort [glob -nocomplain -directory $dir "$stem.*.bak"]]
+        set glob "[els::glob_escape $stem].*.bak"
+        set ring [lsort [glob -nocomplain -directory $dir $glob]]
         # a fresh-enough newest backup already preserves the interesting
         # (pre-burst) version: skip
         set newest [lindex $ring end]
@@ -3641,7 +3658,7 @@ proc els::backup_keep {path} {
             set werr [els::write_atomic $target $bytes]
             if {$werr ne ""} { error $werr }
             # prune the ring to the newest BK_RING entries
-            set ring [lsort [glob -nocomplain -directory $dir "$stem.*.bak"]]
+            set ring [lsort [glob -nocomplain -directory $dir $glob]]
             foreach old [lrange $ring 0 end-$::els::BK_RING] {
                 catch {file delete -force $old}
             }

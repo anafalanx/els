@@ -16,17 +16,50 @@
 #include <tcl.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wchar.h>
 
-/* Tcl's strings are (modified) UTF-8; convert to UTF-16 for the wide API.  For
- * file paths (no embedded NUL) standard CP_UTF8 is correct for every BMP code
- * point; a rare non-BMP path that converts imperfectly just makes ReplaceFileW
- * fail, and els falls back. */
+/* Tcl's strings are (modified) UTF-8; convert to UTF-16 for the wide API.
+ * MB_ERR_INVALID_CHARS: an invalid UTF-8 sequence returns 0 (-> nullptr, caller
+ * falls back to the pure-Tcl path) rather than silently substituting U+FFFD and
+ * acting on a DIFFERENT path — which for the lock helpers could OPEN_ALWAYS-create
+ * and lock a stray wrong file.  (Tcl's WTF-8 for a lone surrogate in a rare NTFS
+ * name is rejected here and handled by the fallback, losing only ADS preservation
+ * for that path.) */
 static WCHAR *utf8_to_wide(const char *s, Tcl_Size n) {
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, s, (int)n, nullptr, 0);
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, (int)n, nullptr, 0);
     if (wlen <= 0) return nullptr;
     WCHAR *w = (WCHAR *)Tcl_Alloc((size_t)(wlen + 1) * sizeof(WCHAR));
-    MultiByteToWideChar(CP_UTF8, 0, s, (int)n, w, wlen);
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, (int)n, w, wlen);
     w[wlen] = L'\0';
+
+    /* Extended-length safety net.  Win32 path APIs are MAX_PATH(260)-bound unless
+     * the path carries the \\?\ prefix.  Tcl 9's `file normalize` ALREADY adds that
+     * prefix for >260-char paths (els even strips it back off for display — see
+     * els::strip_ext_prefix), so the normal save path, which passes
+     * `file nativename [file normalize …]`, arrives here already prefixed and the
+     * guard below detects that and skips re-prefixing.  This branch is therefore a
+     * DEFENSIVE fallback for any caller that hands us an un-normalized long path; it
+     * does not fire on the normal save path, and short paths are byte-identical to
+     * before.  Only fully-qualified backslash-separated drive/UNC paths qualify. */
+    if (wlen > MAX_PATH &&
+        !(w[0] == L'\\' && w[1] == L'\\' && w[2] == L'?' && w[3] == L'\\')) {
+        const WCHAR *pfx = nullptr;
+        const WCHAR *tail = w;
+        if (((w[0] >= L'A' && w[0] <= L'Z') || (w[0] >= L'a' && w[0] <= L'z')) &&
+            w[1] == L':' && w[2] == L'\\') {
+            pfx = L"\\\\?\\";                       /* C:\long…  ->  \\?\C:\long… */
+        } else if (w[0] == L'\\' && w[1] == L'\\') {
+            pfx = L"\\\\?\\UNC\\"; tail = w + 2;    /* \\srv\share…  ->  \\?\UNC\srv\share… */
+        }
+        if (pfx != nullptr) {
+            size_t pl = wcslen(pfx), tl = wcslen(tail);
+            WCHAR *pw = (WCHAR *)Tcl_Alloc((pl + tl + 1) * sizeof(WCHAR));
+            wcscpy(pw, pfx);
+            wcscat(pw, tail);
+            Tcl_Free((char *)w);
+            return pw;
+        }
+    }
     return w;
 }
 
