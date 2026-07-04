@@ -3786,10 +3786,20 @@ proc els::backup_keep {path} {
         set fresh [expr {$newest ne "" && ![catch {file mtime $newest} mt] \
                          && [clock seconds] - $mt < $::els::BK_MININT}]
         if {!$fresh} {
-            set stamp [clock format [clock seconds] -format %Y%m%d-%H%M%S]
+            # Microsecond-resolution, fixed-width stamp: the readable date-time plus
+            # the microsecond-within-second (6 digits).  This makes every backup name
+            # unique AND monotonically increasing, so lsort of the ring == creation
+            # order — which the fresh-newest skip ([lindex $ring end]) and the ring
+            # pruning ([lrange $ring 0 end-BK_RING]) both depend on.  A plain
+            # second-resolution stamp collided on same-second bursts, and the old
+            # "-NN" collision suffix sorted BEFORE ".bak", so pruning kept the OLDEST
+            # version of the burst and dropped the newest.  Derive both parts from one
+            # reading so a second-boundary can't skew them.
+            set us [clock microseconds]
+            set stamp "[clock format [expr {$us / 1000000}] -format %Y%m%d-%H%M%S]-[format %06d [expr {$us % 1000000}]]"
             set target [file join $dir "$stem.$stamp.bak"]
             set n 2
-            while {[file exists $target]} {     ;# same-second saves
+            while {[file exists $target]} {   ;# same-microsecond: keep names unique
                 set target [file join $dir "$stem.$stamp-$n.bak"]
                 incr n
             }
@@ -5061,10 +5071,12 @@ proc els::startup_probe {report} {
     set paths {}
     set chars {}
     set dirty {}
+    set bodies {}
     foreach id $::els::docs {
         if {[info exists ::els::docPath($id)]} { lappend paths $::els::docPath($id) }
         catch {lappend chars [[els::W $id] count -chars 1.0 "end - 1 char"]}
         lappend dirty [els::doc_dirty $id]
+        catch {lappend bodies [[els::W $id] get 1.0 "end - 1 char"]}
     }
     set data [dict create \
         mapped [winfo ismapped .] \
@@ -5074,6 +5086,7 @@ proc els::startup_probe {report} {
         docs [llength $::els::docs] \
         paths $paths \
         doc_chars $chars \
+        doc_bodies $bodies \
         doc_dirty $dirty \
         recovered $::els::last_recover \
         swap_dir [els::swap_dir] \

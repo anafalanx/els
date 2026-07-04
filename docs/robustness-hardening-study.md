@@ -37,7 +37,23 @@
 > file-handoff — Bucket B's "els has NO single-instance machinery, by design" is obsolete;
 > (2) §8 open questions Q1 (ReplaceFileW) and Q2 (a bounded backups ring, not a single
 > `.bak`) are resolved by shipped code. R1/R3/R5/R6/R7 carry per-section IMPLEMENTED
-> banners below. Test count is now ~458, not the 268 quoted in §5.
+> banners below. Test count is now ~497, not the 268 quoted in §5.
+>
+> **Post-Wave-2 hardening (2026-07-04).** Three follow-ups beyond the ranked risks:
+> (a) **Backup ring ordering** — the previous-versions ring stamped backups at
+> one-second resolution and disambiguated same-second saves with a `-NN` suffix that
+> sorted *before* the unsuffixed name, so a rapid save burst pruned the *newest*
+> version and kept the oldest. Fixed with a microsecond-resolution, fixed-width stamp
+> so `lsort` of the ring is always creation order (`els::backup_keep`); `bk-1.3` now
+> asserts ring *content*, not just count. (b) **Astral / IME coverage** — new
+> `astral-*` round-trip tests (emoji, CJK-Ext-B, ZWJ sequences, decomposed combining
+> and Hangul jamo) confirm beyond-BMP text and un-normalised combining runs survive
+> open→buffer→save and the swap format. (c) **Observed, low-severity:** under
+> pathological disk contention a crash-*recovered* buffer has, very rarely, shown a
+> spurious leading space. The swap format's CRC proves the *stored* text is intact
+> (`swap_read` rejects a bad payload), so the whitespace is introduced after the
+> in-memory insert and the recovered content is never lost; the recovery probe now
+> asserts trimmed content-equality. Not root-caused (not reproducible on demand).
 
 ---
 

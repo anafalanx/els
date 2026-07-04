@@ -458,8 +458,13 @@ test bk-1.3 {the ring keeps only the newest BK_RING versions} -setup {els_reset}
         [els::W $id] insert end "v$i\n"
         els::save
     }
-    llength [bk_ring $p]
-} -result 3
+    set ring [bk_ring $p]
+    # not just the COUNT: the ring must keep the newest three, so its lsort-newest
+    # entry is the last backup taken (whose pre-save content ended with v5).  Under
+    # the old same-second suffix ordering the unsuffixed name sorted last, so the
+    # "newest" was actually the very first (pre-v0) backup — pruning kept the wrong end.
+    list [llength $ring] [string match "*v5\n" [raw_read [lindex $ring end]]]
+} -result {3 1}
 
 test bk-1.4 {a fresh newest backup suppresses churn (min spacing)} -setup {els_reset} -body {
     set ::els::backups 1 ; set ::els::BK_MININT 3600

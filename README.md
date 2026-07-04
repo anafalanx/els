@@ -176,6 +176,26 @@ accident recoverable anyway.
 
 ![Find and replace with visible whitespace](docs/img/find-whitespace.png)
 
+## Requirements & limitations
+
+Stated plainly so you know before you rely on it:
+
+- **Windows 10 (version 1903 or newer) or Windows 11, 64-bit.** els leans on the
+  per-application UTF-8 code page (Windows 10 1903+) for correct handling of
+  non-ASCII file paths, and on long-path awareness (Windows 10 1607+). The
+  manifest still lists Windows 7/8.1 for compatibility and els may launch there,
+  but those are untested and path handling degrades without the UTF-8 code page.
+  There is no 32-bit build.
+- **Not accessible to screen readers.** els draws its own text surface on Tk,
+  which does not expose UI Automation to assistive technology, so Narrator, NVDA
+  and JAWS cannot read or navigate a document's text. If you rely on a screen
+  reader, els is not a usable editor for you today, and that is an honest gap
+  rather than a setting to find. Text zoom (Ctrl `+` / `-` / `0`) and a fixed
+  high-legibility theme with a non-blinking caret are what els does offer.
+- **Single, fixed appearance.** No settings UI: colours, fonts and the caret are
+  not configurable by design (see [docs/DESIGN.md](docs/DESIGN.md)). No syntax
+  highlighting and no minimap.
+
 ## Toolchain & tasks
 
 `els` is hosted under `C:\zmal\_els`. zmal is the public front door: the

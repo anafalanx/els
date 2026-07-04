@@ -529,3 +529,83 @@ test declossy-1.5 {reload_from_disk refreshes the decode-lossy marker (no reload
 } -cleanup {
     if {[llength [info commands _els_de_real]]} { catch {rename els::detect_encoding {}} ; rename _els_de_real els::detect_encoding }
 } -result {0 1 1 1}
+
+# ---- astral (U+10000+) and combining/IME sequences ------------------------
+# The round-trip suites above are entirely BMP.  Tcl 9 / Tk 9 carry characters
+# beyond the BMP as single code points (Tcl 8.6 split them into surrogate halves),
+# and IME/emoji input routinely produces astral code points, ZWJ sequences and
+# un-precomposed combining runs.  These guard that such text survives
+# open -> buffer -> save byte-for-byte, re-encodes correctly into the wide
+# encodings (astral needs a surrogate pair in UTF-16 / a 4-byte unit in UTF-32),
+# and is never silently normalised.  Every special code point is a \u/\U escape so
+# the fixtures stay exact -- no fragile literal multibyte bytes in the source.
+
+# emoji, CJK Ext-B, math-bold, a ZWJ family (U+200D joins), emoji + VS16 (U+FE0F),
+# and a skin-tone modifier (U+1F3FD):
+set ::ASTRAL "grin \U0001F600 extB \U00020000 math \U0001D400 fam \U0001F468‍\U0001F469‍\U0001F467‍\U0001F466 heart ❤️ thumb \U0001F44D\U0001F3FD\n"
+
+test astral-1.1 {UTF-8 astral content round-trips byte-for-byte through open + save} -setup {els_reset} -body {
+    set bytes [encoding convertto utf-8 $::ASTRAL]
+    set p [write_raw astral_u8.txt $bytes]
+    els::open $p
+    els::save
+    string equal [read_raw $p] $bytes
+} -result 1
+
+test astral-1.2 {the buffer holds astral characters as single code points (Tcl 9, not surrogate halves)} -setup {els_reset} -body {
+    els::open [write_raw astral_len.txt [encoding convertto utf-8 "\U0001F600\U00020000\n"]]
+    set line [[els::T] get 1.0 "1.end"]
+    # two code points (would be 4 if Tcl split them into surrogate halves) and the
+    # exact astral text survives the decode
+    list [string length $line] [expr {$line eq "\U0001F600\U00020000"}]
+} -result {2 1}
+
+test astral-1.3 {astral content re-encodes into every wide encoding and reopens intact} -setup {els_reset} -body {
+    set path [file join $::ELS_TMP astral_wide.txt]
+    set bad {}
+    # BOM'd wide + UTF-8 (no ICU needed: a BOM self-identifies, and BOM-less astral
+    # UTF-8 validates as UTF-8) -- the point is correct surrogate/4-byte re-encoding
+    foreach {enc bom} {utf-8 0 utf-8 1 utf-16le 1 utf-16be 1 utf-32le 1 utf-32be 1} {
+        els_reset
+        [els::T] insert end $::ASTRAL
+        # compare against the SAME get metric captured before the save, so the
+        # widget's mandatory trailing newline can never skew the result
+        set want [[els::T] get 1.0 "end - 1 char"]
+        set ::els::docEnc($::els::active) $enc
+        set ::els::docBom($::els::active) $bom
+        set ::els::docEol($::els::active) lf
+        set ::els::docPath($::els::active) $path
+        els::save
+        els::open $path
+        if {[[els::T] get 1.0 "end - 1 char"] ne $want} { lappend bad "$enc/$bom" }
+    }
+    set bad
+} -result {}
+
+test astral-2.1 {a decomposed combining sequence is preserved, never normalised to precomposed} -setup {els_reset} -body {
+    # "cafe" + U+0301 (combining acute) must stay 5 code points, NOT fold to the
+    # precomposed U+00E9 form.  els must not apply Unicode normalisation.
+    set decomposed "cafe\u0301\n"
+    set p [write_raw combine.txt [encoding convertto utf-8 $decomposed]]
+    els::open $p
+    set line [[els::T] get 1.0 "1.end"]
+    els::save
+    list [string length $line] [expr {$line eq "cafe\u0301"}] [expr {$line eq "caf\u00e9"}] \
+         [string equal [read_raw $p] [encoding convertto utf-8 $decomposed]]
+} -result {5 1 0 1}
+
+test astral-2.2 {decomposed Hangul jamo stay distinct from the precomposed syllable} -setup {els_reset} -body {
+    set jamo "\u1100\u1161\n"    ;# choseong kiyeok + jungseong a -- NOT precomposed U+AC00
+    els::open [write_raw jamo.txt [encoding convertto utf-8 $jamo]]
+    set line [[els::T] get 1.0 "1.end"]
+    list [string length $line] [expr {$line eq "\uac00"}] [expr {$line eq "\u1100\u1161"}]
+} -result {2 0 1}
+
+test astral-2.3 {astral content survives the swap serialize/deserialize round-trip (crash-recovery format)} -setup {els_reset} -body {
+    [els::T] insert end $::ASTRAL
+    set id $::els::active
+    set want [[els::T] get 1.0 "end - 1 char"]
+    set blob [els::swap_serialize $id [els::session_id]]
+    set rec [els::swap_read [write_raw astral_swap.swp $blob]]
+    expr {[dict exists $rec text] && [dict get $rec text] eq $want}
+} -result 1

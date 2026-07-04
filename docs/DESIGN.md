@@ -65,6 +65,22 @@ A **steady** 2px red bar (`-insertwidth 2 -insertofftime 0`). A blinking cursor
 is a documented distraction; a solid red caret is calmer *and* more distinctive.
 It is els's signature.
 
+### Accessibility, honestly
+
+The steady caret removes one documented barrier, but it does not make els an
+accessible editor. Tk draws its own text surface and exposes no UI Automation
+provider, so Windows screen readers (Narrator, NVDA, JAWS) cannot read or
+navigate document text — a limitation of the toolkit, not a setting els withheld,
+and one no amount of theming fixes. Text zoom and a fixed high-contrast palette
+are the accessibility levers els does have. The user-facing statement of this
+lives in the README's *Requirements & limitations*.
+
+### Platform floor
+
+64-bit Windows 10 (1903+) / 11. els relies on the per-app UTF-8 code page (1903)
+for non-ASCII paths and long-path awareness (1607); the manifest lists 7/8.1 for
+compatibility but they are untested. See the README for the user-facing version.
+
 ### Chrome
 
 The native Windows `vista` ttk theme cannot be recoloured or flattened, so the
