@@ -333,3 +333,75 @@ test scroll-5.2 {non-multiple-of-120 wheel deltas scroll symmetrically} -setup {
     set d [lindex [$w yview] 0]
     list [expr {$b > $a}] [expr {$c == $a}] [expr {$d < $c}]
 } -result {1 1 1}
+
+# ---- Focus mode (dim all but the current line) ----------------------------
+
+test focus-1.1 {Focus mode dims every line except the current one} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "one\ntwo\nthree\nfour\n" ; update
+    $w mark set insert 2.1                            ;# caret on line 2
+    set ::els::focus_mode 1 ; els::set_focus_mode 0
+    # 1 = that line is dimmed; the current line (2) must NOT be
+    list [expr {"focusDim" in [$w tag names 1.0]}] \
+         [expr {"focusDim" in [$w tag names 2.0]}] \
+         [expr {"focusDim" in [$w tag names 3.0]}]
+} -result {1 0 1}
+
+test focus-1.2 {moving the caret flips the dim to follow (delta path)} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "one\ntwo\nthree\nfour\n" ; update
+    $w mark set insert 2.0 ; set ::els::focus_mode 1 ; els::set_focus_mode 0
+    $w mark set insert 4.0 ; els::update_current_line   ;# caret 2 -> 4: delta flip
+    # line 2 (old current) now dimmed; line 4 (new current) now un-dimmed
+    list [expr {"focusDim" in [$w tag names 2.0]}] \
+         [expr {"focusDim" in [$w tag names 4.0]}]
+} -result {1 0}
+
+test focus-1.3 {toggling Focus mode off clears the dim} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "a\nb\nc\n"
+    set ::els::focus_mode 1 ; els::set_focus_mode 0
+    set on [llength [$w tag ranges focusDim]]
+    set ::els::focus_mode 0 ; els::set_focus_mode 0
+    list [expr {$on > 0}] [llength [$w tag ranges focusDim]]
+} -result {1 0}
+
+test focus-1.4 {a line-count change (structural edit) full-retags without stranding a dim} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "one\ntwo\nthree\n" ; update
+    $w mark set insert 3.0 ; set ::els::focus_mode 1 ; els::set_focus_mode 0
+    # insert a line ABOVE the caret: line numbers shift; a naive delta would strand
+    $w insert 1.0 "zero\n" ; $w mark set insert 4.0 ; els::update_current_line
+    # current line (now 4 = "three") must be UN-dimmed; line 1 dimmed
+    list [expr {"focusDim" in [$w tag names 1.0]}] \
+         [expr {"focusDim" in [$w tag names 4.0]}]
+} -result {1 0}
+
+test focus-1.5 {Focus mode persists through save/load config} -setup {els_reset} -body {
+    set ::els::focus_mode 1 ; els::save_geometry
+    set persisted [dict get [raw_read $::els::config_path] focus_mode]
+    set ::els::focus_mode 0 ; els::load_geometry
+    list $persisted $::els::focus_mode
+} -result {1 1}
+
+test focus-1.6 {an equal-line-count multi-line edit re-dims correctly (no stranded line)} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end "one\ntwo\nthree\nfour\n" ; update
+    $w mark set insert 3.0 ; set ::els::focus_mode 1 ; els::set_focus_mode 0
+    # swap lines 1-2 with equal-line-count text: the replace wipes their tags, and
+    # the line count + caret line are UNCHANGED -- the old delta stranded lines 1-2
+    $w replace 1.0 3.0 "two\none\n" ; els::update_current_line
+    list [expr {"focusDim" in [$w tag names 1.0]}] \
+         [expr {"focusDim" in [$w tag names 2.0]}] \
+         [expr {"focusDim" in [$w tag names 3.0]}]
+} -result {1 1 0}
+
+test focus-1.7 {a buffer-replacing reopen keeps Focus mode active (same line count)} -setup {els_reset} -body {
+    set p [els_tmpfile focus2.txt "alpha\nbeta\ngamma\n"]
+    els::open $p ; set id $::els::active ; set w [els::W $id]
+    $w mark set insert 2.0 ; set ::els::focus_mode 1 ; els::set_focus_mode 0
+    els::reopen_with iso8859-1 0             ;# re-decodes the SAME bytes -> same line count
+    # focus must still dim: non-current line 3 dimmed (the old delta left it un-dimmed)
+    list [expr {[llength [$w tag ranges focusDim]] > 0}] \
+         [expr {"focusDim" in [$w tag names 3.0]}]
+} -result {1 1}

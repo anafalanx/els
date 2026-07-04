@@ -122,6 +122,7 @@ namespace eval els {
     variable find_history {}     ;# recent search terms, newest first (cap 16)
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
+    variable focus_mode 0        ;# View ▸ Focus Mode: dim all but the current line
     variable show_linenos 1      ;# View ▸ Line Numbers (persisted)
     variable recent_vs_after ""  ;# deferred recent-list scrollbar show/hide
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
@@ -451,6 +452,10 @@ proc els::load_geometry {} {
         set ::els::show_linenos [expr {$lnv ? 1 : 0}]
         catch {els::set_linenos 0}
     }
+    if {![catch {dict get $data focus_mode} fm] && [string is boolean -strict $fm]} {
+        set ::els::focus_mode [expr {$fm ? 1 : 0}]
+        if {[info exists ::els::docs] && [llength $::els::docs]} { catch {els::set_focus_mode 0} }
+    }
     if {![catch {dict get $data autosave} asv] && [string is boolean -strict $asv]} {
         set ::els::autosave [expr {$asv ? 1 : 0}]
     }
@@ -520,6 +525,7 @@ proc els::save_geometry {} {
         set payload [dict create geometry $geo zoomed $zoomed \
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
+                         focus_mode $::els::focus_mode \
                          line_numbers $::els::show_linenos \
                          autosave $::els::autosave \
                          backups $::els::backups \
@@ -1266,6 +1272,8 @@ proc els::build {} {
         -command els::set_linenos
     .menu.view add checkbutton -label "Show Whitespace" -variable ::els::show_ws \
         -command els::set_show_ws
+    .menu.view add checkbutton -label "Focus Mode" -variable ::els::focus_mode \
+        -command els::set_focus_mode
     .menu.view add checkbutton -label "Always on Top" -variable ::els::always_on_top \
         -command els::set_always_on_top
     .menu.view add separator
@@ -1480,15 +1488,20 @@ proc els::new_doc {{path ""}} {
     $w tag configure wsTrail -background $::els::WSTRAIL
     $w tag configure findAll -background $::els::FINDALL
     $w tag configure findOne -background $::els::FINDONE
+    # Focus mode dims non-current lines with a foreground-only grey (reusing the
+    # quiet line-number grey); background tags don't conflict, and it sits below sel
+    # so selected text on a dimmed line stays legible.
+    $w tag configure focusDim -foreground $::els::GUTTINK
     # stacking, low -> high: current-line wash < space/tab < trailing < matches <
-    # selection (whitespace above the line wash so it shows on the current line;
-    # trailing above space/tab so it wins on a trailing run)
+    # focus-dim (fg) < selection (whitespace above the line wash so it shows on the
+    # current line; trailing above space/tab so it wins on a trailing run)
     $w tag lower currentLine
     $w tag raise wsSpace
     $w tag raise wsTab
     $w tag raise wsTrail
     $w tag raise findAll
     $w tag raise findOne
+    $w tag raise focusDim
     $w tag raise sel
     # let the shared class bindings fire (run before the default Text tag)
     bindtags $w [linsert [bindtags $w] 1 elsText]
@@ -1861,7 +1874,37 @@ proc els::update_current_line {} {
     if {[$w compare "end - 1 char" != 1.0]} {
         $w tag add currentLine "$line.0" "$line.end + 1 char"
     }
+    if {$::els::focus_mode} { els::focus_update $w $line }
     # the gutter's matching current-line band is drawn by els::draw_gutter
+}
+# Focus mode: keep the focusDim tag on every line EXCEPT the current one.  Runs on
+# the caret hot path (every refresh_view / update_current_line), but a full retag
+# is cheap: Tk stores tags as B-tree toggle points, so the whole-buffer remove +
+# two adds are O(log n) (a handful of toggle points), and only the VISIBLE lines
+# actually repaint — the same cost model as the currentLine wash next door.  A full
+# retag every time is what keeps it CORRECT: a delta keyed on line count + caret
+# line is blind to an equal-line-count structural edit (a line swap, a paste over a
+# multi-line selection, a reopen/reload re-decoded to the same line count), which
+# would strand a wrong dim.
+proc els::focus_update {w line} {
+    $w tag remove focusDim 1.0 end
+    if {[$w compare "end - 1 char" != 1.0]} {
+        $w tag add focusDim 1.0 "$line.0"
+        $w tag add focusDim "$line.end + 1 char" end
+    }
+}
+# View ▸ Focus Mode.  On: dim now (a full retag via update_current_line).  Off:
+# clear the dim from every open doc.
+proc els::set_focus_mode {{persist 1}} {
+    if {$::els::focus_mode} {
+        els::update_current_line
+    } else {
+        foreach id $::els::docs {
+            set w [els::W $id]
+            if {[winfo exists $w]} { $w tag remove focusDim 1.0 end }
+        }
+    }
+    if {$persist} { els::save_geometry }
 }
 # Draw the line-number gutter for the CURRENTLY VISIBLE rows only, onto the
 # Canvas .ln.  We ask the text widget where each visible logical line's first
