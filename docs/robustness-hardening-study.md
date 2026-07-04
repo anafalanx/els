@@ -11,6 +11,30 @@
 
 **Scope:** a robustness audit and prioritized hardening plan for els (single-file Tcl/Tk 9.0.3 Windows text editor, `els.tcl`, ~3000 lines). Goal is *robustness, not features*. Grounded in direct code reads, six parallel audits (several with live probes driven via `tests/helpers.tcl` under `tclsh90.exe`), and an adversarial verification pass on every critical/high data-loss claim. Each claim below is tagged **[OBSERVED]** (reproduced by live probe), **[CODE-READ]** (confirmed in source), or **[INFERRED]**.
 
+> ## STATUS UPDATE — 2026-07-04
+>
+> **Every risk ranked in §2 has since been implemented.** This document is now a
+> design record, not a live to-do list; the analysis and line numbers below are
+> preserved as-of-0.30 and are historical.
+>
+> | Risk | Status | Where |
+> |---|---|---|
+> | **R1** non-atomic save | ✅ IMPLEMENTED | `els::write_atomic` + Win32 `ReplaceFileW` (`src/winfs.c`) |
+> | **R2** no swap / crash-recovery | ✅ IMPLEMENTED | swap subsystem + `win_lock_file` liveness locks |
+> | **R3** external-change (lost-update) guard | ✅ IMPLEMENTED (Wave 1) | pre-write `file_sig` vs `savedSig`; prompt / autosave-pause; File ▸ Reload from Disk |
+> | **R4** silent lossy save | ✅ IMPLEMENTED | strict `-profile` gate + consent dialog |
+> | **R5** find long-line freeze | ✅ IMPLEMENTED (Wave 1) | `FIND_MAXHITS` cap + one batched `tag add` |
+> | **R6** no production bgerror / log | ✅ IMPLEMENTED (Wave 1) | `els::bgerror` (flush→log→one note) + rotating `els.log` |
+> | **R7** off-screen geometry | ✅ IMPLEMENTED (Wave 1) | `els::clamp_geometry` vs the true virtual desktop (`win_virtual_screen`) + zoomed-state persistence |
+> | **P3** native `WinMain` capstone | ✅ SHIPPED | `src/els_main.c` (the SEH crash-handler sub-item is deferred — see §7) |
+>
+> **The only ranked item still open is the large-file open guard** (§2 Bucket C / §4 P2-c).
+> Two design points below are now **superseded**: (1) els **does** have single-instance
+> file-handoff — Bucket B's "els has NO single-instance machinery, by design" is obsolete;
+> (2) §8 open questions Q1 (ReplaceFileW) and Q2 (a bounded backups ring, not a single
+> `.bak`) are resolved by shipped code. R1/R3/R5/R6/R7 carry per-section IMPLEMENTED
+> banners below. Test count is now ~458, not the 268 quoted in §5.
+
 ---
 
 ## 1. Executive summary & robustness posture today
@@ -33,20 +57,28 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 
 ### The real gaps (ranked in §2)
 
-1. **Document save is non-atomic** — `els::save` truncates the user's real file before writing. **#1 data-loss risk.**
-2. **No autosave / swap / crash-recovery** for unsaved edits; untitled buffers vanish without a trace on abrupt exit.
-3. **No external-modification detection** — a normal save silently clobbers a file changed on disk by another program (lost update).
-4. **Silent lossy encoding** on save (`-profile replace` writes `?` and reports success).
-5. **UI freeze** in find/replace when many matches land on one very long line (minified JS/CSS/JSON, single-line CSV).
-6. **No production `bgerror`** — the shipped app falls back to Tk's modal "raining dialogs"; **no diagnostic log anywhere.**
-7. **Restored geometry not clamped** to a visible monitor — window strands off-screen after a monitor change.
-8. Minor: no large-file guard; long-path/DPI manifest gaps; `save_geometry` fails silently.
+*(All ✅-marked below shipped after this study — see the STATUS UPDATE box above.)*
+
+1. **Document save is non-atomic** — `els::save` truncates the user's real file before writing. **#1 data-loss risk.** — ✅ DONE (R1)
+2. **No autosave / swap / crash-recovery** for unsaved edits; untitled buffers vanish without a trace on abrupt exit. — ✅ DONE (R2)
+3. **No external-modification detection** — a normal save silently clobbers a file changed on disk by another program (lost update). — ✅ DONE (R3, Wave 1)
+4. **Silent lossy encoding** on save (`-profile replace` writes `?` and reports success). — ✅ DONE (R4)
+5. **UI freeze** in find/replace when many matches land on one very long line (minified JS/CSS/JSON, single-line CSV). — ✅ DONE (R5, Wave 1)
+6. **No production `bgerror`** — the shipped app falls back to Tk's modal "raining dialogs"; **no diagnostic log anywhere.** — ✅ DONE (R6, Wave 1)
+7. **Restored geometry not clamped** to a visible monitor — window strands off-screen after a monitor change. — ✅ DONE (R7, Wave 1)
+8. Minor: no large-file guard *(⏳ still open — the one remaining ranked gap)*; long-path/DPI manifest gaps *(✅ longPathAware done; PerMonitorV2 deliberately deferred)*; `save_geometry` fails silently *(✅ now logs + notes)*.
 
 ---
 
 ## 2. Top risks, ranked
 
 ### R1 — Non-atomic document save truncates the real file before writing **[OBSERVED, verified]**
+
+> **Status — IMPLEMENTED.** `els::save` writes through `els::write_atomic`: a
+> same-directory temp, then Win32 `ReplaceFileW` (`src/winfs.c`, preserves
+> ACL/ADS/attributes) with a `file rename -force` fallback. Tests `save-atomic-*`
+> (`tests/ui.test`) and `winfs-*` (`tests/winfs.test`).
+
 - **Location:** `els::save` els.tcl:1966-1970 (`set fh [::open $docPath($active) w]; fconfigure -translation binary; puts -nonewline; close`). `saveas` (1985) and `save_with` (1839) route through this single write site. *(Verification note: `save_with` only flips encoding/BOM metadata in memory and marks the buffer modified; the actual write is always `els::save`. There is **one** write sink, not two — the fix and tests target `els::save` only.)*
 - **Trigger:** any failure in the window between `open w` and `close` while saving a **writable** file — process crash, power loss, taskkill, disk-full, transient I/O error, antivirus quarantine, OneDrive/network drop.
 - **Current behavior:** the file is truncated to **0 bytes the instant `open w` returns**, before any byte is written (`size_the_moment_after_open_w=0` reproduced on a 27- and a 35-byte file). On mid-write failure the surrounding `catch` fires a `tk_messageBox`, but the original bytes are already gone; the in-memory buffer is the sole surviving copy, and only while the process lives. A simulated partial write left only `"PARTIAL"` (7 bytes) on disk.
@@ -66,6 +98,15 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
   - **One accepted limitation:** on a true first run, between launch and the user dismissing the config-location dialog, `config_path` is unresolved so no lock/swap exists — edits in that sub-second window (during which the modal grabs input) are unrecoverable. Bounded and documented; not worth eagerly creating a swap dir the user may not have chosen.
 
 ### R3 — Lost update: external on-disk change silently overwritten **[OBSERVED, verified]**
+
+> **Status — IMPLEMENTED (Wave 1, 2026-07-04).** `els::save` re-stats the target
+> before writing and compares a content signature (`els::sig_content`, size+crc)
+> against a `savedSigPath`-pinned baseline. A manual save over an externally
+> changed file prompts Overwrite / Reload / Cancel (`els::extmod_ask`); the quiet
+> autosave path never prompts — it sets `docExtModPause` and posts a status note.
+> New **File ▸ Reload from Disk** (`els::reload_from_disk`). Crash-recovered tabs
+> seed the baseline from the swap record. Tests `extmod-*`, `extmod-recover-1.1`.
+
 - **Location:** `els::open` (1929-1933) caches `docPath/docEnc/docBom/docEol/docRaw` but **no mtime/size/ctime/hash**; `els::save` (1966) does no staleness check. grep for `file (mtime|stat|size|ctime)` against on-disk targets = 0 hits.
 - **Trigger:** a file is open in els; another program (git checkout, format-on-save, cloud sync, a second els) rewrites it on disk; the user then saves. **Note: this is an everyday-save hazard, not crash-specific.**
 - **Current behavior:** [OBSERVED] external `"v2-EXTERNAL-EDIT"` content replaced by the stale buffer; `save` returned **rc=1 (success), no prompt**; the external change is permanently gone.
@@ -91,6 +132,12 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 - **Fix:** encode with `-profile strict` first (verified: throws `unexpected character at index 8: 'U+0020AC'`, and `-failindex` returns the partial result + byte offset, enabling position marking); on throw, prompt **keep-this-encoding-and-replace / switch to UTF-8 / cancel**; only fall back to `-profile replace` after explicit consent. No rename → **no atomicity/ACL/ADS pitfall** introduced. (`-failindex` is a *byte* offset into the encoded output → map to a text-widget index for marking; the "switch to UTF-8" branch should reconcile BOM/extension.)
 
 ### R5 — UI freeze in find/replace on a very long line **[OBSERVED]**
+
+> **Status — IMPLEMENTED (Wave 1, 2026-07-04).** `els::find_scan` caps tracked
+> matches at `FIND_MAXHITS` (5000) and `els::find_update` batches the highlight
+> into one `$w tag add findAll {*}[concat {*}$scan]`; the count shows `N+`. Replace
+> All stays uncapped (it must rewrite every match). Tests `perf-4.*`.
+
 - **Location:** `els::find_update` els.tcl:2558-2568 (per-match `$w index "$s + $L chars"` and per-match `$w tag add`); `find_replace_all` ~2642 walks the same ranges with a `regsub` per match.
 - **Trigger:** open a one-/few-line file (minified JS/CSS/JSON, single-line CSV, binary blob), open Find, type a common substring. `find_update` is **O(matches × lineLength)**.
 - **Current behavior:** [OBSERVED] the *same* 5000 matches cost **23 ms across 5000 lines vs 8955 ms on one line (390×)**; a single 25,000-char line with 5000 matches **froze >60 s (OS-killed)**. The 130 ms debounce only coalesces a burst — it does not bound the cost of one evaluation, and Tcl being single-threaded, no `after`/event can preempt the spin (a watchdog `after` never fired).
@@ -98,6 +145,14 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 - **Fix:** in `find_update` (1) cap tracked/highlighted matches (`MAXHITS≈5000`, show `"N+"` in `find_count`); (2) replace the per-match loop with **one batched** `$w tag add findAll {*}$ranges`. Keep `find_replace_all` symmetric (cap + bounded, still reverse-order). Optional defense-in-depth: a wall-clock budget with periodic `update` for regex. *(Regex catastrophic backtracking is **not** the urgent item — the long-line tag-add loop is.)*
 
 ### R6 — No production `bgerror`; no diagnostic log **[CODE-READ + OBSERVED]**
+
+> **Status — IMPLEMENTED (Wave 1, 2026-07-04).** `els::bgerror` (installed only in
+> main's non-probe path) flushes dirty swaps, logs to a rotating `els.log`
+> (`els::log`, ~256 KB + one generation, reentry-latched), and shows one non-modal
+> status note — never a modal, never exit. Persistent swap-write failures surface a
+> per-doc note; `save_geometry` failures log + note. Tests `log-*`, `bgerror-6.4`,
+> `swap-fail-6.*`.
+
 - **Location:** the only `::bgerror` install is inside `if {$startupProbe}` (els.tcl:2876-2877). Normal launch installs none → Tk's default `tk::dialog::error::bgerror` modal-per-error ("raining dialogs"). No app-level log anywhere (the only `*.log` is `tests/helpers.tcl`'s, never created by the app). ~84 `catch {}` blocks swallow errors silently.
 - **Trigger:** any uncaught error in an after-callback, binding, `<<Modified>>` handler, scrollbar/gutter redraw, or find-highlight in the shipped app.
 - **Current behavior:** modal error storm the user must dismiss; no record of field failures (save errors, decode faults, recovery events); a GUI-subsystem build has no console.
@@ -105,6 +160,14 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 - **Fix:** install a production `bgerror` (outside the probe guard) that **flushes all dirty swaps first** (once R2 lands), then **logs** to a small rotating `els.log` next to `els.conf` (~256 KB + one rollover, written via the temp+rename discipline, self-catching so logging can't crash the app), then shows **one** coalesced, de-duplicated, dismissible, parented notice — never a stack of modals; never exit.
 
 ### R7 — Restored geometry not clamped to a visible monitor **[OBSERVED]**
+
+> **Status — IMPLEMENTED (Wave 1, 2026-07-04).** `els::clamp_geometry` resets an
+> off-desktop origin to a safe on-screen value, clamping against the **true virtual
+> desktop** — a new native `els::win_virtual_screen` (`GetSystemMetrics
+> SM_*VIRTUALSCREEN`), NOT `wm maxsize` (which reports only the primary monitor and
+> would teleport a window legitimately on a secondary). Zoomed/maximized state is
+> persisted and restored (`geom_normal` + a `zoomed` config key). Tests `geo-clamp-*`.
+
 - **Location:** `els::load_geometry` els.tcl:281-283 — regexp-validates only the *format* `^[0-9]+x[0-9]+([+-][0-9]+){0,2}$`, then unconditionally `wm geometry . $g`.
 - **Trigger:** window saved on a monitor since disconnected/rearranged (undock, projector, RDP at a different resolution), or a corrupt/hand-edited config.
 - **Current behavior:** [OBSERVED] `+99999+99999` restored at `rootx=32780` off a 3840-wide screen; `-5000-5000` restored at `rootx=-1533 rooty=-3093`. Window is off-screen and unreachable; the user assumes els failed to launch. Recoverable only by editing/deleting `els.conf`.
@@ -136,7 +199,7 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 |---|---|---|---|---|
 | No swap for unsaved edits (R2) [OBSERVED] | Any abrupt exit with dirty tabs | No swap machinery at all | **Critical** | Debounced+periodic atomic per-doc swap under `<configdir>/swap/` |
 | No reconciliation against on-disk state [CODE-READ] | Recover after file changed/missing on disk | No mtime/sig; naive re-save destroys newer disk version | **High** | `savedSig` (size+mtime+hash) in swap; escalate prompt on mismatch; recover into dirty buffer only |
-| Two instances collide on swaps [INFERRED] | Two els processes sharing a config dir (els has NO single-instance machinery — by design, any number may run) | A naive path-keyed swap → B overwrites A's swap; B treats A's *live* swap as a crash orphan | **Medium** | Per-run `sessionId` (pid + random token) + held byte-range liveness lock; scan skips live sessions |
+| Two instances collide on swaps [INFERRED] | Two els processes sharing a config dir (*obsolete as of 2026: els is now single-instance by default — a second launch hands its files to the running one and exits; `ELS_NO_SINGLE_INSTANCE=1` opts out, and the fix below protects that case too*) | A naive path-keyed swap → B overwrites A's swap; B treats A's *live* swap as a crash orphan | **Medium** | ✅ DONE — per-run `sessionId` (pid + random token) + held byte-range liveness lock; scan skips live sessions |
 | Uncaught error exits with no swap flush [OBSERVED] | Background error in shipped app | Tk modal; if it leads to exit, nothing flushed (no swap exists) | **Medium** | Production bgerror flushes swaps first (R6) |
 | C-level segfault loses everything [CODE-READ] | Tcl/Tk C-level crash | The one class pure-Tcl can't pre-empt; nothing survives | **High** (residual) | Capstone (§7): SEH handler blind-writes pre-registered buffers to the **same swap format/dir** |
 
@@ -244,16 +307,25 @@ All families stay hermetic exactly as `helpers.tcl` guarantees (pinned dirs, stu
 
 ## 7. Sequencing & where the native port slots in
 
+*(✅ shipped · ⏳ open · the diagram is the original plan; status added 2026-07-04.)*
+
 ```
-P0-a Atomic document save  ──► closes the #1 truncation window (everyday saves safe)
-P0-b Swap + crash-recovery ──► closes the unsaved-edits/untitled-buffer hole
+✅ P0-a Atomic document save  ──► closes the #1 truncation window (everyday saves safe)
+✅ P0-b Swap + crash-recovery ──► closes the unsaved-edits/untitled-buffer hole
         │  (defines the swap FILE FORMAT + dir layout = the frozen contract)
         ▼
-P1  Find/replace guard · production bgerror + log · strict-encoding gate
-P2  Geometry clamp · ext-mod detection · large-file guard · manifest · save_geometry visibility
+✅ P1  Find/replace guard · production bgerror + log · strict-encoding gate
+   P2  ✅ Geometry clamp · ✅ ext-mod detection · ⏳ large-file guard · ✅ manifest · ✅ save_geometry visibility
         ▼
-P3  Native C WinMain + SEH crash handler  ──► CAPSTONE, depends on P0-b's swap format
+   P3  ✅ Native C WinMain  ·  ⏳ SEH crash handler  ──► CAPSTONE, depends on P0-b's swap format
 ```
+
+**P3 split:** the native `WinMain` shipped (release 0.50, `src/els_main.c`); the SEH
+crash-handler sub-item is **deliberately deferred** — with the shipped ~2 s swap
+cadence a C-level segfault now loses at most a couple of seconds of typing, so the
+large, corrupt-process-context handler is low payoff. Reopen only if `els.log`
+(now that R6 exists) shows real C-level crashes in the field. The **one remaining
+ranked gap is P2-c, the large-file open guard.**
 
 The native port is **last, not first.** The Tcl swap+reconcile layer (P0-b) covers the common abrupt-exit classes a pure-Tcl idle/periodic writer *can* pre-empt — power loss, taskkill, OS reboot, bgerror-exit. A C-level segfault is the **residual tail** that only an OS-level SEH handler can survive, and that handler is near-useless without the Tcl reader that detects orphans, reconciles against disk, and prompts. So: **freeze the swap format/dir now** as the shared contract; ship the Tcl layer; add the thin, write-only C producer afterward. (P2-d's manifest naturally rides along with the native-port build work.)
 

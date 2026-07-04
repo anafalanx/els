@@ -24,8 +24,9 @@ Text, Zed and iA Writer.
 ## Download
 
 Grab the latest **`els.exe`** from the [Releases](../../releases) page. It's one
-file, nothing to install. It's unsigned, so Windows SmartScreen may warn on
-first launch: choose **More info → Run anyway**.
+file, nothing to install. Releases are **code-signed** ("Open Source Developer
+Vincent Vercauteren", via Certum); Windows SmartScreen may still warn on first
+launch until that signature builds reputation — choose **More info → Run anyway**.
 
 To make els open `.txt` and other plain-text files, open **Help > File
 Associations...** and click **Register els with Windows**. That puts els in
@@ -69,13 +70,20 @@ in **Settings > Default apps**.
   Windows as an app that can open files (it never seizes a type's default). els
   then appears in Explorer's **Open with** menu; point any type at it with
   **Open with > Always**, and manage defaults in **Settings > Default apps**.
-- **Go to line**, **Always on Top**, window- and zoom-level persistence,
-  portable/profile `els.conf`, the els look and the awl icon.
+- **Update check** (on launch): els makes one anonymous HTTPS request to the
+  GitHub Releases API to notice a newer version and light a status-bar hint if
+  one exists. Nothing is sent but the request, it fails silently when offline,
+  and it uses Windows' own `curl.exe`. Set the environment variable
+  `ELS_NO_UPDATE_CHECK=1` to turn it off entirely.
+- **Right-click menus**: a context menu on the text (Undo/Cut/Copy/Paste/Select
+  All) and on tabs (Close, Copy Full Path, Open Containing Folder).
+- **Go to line**, **Reload from Disk**, **Always on Top**, window- and zoom-level
+  persistence, portable/profile `els.conf`, the els look and the awl icon.
 
 ## Data safety
 
 A text editor's one unforgivable failure is losing text. els defends against
-that with three mechanisms that work together. None of them needs setup, and
+that with a set of mechanisms that work together. None of them needs setup, and
 none of them ever writes into your files on its own.
 
 **Atomic save.** els never overwrites a file in place. A save first writes the
@@ -126,6 +134,13 @@ happens, els stops and asks: switch the document to UTF-8 (keeps every
 character), save anyway with substitute characters (your choice is remembered
 for that document until you pick another encoding), or cancel. The dialog
 names the first offending character and where it is.
+
+**Changed on disk.** If another program rewrites a file while you have it open
+— a branch switch, a formatter, a sync client — saving would otherwise quietly
+overwrite that change. els notices before it writes: a manual save stops and
+offers to overwrite, reload the file, or cancel, and auto-save pauses that
+document (with a quiet statusbar note) until you decide. **File > Reload from
+Disk** re-reads the current file from disk at any time.
 
 **Previous versions (backups).** Saving is the one moment els overwrites
 your data with new content, so every save that replaces an existing file
