@@ -1923,3 +1923,20 @@ test ctxmenu-1.5 {Open Containing Folder opens the DIR (no /select), correct for
     if {[llength [info commands _els_exec_real]]} { catch {rename ::exec {}} ; rename _els_exec_real ::exec }
     unset -nocomplain ::_els_exec_argv
 } -result {1 {C:\Users\John Doe} 0}
+
+test exec-harden-2.1 {File-Association execs (reg.exe / cmd.exe) use absolute System32 paths, never bare names} -setup {ui_reset} -body {
+    rename ::exec _els_exec_real
+    set ::_els_argv {}
+    proc ::exec {args} { lappend ::_els_argv $args ; return "" }
+    els::assoc_run [list reg.exe add {HKCU\X} /v Y /t REG_SZ /d "" /f]  ;# substitutes reg.exe[0]
+    catch {els::reg_value {HKCU\Software\Classes\.txt} ""}              ;# absolute reg.exe query
+    els::open_default_apps                                              ;# absolute cmd.exe (or open_url)
+    rename ::exec {} ; rename _els_exec_real ::exec
+    set a [lindex $::_els_argv 0] ; set r [lindex $::_els_argv 1] ; set c [lindex $::_els_argv 2]
+    list [string match -nocase {*[/\\]system32[/\\]reg.exe} [lindex $a 0]] \
+         [string match -nocase {*[/\\]system32[/\\]reg.exe} [lindex $r 0]] \
+         [string match -nocase {*[/\\]system32[/\\]cmd.exe} [lindex $c 0]]
+} -cleanup {
+    if {[llength [info commands _els_exec_real]]} { catch {rename ::exec {}} ; rename _els_exec_real ::exec }
+    unset -nocomplain ::_els_argv
+} -result {1 1 1}
