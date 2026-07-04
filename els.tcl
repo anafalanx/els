@@ -1460,6 +1460,15 @@ proc els::build {} {
     bind .ln <Button-4>   { els::scroll scroll -3 units; break }
     bind .ln <Button-5>   { els::scroll scroll  3 units; break }
 
+    # Explorer drop targets.  On Win32 each Tk widget is its own child HWND and
+    # WM_DROPFILES is NOT forwarded to the parent, so a drop is accepted only over a
+    # window we register explicitly: the toplevel's own background here, the
+    # line-number gutter (the editing surface's left edge), and each document's text
+    # widget (registered in new_doc).  The thin chrome strips — tab bar, status bar,
+    # find bar — are deliberately NOT drop zones; the file lands on the text.
+    els::drop_register .
+    els::drop_register .ln
+
     # start with one empty document
     els::new_doc
 }
@@ -1505,6 +1514,9 @@ proc els::new_doc {{path ""}} {
     $w tag raise sel
     # let the shared class bindings fire (run before the default Text tag)
     bindtags $w [linsert [bindtags $w] 1 elsText]
+    # the text area is the primary Explorer drop target (each widget is its own
+    # child HWND, so drops over it don't reach the toplevel's drop registration)
+    els::drop_register $w
     set docPath($id) $path
     set ::els::docEnc($id) utf-8
     set ::els::docBom($id) 0
@@ -3266,6 +3278,28 @@ proc els::raise_window {} {
     catch {wm attributes . -topmost 1}
     after 250 {catch {wm attributes . -topmost [expr {$::els::always_on_top ? 1 : 0}]}}
     catch {focus -force .}
+}
+# Explorer drag-and-drop.  The native windrop helper (src/windrop.c) queues a Tcl
+# event per drop that calls this with the list of dropped paths; open each as a tab
+# and raise els to the front (the user dropped ONTO our window and expects it
+# focused).  Directories and vanished paths are skipped.  Unlike the quiet handoff
+# path, opens here are INTERACTIVE: a deliberate drop should surface the large-file
+# guard and any open error, and a modal is safe now (this runs from the event loop,
+# not a background timer or the pre-UI startup drain).
+proc els::drop_open {paths} {
+    set opened 0
+    foreach p $paths {
+        if {$p eq "" || [file isdirectory $p] || ![file exists $p]} { continue }
+        if {[els::open $p] ne ""} { set opened 1 }
+    }
+    if {$opened} { els::raise_window }
+}
+# Make a Tk window a native file drop target.  A no-op where the native helper is
+# absent (a dev tclsh run, or a build without windrop) — drag-drop is then simply
+# unavailable, and every other path still works.
+proc els::drop_register {w} {
+    if {[llength [info commands ::els::win_drop_register]] == 0} { return }
+    catch {els::win_drop_register [winfo id $w]}
 }
 proc els::handoff_start {} {
     if {[els::single_instance_off] || $::els::selftest} { return }

@@ -105,11 +105,6 @@ Written down so they stay decided:
 - No regex debugger, token-builder, or named-search manager: over-scoped.
 - No modal find/replace dialog.
 
-## Deferred
-
-- **Focus mode**: dim all but the current line (the iA / FocusWriter touch),
-  as a single View toggle. One optional signature flourish.
-
 ## Sources
 
 The study behind this design:

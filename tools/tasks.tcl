@@ -333,7 +333,8 @@ proc task_build-ext {args} {
         set init [string totitle $name]
         puts "cc  [file tail $src] -> build/$name.dll"
         stream [gcc] -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS \
-            -I$inc $src -o $dll -L$lib -ltclstub -static-libgcc -luser32 -lgdi32
+            -I$inc $src -o $dll -L$lib -ltclstub -static-libgcc \
+            -luser32 -lgdi32 -lcomctl32 -lshell32
         lappend lines "package ifneeded $name 0.1 \[list load \[file join \$dir $name.dll\] $init\]"
     }
     set idx [open [P build pkgIndex.tcl] w]
@@ -364,18 +365,21 @@ proc task_build {args} {
     puts "windres build/els.rc -> build/els.res"
     stream [windres] --include-dir [P build] --include-dir $inc \
         [P build els.rc] -O coff -o [P build els.res]
-    puts "cc  els_main.c + icudet.c + winfs.c"
+    puts "cc  els_main.c + icudet.c + winfs.c + windrop.c"
     stream [gcc] -std=c23 -O2 -municode -DUNICODE -D_UNICODE -DSTATIC_BUILD=1 \
-        -DELS_STATIC_ICUDET -DELS_STATIC_WINFS -ffunction-sections -fdata-sections \
+        -DELS_STATIC_ICUDET -DELS_STATIC_WINFS -DELS_STATIC_WINDROP \
+        -ffunction-sections -fdata-sections \
         -c [P src els_main.c] -o [P build els_main.o] -I$inc
     stream [gcc] -std=c23 -O2 -DSTATIC_BUILD=1 -ffunction-sections -fdata-sections \
         -c [P src icudet.c] -o [P build icudet.o] -I$inc
     stream [gcc] -std=c23 -O2 -DSTATIC_BUILD=1 -ffunction-sections -fdata-sections \
         -c [P src winfs.c] -o [P build winfs.o] -I$inc
+    stream [gcc] -std=c23 -O2 -DSTATIC_BUILD=1 -ffunction-sections -fdata-sections \
+        -c [P src windrop.c] -o [P build windrop.o] -I$inc
     puts "ld  -> build/els-bare.exe"
     set bare [P build els-bare.exe]
     stream [gcc] -municode -mwindows -static-libgcc -Wl,--gc-sections \
-        [P build els_main.o] [P build icudet.o] [P build winfs.o] [P build els.res] \
+        [P build els_main.o] [P build icudet.o] [P build winfs.o] [P build windrop.o] [P build els.res] \
         [file join $libd libtcl9tk90.a] [file join $libd libtcl90.a] \
         [file join $libd libtclstub.a] {*}$syslibs -o $bare
     catch {stream [strip-exe] $bare}

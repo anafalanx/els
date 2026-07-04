@@ -41,6 +41,9 @@ extern int Icudet_Init(Tcl_Interp *interp);   /* src/icudet.c (no public header)
 #ifdef ELS_STATIC_WINFS
 extern int Winfs_Init(Tcl_Interp *interp);    /* src/winfs.c -- els::win_replace_file */
 #endif
+#ifdef ELS_STATIC_WINDROP
+extern int Windrop_Init(Tcl_Interp *interp);  /* src/windrop.c -- els::win_drop_register */
+#endif
 
 static int Els_AppInit(Tcl_Interp *interp);
 
@@ -127,6 +130,15 @@ Els_AppInit(
         return TCL_ERROR;
     }
     Tcl_StaticLibrary(interp, "Winfs", Winfs_Init, NULL);
+#endif
+
+#ifdef ELS_STATIC_WINDROP
+    /* els::win_drop_register -- Explorer drag-and-drop (harmless if absent: els.tcl
+     * only registers drop targets when the command exists). */
+    if (Windrop_Init(interp) == TCL_ERROR) {
+        return TCL_ERROR;
+    }
+    Tcl_StaticLibrary(interp, "Windrop", Windrop_Init, NULL);
 #endif
 
     return TCL_OK;

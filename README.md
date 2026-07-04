@@ -49,6 +49,8 @@ in **Settings > Default apps**.
   `backups` folder next to `els.conf`.
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
   state under a flat tab strip; drag a tab to reorder.
+- **Drag and drop**: drop files from Explorer onto the text area to open each in
+  its own tab.
 - **Find & replace** (Ctrl+F / Ctrl+H): Tcl ARE regex with live match
   highlighting, Match Case / Whole Word / Regex, backreferences, an adapt-case
   replace, search history, a wrapped-search indicator, and a built-in regex
@@ -62,6 +64,8 @@ in **Settings > Default apps**.
   lines (View > Line Numbers to toggle, remembered); current-line highlight.
 - **Show Whitespace**: spaces, tabs and trailing whitespace in distinct subdued
   tints.
+- **Focus Mode** (View > Focus Mode): dims every line but the one holding the
+  caret for distraction-free writing; remembered across sessions.
 - **Recent files & session restore**: a compact recent-files manager plus
   reopen-on-start, on by default.
 - **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel, remembered
@@ -76,7 +80,8 @@ in **Settings > Default apps**.
   and it uses Windows' own `curl.exe`. Set the environment variable
   `ELS_NO_UPDATE_CHECK=1` to turn it off entirely.
 - **Right-click menus**: a context menu on the text (Undo/Cut/Copy/Paste/Select
-  All) and on tabs (Close, Copy Full Path, Open Containing Folder).
+  All, plus Find, Go to Line, Reload from Disk, Copy Full Path and Open Containing
+  Folder) and on tabs (Close, Copy Full Path, Open Containing Folder).
 - **Go to line**, **Reload from Disk**, **Always on Top**, window- and zoom-level
   persistence, portable/profile `els.conf`, the els look and the awl icon.
 

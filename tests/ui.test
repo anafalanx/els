@@ -1990,3 +1990,91 @@ test exec-harden-2.1 {File-Association execs (reg.exe / cmd.exe) use absolute Sy
     if {[llength [info commands _els_exec_real]]} { catch {rename ::exec {}} ; rename _els_exec_real ::exec }
     unset -nocomplain ::_els_argv
 } -result {1 1 1}
+
+# ---- drag-and-drop (native windrop; Tcl-side behaviour) ----------------------
+# The WM_DROPFILES path itself is native (src/windrop.c) and can't fire in-process,
+# so these cover the Tcl seam: graceful degradation where the helper is absent, the
+# HWND wiring where it's present, and els::drop_open's open/skip/switch/raise logic.
+
+test drop-1.1 {drop_register is a graceful no-op when the native helper is absent} -setup {ui_reset} -body {
+    # the in-process harness has no windrop (it's compiled only into els.exe), so
+    # registration must simply do nothing — a dev tclsh run still builds a full UI
+    list [llength [info commands ::els::win_drop_register]] [els::drop_register [els::T]]
+} -result {0 {}}
+
+test drop-1.2 {drop_register hands the window's HWND to the native helper when present} -setup {ui_reset} -body {
+    set ::_drop_hwnds {}
+    proc ::els::win_drop_register {hwnd} { lappend ::_drop_hwnds $hwnd ; return "" }
+    els::drop_register [els::T]
+    expr {[lindex $::_drop_hwnds 0] eq [winfo id [els::T]]}
+} -cleanup {
+    catch {rename ::els::win_drop_register {}}
+    unset -nocomplain ::_drop_hwnds
+} -result 1
+
+test drop-1.3 {new_doc registers its own text widget as a drop target} -setup {ui_reset} -body {
+    set ::_drop_hwnds {}
+    proc ::els::win_drop_register {hwnd} { lappend ::_drop_hwnds $hwnd ; return "" }
+    set id [els::new_doc]
+    expr {[winfo id [els::W $id]] in $::_drop_hwnds}
+} -cleanup {
+    catch {rename ::els::win_drop_register {}}
+    unset -nocomplain ::_drop_hwnds
+} -result 1
+
+test drop-1.4 {drop_open opens each dropped file as a tab (first reuses the pristine tab) and raises once} -setup {ui_reset} -body {
+    rename ::els::raise_window ::_els_raise_real
+    set ::_drop_raised 0
+    proc ::els::raise_window {} { incr ::_drop_raised }
+    set a [els_tmpfile drop_a.txt "alpha\n"]
+    set b [els_tmpfile drop_b.txt "beta\n"]
+    els::drop_open [list $a $b]
+    rename ::els::raise_window {} ; rename ::_els_raise_real ::els::raise_window
+    set names {}
+    foreach id $::els::docs { lappend names [file tail $::els::docPath($id)] }
+    list [llength $::els::docs] [lsort $names] $::_drop_raised
+} -cleanup {
+    if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
+    unset -nocomplain ::_drop_raised
+} -result {2 {drop_a.txt drop_b.txt} 1}
+
+test drop-1.5 {drop_open skips directories, missing paths, and empty strings} -setup {ui_reset} -body {
+    rename ::els::raise_window ::_els_raise_real
+    proc ::els::raise_window {} {}
+    set real [els_tmpfile drop_real.txt "hi\n"]
+    set dir  [file join $::ELS_TMP drop_as_dir] ; file mkdir $dir
+    set gone [file join $::ELS_TMP drop_missing_xyz.txt] ; catch {file delete -force $gone}
+    els::drop_open [list "" $dir $gone $real]
+    rename ::els::raise_window {} ; rename ::_els_raise_real ::els::raise_window
+    list [llength $::els::docs] [file tail $::els::docPath($::els::active)]
+} -cleanup {
+    if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
+} -result {1 drop_real.txt}
+
+test drop-1.6 {an all-invalid drop opens nothing, never raises, and keeps the pristine tab} -setup {ui_reset} -body {
+    rename ::els::raise_window ::_els_raise_real
+    set ::_drop_raised 0
+    proc ::els::raise_window {} { incr ::_drop_raised }
+    set dir  [file join $::ELS_TMP drop_only_dir] ; file mkdir $dir
+    set gone [file join $::ELS_TMP drop_none_xyz.txt] ; catch {file delete -force $gone}
+    set before [llength $::els::docs]
+    els::drop_open [list "" $dir $gone]
+    rename ::els::raise_window {} ; rename ::_els_raise_real ::els::raise_window
+    list $before [llength $::els::docs] $::_drop_raised [els::doc_name $::els::active]
+} -cleanup {
+    if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
+    unset -nocomplain ::_drop_raised
+} -result {1 1 0 untitled}
+
+test drop-1.7 {drop_open on an already-open file switches to it, no duplicate tab} -setup {ui_reset} -body {
+    rename ::els::raise_window ::_els_raise_real
+    proc ::els::raise_window {} {}
+    set p [els_tmpfile drop_dup.txt "x\n"]
+    els::open $p ; set fid $::els::active
+    els::new_doc                                  ;# move focus onto a fresh tab
+    els::drop_open [list $p]
+    rename ::els::raise_window {} ; rename ::_els_raise_real ::els::raise_window
+    list [llength $::els::docs] [expr {$::els::active eq $fid}]
+} -cleanup {
+    if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
+} -result {2 1}
