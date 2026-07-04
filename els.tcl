@@ -30,6 +30,7 @@ namespace eval els {
     variable docEol ; array set docEol {}   ;# id -> lf | crlf | cr
     variable docRaw ; array set docRaw {}   ;# id -> exact bytes as loaded ("" = never from disk)
     variable docRecovered ; array set docRecovered {}  ;# id -> 1 if this tab is crash-recovered (unsaved)
+    variable docDecodeLossy; array set docDecodeLossy {} ;# id -> 1 if decode substituted U+FFFD (bad bytes for the encoding)
     variable docLossyOk   ; array set docLossyOk {}    ;# id -> user accepted lossy saves (this session)
     variable docLossyPause; array set docLossyPause {} ;# id -> auto-save paused (unencodable chars)
     variable docExtModPause; array set docExtModPause {} ;# id -> auto-save paused (file changed on disk)
@@ -1575,7 +1576,7 @@ proc els::close_doc {id} {
     els::swap_clear $id   ;# clean close -> the swap is no longer needed
     destroy [els::W $id]
     destroy [els::tabW $id]
-    unset -nocomplain ::els::docRecovered($id)
+    unset -nocomplain ::els::docRecovered($id) ::els::docDecodeLossy($id)
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
         ::els::docEol($id) ::els::docRaw($id) \
@@ -1598,6 +1599,7 @@ proc els::close_doc {id} {
 proc els::tab_text {id} {
     set mark [expr {[els::doc_dirty $id] ? "• " : ""}]
     set tag [expr {[info exists ::els::docRecovered($id)] ? " (recovered)" : ""}]
+    if {[info exists ::els::docDecodeLossy($id)]} { append tag " (replaced)" }
     return "$mark[els::doc_name $id]$tag"
 }
 # Tooltip text for a tab: the document's full native path (empty for untitled).
@@ -2198,7 +2200,12 @@ proc els::cp1252_or_latin1 {raw} {
     if {[regexp {[\x81\x8D\x8F\x90\x9D]} $raw]} { return iso8859-1 }
     return cp1252
 }
-proc els::decode {raw enc bom} {
+# Decode raw bytes to the internal string.  If `lossyVar` is given, set it to 1
+# when the -profile replace decode SUBSTITUTED U+FFFD for bytes the encoding can't
+# hold (silent corruption the user should see before saving — see docDecodeLossy),
+# distinguished from a source that genuinely contains U+FFFD by whether a STRICT
+# decode of the same (BOM-stripped) bytes throws.
+proc els::decode {raw enc bom {lossyVar ""}} {
     if {$bom} {
         # Strip the BOM only when those bytes are actually present: the curated
         # picker can assert bom=1 ("UTF-8 with BOM") on a file that has none,
@@ -2218,7 +2225,17 @@ proc els::decode {raw enc bom} {
             set raw [string range $raw $skip end]
         }
     }
-    return [encoding convertfrom -profile replace $enc $raw]
+    set text [encoding convertfrom -profile replace $enc $raw]
+    if {$lossyVar ne ""} {
+        upvar 1 $lossyVar lossy
+        # fast gate: a clean file has no U+FFFD, so it pays only one string scan.
+        # Only if one is present do we run the (cheap-relative-to-open) strict pass:
+        # strict THROWS exactly when a byte was unrepresentable, i.e. the replace
+        # profile introduced the U+FFFD; if strict succeeds the U+FFFD is genuine.
+        set lossy [expr {[string first � $text] >= 0 \
+                         && [catch {encoding convertfrom -profile strict $enc $raw}]}]
+    }
+    return $text
 }
 proc els::detect_eol {text} {
     # Pick the DOMINANT ending, not the first one seen: first-match priority
@@ -2400,7 +2417,7 @@ proc els::reopen_with {enc bom} {
         if {$ans ne "yes"} return
     }
     set raw $::els::docRaw($id)
-    set text [els::decode $raw $enc $bom]
+    set text [els::decode $raw $enc $bom declossy]
     set eol  [els::detect_eol $text]
     set text [string map [list \r\n \n \r \n] $text]
     set w [els::W $id]
@@ -2410,6 +2427,8 @@ proc els::reopen_with {enc bom} {
     set ::els::docEnc($id) $enc
     set ::els::docBom($id) $bom
     set ::els::docEol($id) $eol
+    # re-evaluate the lossy-decode flag for the newly chosen encoding
+    if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
     # a NEW encoding voids any earlier "lossy is fine" consent for the old one
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     $w edit reset
@@ -2453,7 +2472,7 @@ proc els::reload_from_disk {id} {
     }
     set w [els::W $id]
     lassign [els::detect_encoding $raw] enc bom
-    set text [els::decode $raw $enc $bom]
+    set text [els::decode $raw $enc $bom declossy]
     set eol  [els::detect_eol $text]
     set text [string map [list \r\n \n \r \n] $text]
     set ins [$w index insert]
@@ -2465,6 +2484,9 @@ proc els::reload_from_disk {id} {
     set ::els::docBom($id) $bom
     set ::els::docEol($id) $eol
     set ::els::docRaw($id) $raw
+    # re-reading disk can newly introduce (or clear) U+FFFD substitutions -> refresh
+    # the decode-lossy marker just as open/reopen_with do (always interactive here)
+    if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id) ::els::docExtModPause($id)
     els::cache_saved_sig $id
     unset -nocomplain ::els::docRecovered($id)
@@ -2594,7 +2616,7 @@ proc els::open {{p ""} {quiet 0}} {
         close $fh
         # detect encoding + EOL, decode, normalise the buffer to LF internally
         lassign [els::detect_encoding $raw] enc bom
-        set text [els::decode $raw $enc $bom]
+        set text [els::decode $raw $enc $bom declossy]
         set eol [els::detect_eol $text]
         set text [string map [list \r\n \n \r \n] $text]
         $w delete 1.0 end
@@ -2627,6 +2649,18 @@ proc els::open {{p ""} {quiet 0}} {
     set ::els::docEol($id) $eol
     set ::els::docRaw($id) $raw
     els::cache_saved_sig $id
+    # flag a lossy decode (U+FFFD substituted for bytes the encoding can't hold): the
+    # user sees the replacement chars in the buffer but might not realise they are
+    # decode artifacts and save over the original.  A durable tab marker plus, on an
+    # interactive open, one status note point them at Reopen with Encoding.
+    if {$declossy} {
+        set ::els::docDecodeLossy($id) 1
+        if {!$quiet} {
+            els::status_note "decoded with replacement characters — try Reopen with Encoding"
+        }
+    } else {
+        unset -nocomplain ::els::docDecodeLossy($id)
+    }
     $w edit reset
     $w edit modified 0
     els::switch_to $id
@@ -3823,6 +3857,9 @@ proc els::save {{id ""} {quiet 0}} {
     set ::els::docRaw($id) $bytes
     els::cache_saved_sig $id
     unset -nocomplain ::els::docRecovered($id)   ;# saved -> no longer a recovered tab
+    # the U+FFFD (if any) are now the file's real content, not a decode artifact:
+    # docRaw was just refreshed to the written bytes, so the marker no longer applies
+    unset -nocomplain ::els::docDecodeLossy($id)
     els::swap_clear $id   ;# the file is safely on disk now -> drop the swap
     els::update_tab $id
     els::settitle

@@ -475,3 +475,57 @@ test lossy-1.8 {close-with-save aborts the close when the guard is cancelled} -s
     els::close_doc $id
     list [expr {$id in $::els::docs}] [els::doc_dirty $id]
 } -result {1 1}
+
+# ---- Wave 2: lossy-decode notice (surface silent U+FFFD substitutions) -----
+
+test declossy-1.1 {decode flags a lossy substitution (a byte the encoding can't hold)} -body {
+    set lossy 0
+    set text [els::decode "abc\xFFdef" utf-8 0 lossy]   ;# 0xFF is invalid as UTF-8
+    list [string first � $text] $lossy
+} -result {3 1}
+
+test declossy-1.2 {decode does NOT flag a source that genuinely contains U+FFFD} -body {
+    set lossy 0
+    set text [els::decode "a\xEF\xBF\xBDb" utf-8 0 lossy]   ;# EF BF BD = valid UTF-8 for U+FFFD
+    list [string first � $text] $lossy
+} -result {1 0}
+
+test declossy-1.3 {reopen-with a mismatched encoding flags the tab; a clean reopen clears it} -setup {els_reset} -body {
+    set p [els_tmpfile declossy.txt "hello\n"]
+    els::open $p ; set id $::els::active
+    set ::els::docRaw($id) "ok\xFFbad"                    ;# 0xFF invalid as UTF-8
+    els::reopen_with utf-8 0
+    set flagged [info exists ::els::docDecodeLossy($id)]
+    set marked  [string match "*(replaced)*" [els::tab_text $id]]
+    els::reopen_with iso8859-1 0                          ;# accepts every byte -> not lossy
+    set cleared [expr {![info exists ::els::docDecodeLossy($id)]}]
+    list $flagged $marked $cleared
+} -result {1 1 1}
+
+test declossy-1.4 {saving clears the decode-lossy marker (the chars become real content)} -setup {els_reset} -body {
+    set p [els_tmpfile declossy2.txt "hi\n"]
+    els::open $p ; set id $::els::active
+    set ::els::docDecodeLossy($id) 1                      ;# pretend a lossy decode on open
+    set before [string match "*(replaced)*" [els::tab_text $id]]
+    [els::W $id] insert end "x" ; els::save
+    list $before [info exists ::els::docDecodeLossy($id)]
+} -result {1 0}
+
+test declossy-1.5 {reload_from_disk refreshes the decode-lossy marker (no reload false-negative)} -setup {els_reset} -body {
+    set p [els_tmpfile declossy3.txt "clean\n"]
+    els::open $p ; set id $::els::active                 ;# clean open, no marker
+    set before [info exists ::els::docDecodeLossy($id)]
+    # externally rewrite with a byte invalid as UTF-8, and force UTF-8 detection so
+    # the reload path is deterministic (detect_encoding would otherwise adapt)
+    raw_write $p "ok\xFFbad"
+    rename els::detect_encoding _els_de_real
+    proc els::detect_encoding {raw} { return {utf-8 0} }
+    els::reload_from_disk $id
+    set flag [info exists ::els::docDecodeLossy($id)]
+    set mark [string match "*(replaced)*" [els::tab_text $id]]
+    raw_write $p "all clean now" ; els::reload_from_disk $id     ;# clean -> marker clears
+    set cleared [expr {![info exists ::els::docDecodeLossy($id)]}]
+    list $before $flag $mark $cleared
+} -cleanup {
+    if {[llength [info commands _els_de_real]]} { catch {rename els::detect_encoding {}} ; rename _els_de_real els::detect_encoding }
+} -result {0 1 1 1}

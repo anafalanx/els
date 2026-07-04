@@ -131,7 +131,7 @@ proc els_reset {} {
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    foreach a {docPath docEnc docBom docEol docRaw docRecovered swapSig savedSig
+    foreach a {docPath docEnc docBom docEol docRaw docRecovered docDecodeLossy swapSig savedSig
                savedSigPath dirtySince loading docLossyOk docLossyPause docExtModPause
                swap_fail_streak} {
         array unset ::els::$a
