@@ -1960,6 +1960,20 @@ test ctxmenu-1.5 {Open Containing Folder opens the DIR (no /select), correct for
     unset -nocomplain ::_els_exec_argv
 } -result {1 {C:\Users\John Doe} 0}
 
+test ctxmenu-1.6 {extended right-click items exist; file items grey out for an untitled doc} -setup {ui_reset} -body {
+    set w [els::T]
+    els::popup_text_menu $w 5 5                       ;# untitled active doc
+    set findState  [.txtpop entrycget "Find..." -state]
+    set gotoState  [.txtpop entrycget "Go to Line..." -state]
+    set reloadUnt  [.txtpop entrycget "Reload from Disk" -state]
+    set copyUnt    [.txtpop entrycget "Copy Full Path" -state]
+    set p [raw_write ctxext.txt "hi\n"] ; els::open $p
+    els::popup_text_menu [els::T] 5 5                 ;# file-backed active doc
+    set reloadFiled [.txtpop entrycget "Reload from Disk" -state]
+    set openFiled   [.txtpop entrycget "Open Containing Folder" -state]
+    list $findState $gotoState $reloadUnt $copyUnt $reloadFiled $openFiled
+} -result {normal normal disabled disabled normal normal}
+
 test exec-harden-2.1 {File-Association execs (reg.exe / cmd.exe) use absolute System32 paths, never bare names} -setup {ui_reset} -body {
     rename ::exec _els_exec_real
     set ::_els_argv {}

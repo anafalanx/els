@@ -2357,6 +2357,15 @@ proc els::build_text_menu {} {
     .txtpop add command -label Paste -command {els::menu_event <<Paste>>}
     .txtpop add separator
     .txtpop add command -label "Select All" -command {els::menu_event <<SelectAll>>}
+    .txtpop add separator
+    .txtpop add command -label "Find..."      -command {els::find_show find}
+    .txtpop add command -label "Go to Line..." -command els::goto_line
+    .txtpop add separator
+    # file/location items — target the ACTIVE doc at invoke time (the menu is built
+    # once and reused), disabled below for an untitled/never-saved document
+    .txtpop add command -label "Reload from Disk"       -command els::reload
+    .txtpop add command -label "Copy Full Path"         -command {els::tab_copy_path $::els::active}
+    .txtpop add command -label "Open Containing Folder" -command {els::tab_reveal $::els::active}
 }
 proc els::popup_text_menu {w x y} {
     if {$::els::active eq ""} return
@@ -2365,11 +2374,16 @@ proc els::popup_text_menu {w x y} {
     set canUndo  [expr {![catch {$w edit canundo} u] && $u}]
     set canRedo  [expr {![catch {$w edit canredo} r] && $r}]
     set canPaste [expr {![catch {clipboard get} cb] && $cb ne ""}]
+    set pathed   [expr {[info exists ::els::docPath($::els::active)] && $::els::docPath($::els::active) ne ""}]
     .txtpop entryconfigure Undo  -state [expr {$canUndo  ? "normal" : "disabled"}]
     .txtpop entryconfigure Redo  -state [expr {$canRedo  ? "normal" : "disabled"}]
     .txtpop entryconfigure Cut   -state [expr {$hasSel   ? "normal" : "disabled"}]
     .txtpop entryconfigure Copy  -state [expr {$hasSel   ? "normal" : "disabled"}]
     .txtpop entryconfigure Paste -state [expr {$canPaste ? "normal" : "disabled"}]
+    set fstate [expr {$pathed ? "normal" : "disabled"}]
+    .txtpop entryconfigure "Reload from Disk"       -state $fstate
+    .txtpop entryconfigure "Copy Full Path"         -state $fstate
+    .txtpop entryconfigure "Open Containing Folder" -state $fstate
     tk_popup .txtpop $x $y
 }
 # Tab context menu: Close, plus (for a file-backed tab) Copy Full Path and Open
