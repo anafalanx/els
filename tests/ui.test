@@ -1214,6 +1214,72 @@ test cfg-2.2 {a config that is not a dict at all is ignored, not fatal} -setup {
     set rc
 } -result 0
 
+# ---- R7: off-screen geometry clamp + zoomed-state persistence ------------
+# clamp_geometry is pure (the VIRTUAL desktop rect {vx vy vw vh} is passed in), so
+# these are deterministic and exercise real multi-monitor topologies with no screen.
+
+test geo-clamp-2.1 {a huge positive origin (resolution change / corrupt config) is reset, size kept} -body {
+    els::clamp_geometry 900x620+99999+99999 0 0 1920 1080
+} -result 900x620+60+60
+
+test geo-clamp-2.2 {a far-negative origin (disconnected left/top monitor) is reset} -body {
+    els::clamp_geometry 900x620-5000-5000 0 0 1920 1080
+} -result 900x620+60+60
+
+test geo-clamp-2.3 {a normal on-screen position is left untouched} -body {
+    els::clamp_geometry 900x620+100+80 0 0 1920 1080
+} -result 900x620+100+80
+
+test geo-clamp-2.4 {a legitimate negative coord on a connected LEFT monitor is kept} -body {
+    # virtual desktop spans [-1920, 1920]: -1900 is a window on the left monitor
+    els::clamp_geometry 900x620-1900+100 -1920 0 3840 1080
+} -result 900x620-1900+100
+
+test geo-clamp-2.4b {a window on a connected RIGHT/below secondary monitor is kept (the wm-maxsize regression)} -body {
+    # virtual desktop spans [0, 3840]: +2000 is on the right monitor.  wm maxsize
+    # would report only the primary (1920) and wrongly teleport this to +60+60.
+    list [els::clamp_geometry 900x620+2000+100 0 0 3840 1080] \
+         [els::clamp_geometry 900x620+400+1300 0 0 1920 2160]
+} -result {900x620+2000+100 900x620+400+1300}
+
+test geo-clamp-2.5 {a size-only geometry (no offset) passes through unchanged} -body {
+    els::clamp_geometry 900x620 0 0 1920 1080
+} -result 900x620
+
+test geo-clamp-2.5b {virtual_screen returns a 4-int rect with a positive width} -setup {ui_reset} -body {
+    set r [els::virtual_screen]
+    list [llength $r] [expr {[lindex $r 2] > 0 && [lindex $r 3] > 0}] \
+         [string is integer -strict [lindex $r 0]]
+} -result {4 1 1}
+
+test geo-clamp-2.6 {save_geometry persists a zoomed boolean alongside the geometry} -setup {ui_reset} -body {
+    els::save_geometry                                    ;# `.` is normal here
+    set data [raw_read $::els::config_path]
+    list [dict get $data zoomed] [string is boolean -strict [dict get $data zoomed]] \
+         [regexp {^[0-9]+x[0-9]+} [dict get $data geometry]]
+} -result {0 1 1}
+
+test geo-clamp-2.7 {load_geometry tolerates a zoomed key (and a bogus one) without aborting} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w]
+    puts $fh {geometry 800x600+40+40 zoomed 1}
+    close $fh
+    set rc1 [catch {els::load_geometry}]
+    set fh [open $f w] ; puts $fh {geometry 800x600+40+40 zoomed notabool} ; close $fh
+    set rc2 [catch {els::load_geometry}]
+    catch {file delete -force $f}
+    list $rc1 $rc2
+} -cleanup {catch {wm state . normal}} -result {0 0}
+
+test geo-clamp-2.8 {load_geometry seeds geom_normal from the applied rect so a zoomed quit keeps the normal window} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w] ; puts $fh {geometry 800x600+120+90} ; close $fh   ;# on-screen, not zoomed
+    set ::els::geom_normal ""
+    els::load_geometry
+    catch {file delete -force $f}
+    set ::els::geom_normal
+} -result {800x600+120+90}
+
 test cfg-2.3 {LOCALAPPDATA-unset fallback resolves a real home dir (no literal ~)} -setup {ui_reset} -body {
     set saved $::env(LOCALAPPDATA)
     unset ::env(LOCALAPPDATA)
@@ -1688,3 +1754,172 @@ test undo-5.1 {menu Undo refreshes Ln/Col and the current-line wash} -setup {ui_
     set fresh [string equal [.sb.pos cget -text] "Ln $L Col [expr {$C + 1}]"]
     list $fresh [expr {[llength [$w tag ranges currentLine]] > 0}]
 } -result {1 1}
+
+# ---- R6: production bgerror + rotating els.log + failure visibility -------
+
+test log-6.1 {els::log appends a timestamped, levelled line to els.log next to els.conf} -setup {ui_reset} -body {
+    set lf [file join [file dirname $::els::config_path] els.log]
+    catch {file delete -force $lf}
+    els::log info "hello from the log"
+    set txt [raw_read $lf]
+    catch {file delete -force $lf}
+    list [string match {*\[info\] hello from the log*} $txt] \
+         [regexp {^[0-9]{4}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] } $txt]
+} -result {1 1}
+
+test log-6.2 {els.log rotates to els.log.1 past the ~256 KB cap, then starts fresh} -setup {ui_reset} -body {
+    set lf [file join [file dirname $::els::config_path] els.log]
+    catch {file delete -force $lf} ; catch {file delete -force $lf.1}
+    set fh [open $lf w] ; puts -nonewline $fh [string repeat x 300000] ; close $fh
+    els::log info "after rotation"
+    set rotated [file exists $lf.1]
+    set fresh [raw_read $lf]
+    catch {file delete -force $lf} ; catch {file delete -force $lf.1}
+    list $rotated [string match {*after rotation*} $fresh] [string match {*xxxxx*} $fresh]
+} -result {1 1 0}
+
+test log-6.3 {the reentry latch stops els::log recursing (a logging failure cannot loop)} -setup {ui_reset} -cleanup {set ::els::log_active 0} -body {
+    set lf [file join [file dirname $::els::config_path] els.log]
+    catch {file delete -force $lf}
+    set ::els::log_active 1                 ;# simulate "already inside els::log"
+    els::log info "should not appear"
+    set ::els::log_active 0
+    set existed [file exists $lf]
+    catch {file delete -force $lf}
+    set existed
+} -result 0
+
+test bgerror-6.4 {els::bgerror logs the trace and posts one non-modal note, never raises} -setup {ui_reset} -body {
+    set lf [file join [file dirname $::els::config_path] els.log]
+    catch {file delete -force $lf}
+    set rc [catch {els::bgerror "boom" [dict create -errorinfo "boom\n  while executing \"X\""]}]
+    set txt [raw_read $lf]
+    catch {file delete -force $lf}
+    list $rc [string match {*while executing*} $txt] \
+         [string match {*internal error*} [.sb.name cget -text]]
+} -result {0 1 1}
+
+test swap-fail-6.5 {persistent swap-write failure surfaces a note after ~3 straight failures} -setup {ui_reset} -body {
+    set p [raw_write swf.txt "content\n"]
+    els::open $p ; set id $::els::active
+    set ::els::swap_enabled 1
+    [els::W $id] insert end "dirty edit" ; els::swap_touch
+    rename els::write_atomic _els_wa_real
+    proc els::write_atomic {args} { return "forced failure" }
+    els::swap_flush_doc $id ; set s1 $::els::swap_fail_streak($id)
+    els::swap_flush_doc $id ; set s2 $::els::swap_fail_streak($id)
+    els::swap_flush_doc $id ; set s3 $::els::swap_fail_streak($id)
+    set noted [string match {*crash protection is failing*} [.sb.name cget -text]]
+    list $s1 $s2 $s3 $noted
+} -cleanup {
+    if {[llength [info commands _els_wa_real]]} {
+        catch {rename els::write_atomic {}}
+        rename _els_wa_real els::write_atomic
+    }
+    set ::els::swap_enabled 0
+} -result {1 2 3 1}
+
+test swap-fail-6.6 {a healthy swap write resets that doc's failure streak} -setup {ui_reset} -body {
+    set p [raw_write swf2.txt "content\n"]
+    els::open $p ; set id $::els::active
+    set ::els::swap_enabled 1
+    [els::W $id] insert end "dirty" ; els::swap_touch
+    set ::els::swap_fail_streak($id) 2            ;# pretend two prior failures
+    els::swap_flush_doc $id                        ;# a real, successful swap write
+    set streak $::els::swap_fail_streak($id)
+    els::swap_clear $id
+    set ::els::swap_enabled 0
+    set streak
+} -result 0
+
+test swap-fail-6.7 {a doc failing on a flaky mount still warns even while another doc keeps succeeding} -setup {ui_reset} -body {
+    set pa [raw_write swfA.txt "aaa\n"] ; set pb [raw_write swfB.txt "bbb\n"]
+    els::open $pa ; set a $::els::active
+    els::open $pb ; set b $::els::active
+    set ::els::swap_enabled 1
+    [els::W $a] insert end "edit a" ; [els::W $b] insert end "edit b"
+    # write_atomic fails ONLY for doc A's swap path; B (and everything else) succeeds
+    set apath [els::swap_path [els::session_id] $a]
+    rename els::write_atomic _els_wa_real
+    proc els::write_atomic {path args} {
+        if {$path eq $::_els_failpath} { return "forced failure" }
+        return [_els_wa_real $path {*}$args]
+    }
+    set ::_els_failpath $apath
+    # three full all-docs flush passes (the real timer path): A fails every time,
+    # B succeeds the first pass then no-ops (content unchanged) — either way healthy
+    foreach _ {1 2 3} { els::swap_flush_all }
+    list $::els::swap_fail_streak($a) $::els::swap_fail_streak($b) \
+         [string match {*crash protection is failing*} [.sb.name cget -text]]
+} -cleanup {
+    if {[llength [info commands _els_wa_real]]} {
+        catch {rename els::write_atomic {}}
+        rename _els_wa_real els::write_atomic
+    }
+    unset -nocomplain ::_els_failpath
+    set ::els::swap_enabled 0
+} -result {3 0 1}
+
+# ---- right-click context menus + Select All -------------------------------
+
+test ctxmenu-1.1 {the Edit menu offers Select All} -setup {ui_reset} -body {
+    set found 0
+    for {set i 0} {$i <= [.menu.edit index end]} {incr i} {
+        if {[.menu.edit type $i] eq "command" \
+                && ![catch {.menu.edit entrycget $i -label} lbl] && $lbl eq "Select All"} {
+            set found 1
+        }
+    }
+    set found
+} -result 1
+
+test ctxmenu-1.2 {right-click text menu: Cut/Copy track the selection} -setup {ui_reset} -body {
+    set w [els::T]
+    $w insert end "hello world"
+    els::popup_text_menu $w 10 10               ;# no selection
+    set noSel [list [.txtpop entrycget Cut -state] [.txtpop entrycget Copy -state]]
+    $w tag add sel 1.0 1.5
+    els::popup_text_menu $w 10 10               ;# with selection
+    set withSel [list [.txtpop entrycget Cut -state] [.txtpop entrycget Copy -state]]
+    list $noSel $withSel
+} -result {{disabled disabled} {normal normal}}
+
+test ctxmenu-1.3 {Undo is disabled on a pristine buffer, enabled after an edit} -setup {ui_reset} -body {
+    set w [els::T]
+    els::popup_text_menu $w 5 5
+    set before [.txtpop entrycget Undo -state]
+    $w insert end "typed" ; $w edit separator
+    els::popup_text_menu $w 5 5
+    set after [.txtpop entrycget Undo -state]
+    list $before $after
+} -result {disabled normal}
+
+test ctxmenu-1.4 {tab menu: path entries disabled for untitled, enabled for a file; Copy Full Path copies it} -setup {ui_reset} -body {
+    set id $::els::active
+    els::popup_tab_menu $id 5 5
+    set untitled [.tabpop entrycget "Copy Full Path" -state]
+    set p [raw_write ctx.txt "hi\n"]
+    els::open $p ; set fid $::els::active
+    els::popup_tab_menu $fid 5 5
+    set filed [.tabpop entrycget "Copy Full Path" -state]
+    clipboard clear
+    els::tab_copy_path $fid
+    set clip [clipboard get]
+    list $untitled $filed [string match "*ctx.txt" $clip]
+} -result {disabled normal 1}
+
+test ctxmenu-1.5 {Open Containing Folder opens the DIR (no /select), correct for spaced paths} -setup {ui_reset} -body {
+    set id $::els::active
+    set ::els::docPath($id) "C:/Users/John Doe/notes.txt"
+    rename ::exec _els_exec_real
+    set ::_els_exec_argv ""
+    proc ::exec {args} { set ::_els_exec_argv $args ; return "" }
+    els::tab_reveal $id
+    rename ::exec {} ; rename _els_exec_real ::exec
+    list [string match -nocase "*explorer.exe" [lindex $::_els_exec_argv 0]] \
+         [lindex $::_els_exec_argv 1] \
+         [string match "*/select,*" $::_els_exec_argv]
+} -cleanup {
+    if {[llength [info commands _els_exec_real]]} { catch {rename ::exec {}} ; rename _els_exec_real ::exec }
+    unset -nocomplain ::_els_exec_argv
+} -result {1 {C:\Users\John Doe} 0}

@@ -32,6 +32,7 @@ namespace eval els {
     variable docRecovered ; array set docRecovered {}  ;# id -> 1 if this tab is crash-recovered (unsaved)
     variable docLossyOk   ; array set docLossyOk {}    ;# id -> user accepted lossy saves (this session)
     variable docLossyPause; array set docLossyPause {} ;# id -> auto-save paused (unencodable chars)
+    variable docExtModPause; array set docExtModPause {} ;# id -> auto-save paused (file changed on disk)
     variable status_note_after ""   ;# transient statusbar note timer
     variable autosave 0             ;# File ▸ Auto-save (opt-in, persisted)
     variable autosave_after ""      ;# debounced auto-save flush timer
@@ -64,9 +65,13 @@ namespace eval els {
     variable handoff_after ""       ;# primary's handoff-spool poll (single-instance)
     variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
     variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
+    variable log_active 0           ;# reentry latch: a failing els::log must not recurse via bgerror
+    variable swap_fail_streak ; array set swap_fail_streak {} ;# id -> consecutive swap-write failures (per doc)
+    variable geom_save_warned 0     ;# one-shot: settings-persist failure already surfaced this streak
     variable recover_claims {}      ;# .claimed markers created by THIS session's scan
     variable swapSig    ; array set swapSig    {}  ;# id -> last-written buffer sig "chars:crc"
     variable savedSig   ; array set savedSig   {}  ;# id -> on-disk file sig "size:mtime:crc" ("" untitled)
+    variable savedSigPath; array set savedSigPath {} ;# id -> path savedSig was cached for (pins the R3 baseline)
     variable dirtySince ; array set dirtySince {}  ;# id -> 1 if edited since last successful swap
     variable loading    ; array set loading    {}  ;# id -> 1 while open/recovery mutate identity
     variable SWAP_SIG_FULL_CAP  4194304    ;# chars: above this an idle dirty doc reuses its cached sig
@@ -108,6 +113,8 @@ namespace eval els {
     variable find_matches {}     ;# list of {start end} index pairs in the active doc
     variable find_current -1     ;# index into find_matches
     variable find_count ""       ;# status text e.g. "3 of 12"
+    variable FIND_MAXHITS 5000   ;# cap tracked/highlighted matches; the count shows "N+"
+    variable find_truncated 0    ;# did the last scan hit FIND_MAXHITS?  (drives the "+")
     variable find_adapt 0        ;# adapt-case replace (replacement follows the match's case)
     variable find_history {}     ;# recent search terms, newest first (cap 16)
     variable find_hidx -1        ;# position while cycling history with Up/Down
@@ -116,6 +123,8 @@ namespace eval els {
     variable recent_vs_after ""  ;# deferred recent-list scrollbar show/hide
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
     variable always_on_top 0     ;# View ▸ Always on Top (wm -topmost)
+    variable geom_normal ""      ;# last NORMAL-state `wm geometry .` (tracked so a
+                                 ;# maximized quit still persists a real window rect)
     variable font_size 11        ;# document text size (points); the family is fixed
     variable vs_shown -1         ;# vertical scrollbar visibility (auto-hidden when content fits)
     variable vs_after ""         ;# pending (idle) vertical scrollbar-visibility update
@@ -353,6 +362,41 @@ proc els::config_choice_dialog {near appdata} {
     wm geometry $top +$x+$y
     catch {grab $top}
 }
+# The VIRTUAL desktop rect {x y w h} — the bounding box of ALL monitors, with a
+# possibly-negative top-left.  From the native GetSystemMetrics(SM_*VIRTUALSCREEN)
+# helper; falls back to {0 0 <wm maxsize>} for a dev/tclsh run without the native
+# command (single-monitor-correct only — the shipped exe always has the helper).
+proc els::virtual_screen {} {
+    if {[llength [info commands ::els::win_virtual_screen]]} {
+        if {![catch {els::win_virtual_screen} r] && [llength $r] == 4 && [lindex $r 2] > 0} {
+            return $r
+        }
+    }
+    return [list 0 0 {*}[wm maxsize .]]
+}
+# Clamp a saved "WxH+X+Y" so a window saved on a since-disconnected monitor (or a
+# corrupt/hand-edited config) cannot restore fully off-screen, where it looks like
+# els failed to launch and is unrecoverable without deleting els.conf (R7).  The
+# virtual-desktop rect {vx vy vw vh} is passed in (all monitors, real origin) so
+# this stays a pure, testable function.  We keep the saved size and reset only the
+# ORIGIN — to +60+60 (always on the primary, whose top-left is 0,0 on Windows) —
+# when the title bar has no reachable presence on any monitor.  A window on a
+# monitor left/above (negative coords) or right/below the primary is KEPT because
+# the real virtual rect covers it.  A size-only geometry is returned unchanged.
+proc els::clamp_geometry {g vx vy vw vh} {
+    if {[regexp {^([0-9]+)x([0-9]+)([+-][0-9]+)([+-][0-9]+)$} $g -> W H X Y]} {
+        set m 90   ;# min grabbable title-bar presence on the desktop
+        # the title bar's top edge must sit within the desktop vertically, and the
+        # window must overlap it horizontally by at least m px
+        set titleY  [expr {$Y >= $vy && $Y <= $vy + $vh - $m}]
+        set overlapX [expr {$X + $W > $vx + $m && $X < $vx + $vw - $m}]
+        if {!($titleY && $overlapX)} {
+            return "${W}x${H}+60+60"
+        }
+    }
+    return $g
+}
+
 # els persists a tiny config dict (geometry + recent).  Readers/writers tolerate
 # an empty/unset path, a missing file, or missing keys (forward/back compat).
 proc els::load_geometry {} {
@@ -369,7 +413,18 @@ proc els::load_geometry {} {
     # until the user found and deleted the config.  Readers tolerate anything.
     if {![catch {dict get $data geometry} g] && \
         [regexp {^[0-9]+x[0-9]+([+-][0-9]+[+-][0-9]+)?$} $g]} {
-        catch {wm geometry . $g}
+        set cg [els::clamp_geometry $g {*}[els::virtual_screen]]
+        catch {wm geometry . $cg}
+        # seed the normal-geometry baseline NOW, before any zoom: the <Configure>
+        # tracker only fires later, so on a restore-into-zoomed session (below)
+        # geom_normal would otherwise stay "" and a maximized quit would persist
+        # the maximized rect as the normal window (R7)
+        set ::els::geom_normal $cg
+    }
+    # restore a maximized session (persisted separately from the normal geometry
+    # so a maximized quit doesn't strand the huge rect as a "normal" window)
+    if {![catch {dict get $data zoomed} zm] && [string is boolean -strict $zm] && $zm} {
+        catch {wm state . zoomed}
     }
     if {![catch {dict get $data recent} r]} {
         catch {set ::els::recent [els::recent_sanitize $r]}
@@ -413,6 +468,10 @@ proc els::load_geometry {} {
         catch {set ::els::session_active [els::session_path $sa]}
     }
 }
+# Record the window's normal-state geometry (see the <Configure> binding).
+proc els::track_geometry {} {
+    if {[wm state .] eq "normal"} { catch {set ::els::geom_normal [wm geometry .]} }
+}
 proc els::save_geometry {} {
     if {$::els::selftest} { return }
     set f [els::config_file]
@@ -432,7 +491,16 @@ proc els::save_geometry {} {
             set sf $::els::session_files
             set sa $::els::session_active
         }
-        set payload [dict create geometry [wm geometry .] \
+        # persist the NORMAL geometry + a zoomed flag, not the live rect (which is
+        # the maximized rect while zoomed) — so a maximized quit restores maximized
+        # over a sane underlying window, not a monitor-sized "normal" window (R7)
+        set zoomed [expr {[wm state .] eq "zoomed"}]
+        if {$zoomed && $::els::geom_normal ne ""} {
+            set geo $::els::geom_normal
+        } else {
+            set geo [wm geometry .]
+        }
+        set payload [dict create geometry $geo zoomed $zoomed \
                          recent $::els::recent word_wrap $::els::word_wrap \
                          show_whitespace $::els::show_ws \
                          line_numbers $::els::show_linenos \
@@ -454,7 +522,19 @@ proc els::save_geometry {} {
         set fh [::open $tmp w]
         try { puts $fh $payload } finally { close $fh }
         file rename -force $tmp $f
-    }]} { catch {file delete -force $tmp} ; return }
+    } e]} {
+        catch {file delete -force $tmp}
+        # persistence failure was silent before: prefs/session simply weren't
+        # saved.  Log always; note once per streak so a read-only/full config dir
+        # doesn't spam on every zoom notch.  Never block (this also runs at quit).
+        catch {els::log warn "could not persist settings to $f: $e"}
+        if {!$::els::geom_save_warned} {
+            set ::els::geom_save_warned 1
+            catch {els::status_note "settings could not be saved"}
+        }
+        return
+    }
+    set ::els::geom_save_warned 0
 }
 
 proc els::session_path {p} {
@@ -909,13 +989,17 @@ proc els::assoc_unregister_commands {exe} {
     return $cmds
 }
 proc els::assoc_run {cmd} {
-    exec {*}$cmd
+    set exe [els::system32 reg.exe]
+    if {$exe eq ""} return   ;# fail safe rather than a bare-name exec (CWD planting)
+    exec {*}[lreplace $cmd 0 0 $exe]
 }
 # Read a single registry value ("" = the key's default).  Returns "" if absent.
 # The value name is matched to its column (not as a substring), and reg.exe's
 # "(value not set)" sentinel for an empty default is normalized to "".
 proc els::reg_value {key {val ""}} {
-    if {$val eq ""} { set q [list reg.exe query $key /ve] } else { set q [list reg.exe query $key /v $val] }
+    set exe [els::system32 reg.exe]
+    if {$exe eq ""} { return "" }   ;# fail safe rather than a bare-name exec (CWD planting)
+    if {$val eq ""} { set q [list $exe query $key /ve] } else { set q [list $exe query $key /v $val] }
     if {[catch {exec {*}$q} out]} { return "" }
     return [els::reg_parse $out]
 }
@@ -948,9 +1032,9 @@ proc els::assoc_registered {} {
     return [string match -nocase "*${appExe}*" $cmd]
 }
 proc els::open_default_apps {} {
-    if {[catch {exec cmd.exe /c start "" ms-settings:defaultapps &}]} {
-        els::open_url ms-settings:defaultapps
-    }
+    set cmd [els::system32 cmd.exe]   ;# absolute path: never a planted cmd.exe (CWD planting)
+    if {$cmd ne "" && ![catch {exec $cmd /c start "" ms-settings:defaultapps &}]} { return }
+    els::open_url ms-settings:defaultapps
 }
 # Register / unregister actions, driven by the dialog buttons.  Both re-render the
 # dialog so its status line and buttons reflect the new reality.
@@ -1130,6 +1214,7 @@ proc els::build {} {
     menu .menu.file.recent
     .menu.file add cascade -label "Open Recent" -menu .menu.file.recent
     els::recent_rebuild
+    .menu.file add command -label "Reload from Disk" -command els::reload
     .menu.file add checkbutton -label "Restore Previous Session" \
         -variable ::els::restore_session -command els::session_set_restore
     .menu.file add separator
@@ -1151,6 +1236,7 @@ proc els::build {} {
     .menu.edit add command -label Cut   -accelerator Ctrl+X -command {els::menu_event <<Cut>>}
     .menu.edit add command -label Copy  -accelerator Ctrl+C -command {els::menu_event <<Copy>>}
     .menu.edit add command -label Paste -accelerator Ctrl+V -command {els::menu_event <<Paste>>}
+    .menu.edit add command -label "Select All" -accelerator Ctrl+A -command {els::menu_event <<SelectAll>>}
     .menu.edit add separator
     .menu.edit add command -label "Find..."       -accelerator Ctrl+F -command {els::find_show find}
     .menu.edit add command -label "Replace..."    -accelerator Ctrl+H -command {els::find_show replace}
@@ -1254,6 +1340,11 @@ proc els::build {} {
     if {!$::els::show_linenos} { grid remove .ln }
     # auto-save when the app window loses focus (Deactivate fires on toplevels)
     bind . <Deactivate> {if {"%W" eq "."} { els::autosave_all }}
+    # remember the last NORMAL-state geometry: while maximized, `wm geometry .`
+    # returns the maximized rect, so save_geometry would otherwise persist that as
+    # a normal window.  Guard %W eq "." — `.` is in every child's bindtags, so an
+    # unguarded binding would also fire for child-widget <Configure> events.
+    bind . <Configure> {if {"%W" eq "."} { els::track_geometry }}
     grid .vs   -row 2 -column 2 -sticky ns
     grid .hs   -row 3 -column 1 -sticky ew
     grid .sb   -row 4 -column 0 -columnspan 3 -sticky ew
@@ -1300,6 +1391,9 @@ proc els::build {} {
     bind elsText <Shift-MouseWheel>   { els::hwheel %D; break }
     bind elsText <Key-F3>             { els::find_step 1;  break }
     bind elsText <Shift-Key-F3>       { els::find_step -1; break }
+    # right-click context menu (Windows convention).  Text has no default
+    # Button-3 action, so the caret is deliberately left where it is.
+    bind elsText <Button-3>           { els::popup_text_menu %W %X %Y; break }
     # neutralize Tk's emacs-style Text defaults that surprise on a Windows editor
     # (Ctrl+K kill-to-end, Ctrl+D delete-next, Ctrl+T transpose); break pre-empts
     # the default Text binding so these keys do nothing
@@ -1483,7 +1577,8 @@ proc els::close_doc {id} {
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
         ::els::docEol($id) ::els::docRaw($id) \
-        ::els::savedSig($id) ::els::loading($id)
+        ::els::savedSig($id) ::els::savedSigPath($id) \
+        ::els::docExtModPause($id) ::els::swap_fail_streak($id) ::els::loading($id)
     if {$active eq $id} { set active "" }
     if {[llength $docs] == 0} {
         els::new_doc
@@ -1528,6 +1623,8 @@ proc els::make_tab {id} {
     bind $tf.close <Button-1> [list els::close_doc $id]
     bind $tf.close <Enter>    [list els::tab_close_enter $id]
     bind $tf.close <Leave>    [list els::tab_close_leave $id]
+    bind $tf       <Button-3> [list els::popup_tab_menu $id %X %Y]
+    bind $tf.name  <Button-3> [list els::popup_tab_menu $id %X %Y]
     els::tooltip_for $tf      [list els::tab_tip $id] $::els::tab_tip_delay
     els::tooltip_for $tf.name [list els::tab_tip $id] $::els::tab_tip_delay
 }
@@ -2169,6 +2266,66 @@ proc els::build_enc_popup {} {
     .encpop add cascade -label "Reopen with Encoding" -menu [els::enc_menu .encpop.re reopen]
     .encpop add cascade -label "Set Save Encoding"    -menu [els::enc_menu .encpop.sv save]
 }
+# ---- context menus (right-click on the text and on tabs) ------------------
+# Editor context menu: the Windows-convention right-click Undo/Cut/Copy/Paste/…
+# that even Notepad has and els lacked.  Built once, lazily; every command routes
+# through the same helpers the Edit menu uses, so no new edit/recovery path is
+# created.  Entry states are computed at post time from the widget's condition.
+proc els::build_text_menu {} {
+    menu .txtpop -tearoff 0
+    .txtpop add command -label Undo  -command els::menu_undo
+    .txtpop add command -label Redo  -command els::menu_redo
+    .txtpop add separator
+    .txtpop add command -label Cut   -command {els::menu_event <<Cut>>}
+    .txtpop add command -label Copy  -command {els::menu_event <<Copy>>}
+    .txtpop add command -label Paste -command {els::menu_event <<Paste>>}
+    .txtpop add separator
+    .txtpop add command -label "Select All" -command {els::menu_event <<SelectAll>>}
+}
+proc els::popup_text_menu {w x y} {
+    if {$::els::active eq ""} return
+    if {![winfo exists .txtpop]} { els::build_text_menu }
+    set hasSel   [expr {[llength [$w tag ranges sel]] == 2}]
+    set canUndo  [expr {![catch {$w edit canundo} u] && $u}]
+    set canRedo  [expr {![catch {$w edit canredo} r] && $r}]
+    set canPaste [expr {![catch {clipboard get} cb] && $cb ne ""}]
+    .txtpop entryconfigure Undo  -state [expr {$canUndo  ? "normal" : "disabled"}]
+    .txtpop entryconfigure Redo  -state [expr {$canRedo  ? "normal" : "disabled"}]
+    .txtpop entryconfigure Cut   -state [expr {$hasSel   ? "normal" : "disabled"}]
+    .txtpop entryconfigure Copy  -state [expr {$hasSel   ? "normal" : "disabled"}]
+    .txtpop entryconfigure Paste -state [expr {$canPaste ? "normal" : "disabled"}]
+    tk_popup .txtpop $x $y
+}
+# Tab context menu: Close, plus (for a file-backed tab) Copy Full Path and Open
+# Containing Folder.  Rebuilt per-post so it always targets the clicked tab's id.
+proc els::popup_tab_menu {id x y} {
+    if {$id ni $::els::docs} return
+    catch {destroy .tabpop}
+    menu .tabpop -tearoff 0
+    .tabpop add command -label "Close" -command [list els::close_doc $id]
+    set pathed [expr {[info exists ::els::docPath($id)] && $::els::docPath($id) ne ""}]
+    set st [expr {$pathed ? "normal" : "disabled"}]
+    .tabpop add separator
+    .tabpop add command -label "Copy Full Path" -state $st -command [list els::tab_copy_path $id]
+    .tabpop add command -label "Open Containing Folder" -state $st -command [list els::tab_reveal $id]
+    tk_popup .tabpop $x $y
+}
+proc els::tab_copy_path {id} {
+    if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} return
+    clipboard clear
+    clipboard append [file nativename $::els::docPath($id)]
+}
+proc els::tab_reveal {id} {
+    if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} return
+    set exp [els::windir explorer.exe]
+    if {$exp eq ""} return   ;# fail safe rather than a bare-name exec (CWD planting)
+    # Open the CONTAINING FOLDER (matching the label and backups_open).  Not
+    # `/select,<path>`: Tcl's exec quotes the whole "/select,C:\dir with space\f"
+    # token as one quoted argument, and explorer ignores /select when the switch
+    # itself is inside the quotes — so it silently opened the wrong folder for the
+    # majority of real Windows paths (C:\Users\<name with space>, C:\Program Files).
+    catch {exec $exp [file nativename [file dirname $::els::docPath($id)]] &}
+}
 proc els::menu_cascade_reserve {menu {depth 1}} {
     if {$depth <= 0 || ![winfo exists $menu]} { return 0 }
     set best 0
@@ -2258,6 +2415,81 @@ proc els::reopen_with {enc bom} {
     els::update_tab $id
     els::settitle
     els::refresh_view
+}
+# External-change (lost-update) prompt: the file changed on disk since we loaded
+# or last saved it (R3).  Yes = overwrite the disk version, No = reload from disk
+# (discard our edits), Cancel = do nothing.  Routed through tk_messageBox so the
+# test harness's counting stub drives it deterministically; a user wanting Save As
+# picks Cancel and chooses it from the menu.
+proc els::extmod_ask {id} {
+    set name [file tail $::els::docPath($id)]
+    set ans [tk_messageBox -parent . -icon warning -type yesnocancel -title els \
+        -message "\"$name\" has changed on disk since you opened it." \
+        -detail "Yes — save anyway, overwriting the version on disk.\nNo — reload from disk, discarding your edits.\nCancel — do nothing."]
+    switch $ans {
+        yes { return overwrite }
+        no  { return reload }
+        default { return cancel }
+    }
+}
+# Re-read a document's file FRESH from disk (unlike reopen_with, which re-decodes
+# the cached bytes) and replace the buffer, re-detecting encoding/EOL.  Resets the
+# doc to clean, re-caches the on-disk signature (so the R3 baseline matches disk
+# again), and drops the swap.  This is the Reload branch of the external-change
+# prompt and of File ▸ Reload from Disk.
+proc els::reload_from_disk {id} {
+    if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return 0 }
+    set p $::els::docPath($id)
+    if {[catch {
+        set fh [::open $p r]
+        fconfigure $fh -translation binary
+        set raw [read $fh]
+        close $fh
+    } err]} {
+        tk_messageBox -parent . -icon error -title els -message "Cannot reload file:\n$err"
+        return 0
+    }
+    set w [els::W $id]
+    lassign [els::detect_encoding $raw] enc bom
+    set text [els::decode $raw $enc $bom]
+    set eol  [els::detect_eol $text]
+    set text [string map [list \r\n \n \r \n] $text]
+    set ins [$w index insert]
+    $w delete 1.0 end
+    $w insert end $text
+    catch {$w mark set insert $ins}   ;# keep the caret line where it can still land
+    $w see insert
+    set ::els::docEnc($id) $enc
+    set ::els::docBom($id) $bom
+    set ::els::docEol($id) $eol
+    set ::els::docRaw($id) $raw
+    unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id) ::els::docExtModPause($id)
+    els::cache_saved_sig $id
+    unset -nocomplain ::els::docRecovered($id)
+    $w edit reset
+    $w edit modified 0
+    els::swap_clear $id
+    els::update_tab $id
+    els::settitle
+    els::refresh_view
+    return 1
+}
+# File ▸ Reload from Disk: re-read the active document from disk, confirming first
+# if there are unsaved edits.  Nothing re-reads disk otherwise (Reopen with
+# Encoding deliberately re-decodes the cached bytes).
+proc els::reload {} {
+    set id $::els::active
+    if {$id eq "" || ![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} {
+        tk_messageBox -parent . -icon info -title els \
+            -message "Nothing to reload — this document was never loaded from a file."
+        return
+    }
+    if {[els::doc_dirty $id]} {
+        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+            -message "Reload [els::doc_name $id] from disk?\nUnsaved changes will be lost."]
+        if {$ans ne "yes"} return
+    }
+    els::reload_from_disk $id
 }
 proc els::save_with {enc bom} {
     set id $::els::active
@@ -2617,14 +2849,29 @@ proc els::file_sig {path} {
 # Cache the doc's on-disk signature from the bytes we already hold (the exact
 # loaded/saved bytes) plus the file's mtime -- one consistent source.
 proc els::cache_saved_sig {id} {
-    if {$::els::docPath($id) eq ""} { set ::els::savedSig($id) ""; return }
+    if {$::els::docPath($id) eq ""} {
+        set ::els::savedSig($id) ""
+        unset -nocomplain ::els::savedSigPath($id)
+        return
+    }
     set mtime 0
     catch {set mtime [file mtime $::els::docPath($id)]}
     set ::els::savedSig($id) [els::sig_from_bytes $::els::docRaw($id) $mtime]
+    set ::els::savedSigPath($id) $::els::docPath($id)   ;# pin the R3 baseline to this path
 }
 proc els::doc_saved_sig {id} {
     if {[info exists ::els::savedSig($id)]} { return $::els::savedSig($id) }
     return ""
+}
+# The CONTENT part of a "size:mtime:crc" signature (drops the volatile mtime).
+# The R3 lost-update guard compares on this, so a byte-identical external rewrite
+# — OneDrive/Dropbox sync, antivirus, a backup tool, or a save-in-place that
+# rewrites the same bytes, all of which bump mtime — does not false-positive as a
+# change.  Recovery reconciliation keeps the full mtime-bearing comparison.
+proc els::sig_content {sig} {
+    set p [split $sig :]
+    if {[llength $p] != 3} { return $sig }
+    return "[lindex $p 0]:[lindex $p 2]"
 }
 
 # ---- the writer (single idempotent path) ---------------------------------
@@ -2638,8 +2885,8 @@ proc els::swap_flush_doc {id} {
     if {[info exists ::els::loading($id)]} { return 0 }
     if {![els::doc_dirty $id]} { return 0 }   ;# clean doc: nothing to protect
     if {[els::pristine $id]} { return 0 }
-    set done 0
-    catch {
+    set done 0 ; set failed 0
+    if {[catch {
         set sig [els::buf_sig $id]
         if {[info exists ::els::swapSig($id)] && $sig eq $::els::swapSig($id)} {
             # content verified unchanged since the last swap: drop the latch so
@@ -2653,8 +2900,28 @@ proc els::swap_flush_doc {id} {
                 set ::els::swapSig($id) $sig
                 unset -nocomplain ::els::dirtySince($id)
                 set done 1
+            } else {
+                set failed 1   ;# the swap write itself failed (dead media, no space, ACL)
             }
         }
+    }]} { set failed 1 }
+    # Surface persistent crash-protection failure: swap writes are otherwise fully
+    # silent, so a user keeps editing believing recovery is armed while every swap
+    # fails.  The streak is PER-DOC (a doc on a flaky mount must still warn even
+    # while another doc on local disk keeps succeeding — a single global counter
+    # would be reset to 0 by the healthy doc on every all-docs flush pass).  Notify
+    # once when a doc reaches ~3 consecutive failed write attempts; reset on its
+    # next successful write.  (The clean/pristine/disabled early-returns above skip
+    # the reset — the streak counts consecutive failed ATTEMPTS, not wall-clock.)
+    if {$failed} {
+        set n [expr {([info exists ::els::swap_fail_streak($id)] ? $::els::swap_fail_streak($id) : 0) + 1}]
+        set ::els::swap_fail_streak($id) $n
+        if {$n == 3} {
+            catch {els::log error "swap (crash-protection) writes are failing under [els::swap_dir]"}
+            catch {els::status_note "crash protection is failing — save your work manually"}
+        }
+    } else {
+        set ::els::swap_fail_streak($id) 0
     }
     return $done
 }
@@ -2674,7 +2941,7 @@ proc els::swap_clear {id} {
     if {[els::swap_dir] ne ""} {
         catch {file delete -force [els::swap_path [els::session_id] $id]}
     }
-    unset -nocomplain ::els::swapSig($id) ::els::dirtySince($id)
+    unset -nocomplain ::els::swapSig($id) ::els::dirtySince($id) ::els::swap_fail_streak($id)
 }
 
 # ---- timers --------------------------------------------------------------
@@ -2808,7 +3075,14 @@ proc els::handoff_send {cfg fileArgs} {
         if {![catch {file normalize $f} n]} { lappend norm $n }
     }
     set target [file join $hd "[pid]-[clock clicks].open"]
-    catch {els::write_atomic $target [join $norm \n] ".ho-[pid]-[clock clicks].tmp"}
+    # UTF-8 the payload: write_atomic's channel is binary (iso8859-1), so a path
+    # with non-ASCII characters (e.g. C:/Users/José/…) would otherwise be written
+    # as raw iso8859-1 bytes — or throw outright for chars > U+00FF — and the
+    # UTF-8 read in handoff_drain would fail, silently dropping the handoff and
+    # never opening the double-clicked file.  strict: a valid path always encodes;
+    # a pathological one (unpaired surrogate) is dropped rather than corrupted.
+    if {[catch {encoding convertto -profile strict utf-8 [join $norm \n]} payload]} { return }
+    catch {els::write_atomic $target $payload ".ho-[pid]-[clock clicks].tmp"}
 }
 # Primary: drain the spool — open each handed-off path as a tab and raise the
 # window.  Runs on a light poll while single-instance is active.
@@ -2817,12 +3091,29 @@ proc els::handoff_drain {} {
     if {$hd eq ""} { return }
     set raise 0
     foreach f [lsort [glob -nocomplain -directory $hd *.open]] {
-        set data ""
-        catch { set fh [::open $f r]; fconfigure $fh -encoding utf-8; set data [read $fh]; close $fh }
+        set data "" ; set ok 0
+        # read as binary, then decode UTF-8 back to the path string (mirrors
+        # handoff_send).  try/finally guarantees the channel closes even on a read
+        # error — the old utf-8 strict READ threw before close and leaked a channel
+        # per non-ASCII spool.  A spool from an older (iso8859-1) els that isn't
+        # valid UTF-8 fails to decode and is dropped, not retried.
+        if {![catch {
+            set fh [::open $f r]
+            try { fconfigure $fh -translation binary; set raw [read $fh] } finally { close $fh }
+        }]} {
+            if {![catch {encoding convertfrom -profile strict utf-8 $raw} data]} { set ok 1 }
+        }
+        # delete after CONSUMING (reading) the spool, before opening: an
+        # undecodable/poison spool must still be removed so the 500 ms poll cannot
+        # re-drain it forever, and a consumed spool cannot re-open its files.
         catch {file delete -force $f}
         set raise 1
-        foreach p [split $data \n] {
-            if {$p ne "" && [file exists $p]} { catch {els::open $p} }
+        if {$ok} {
+            foreach p [split $data \n] {
+                # open QUIET: a failing open must never pop a modal from the
+                # background poll timer (or the pre-UI startup drain)
+                if {$p ne "" && [file exists $p]} { catch {els::open $p 1} }
+            }
         }
     }
     if {$raise} { els::raise_window }
@@ -3019,7 +3310,17 @@ proc els::recover_load {rec branch} {
     if {$tid eq ""} {
         set tid [els::new_doc]
         set fresh 1
-        if {$path ne ""} { set ::els::docPath($tid) $path }
+        if {$path ne ""} {
+            set ::els::docPath($tid) $path
+            # arm the R3 external-change guard from the swap's pre-crash on-disk
+            # signature: without this a recovered tab has no savedSig, so its first
+            # save would skip the lost-update check and silently clobber a file that
+            # changed between the crash and recovery.  "" (untitled) leaves it off.
+            if {[dict exists $rec savedSig] && [dict get $rec savedSig] ne ""} {
+                set ::els::savedSig($tid) [dict get $rec savedSig]
+                set ::els::savedSigPath($tid) $path
+            }
+        }
         set ::els::docRaw($tid) ""           ;# new tab: no on-disk bytes cached yet
         set ::els::docRecovered($tid) 1      ;# mark a separate recovered tab as such
     }
@@ -3325,7 +3626,9 @@ proc els::backups_open {} {
     set dir [els::backup_dir]
     if {$dir eq ""} { return }
     catch {file mkdir $dir}
-    catch {exec explorer.exe [file nativename $dir] &}
+    set exp [els::windir explorer.exe]   ;# absolute path: never a planted explorer.exe
+    if {$exp eq ""} { return }
+    catch {exec $exp [file nativename $dir] &}
 }
 proc els::set_backups {{persist 1}} {
     if {$persist} { els::save_geometry }
@@ -3360,6 +3663,7 @@ proc els::autosave_flush_doc {id} {
     if {$id eq "" || $id ni $::els::docs} { return }
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return }
     if {[info exists ::els::docLossyPause($id)]} { return }   ;# awaiting a manual save
+    if {[info exists ::els::docExtModPause($id)]} { return }  ;# file changed on disk: manual save
     if {![els::doc_dirty $id]} { return }
     catch {els::save $id 1}
 }
@@ -3379,6 +3683,34 @@ proc els::save {{id ""} {quiet 0}} {
         if {$quiet} { return 0 }      ;# auto-save never invents a filename
         return [els::saveas]
     }
+    # External-change guard (R3): if the file on disk no longer matches what we
+    # last loaded/saved, another program rewrote it (git checkout, a formatter, a
+    # sync client, a second els) — overwriting would silently destroy that change.
+    # savedSigPath pins the baseline to a specific path so a Save As onto a
+    # different file never false-positives.  A vanished/unreadable target (cur "")
+    # is NOT treated as a change: write_atomic just recreates it.
+    set saved [els::doc_saved_sig $id]
+    if {$saved ne "" && [info exists ::els::savedSigPath($id)] \
+            && $::els::savedSigPath($id) eq $docPath($id)} {
+        set cur [els::file_sig $docPath($id)]
+        if {$cur ne "" && [els::sig_content $cur] ne [els::sig_content $saved]} {
+            if {$quiet} {
+                # autosave: NEVER prompt from a background timer.  Pause quiet
+                # saves for this doc until a manual save settles it (mirrors the
+                # lossy-encoding pause), and say so once.
+                set ::els::docExtModPause($id) 1
+                els::status_note "auto-save paused: [file tail $docPath($id)] changed on disk (save manually)"
+                return 0
+            }
+            # overwrite: empty body, fall through to write (clobber the disk copy)
+            switch [els::extmod_ask $id] {
+                overwrite { }
+                reload    { els::reload_from_disk $id ; return 0 }
+                cancel    { return 0 }
+            }
+        }
+    }
+    unset -nocomplain ::els::docExtModPause($id)
     set w [els::W $id]
     set text [$w get 1.0 "end - 1 char"]
     # re-apply the document's original EOL (buffer is LF-internal)
@@ -3688,6 +4020,11 @@ proc els::quit {} {
             }
         }
     }
+    # drain any file handed off in the instant before we committed to quitting, so
+    # it opens as a tab now (and, on a plain start that adopted the saved session,
+    # persists into it for the next launch) rather than being orphaned in the spool
+    # until a later launch or the stale sweep
+    catch {els::handoff_drain}
     els::save_geometry
     els::swap_shutdown   ;# committed exit: stop autosave, delete our swaps + lock
     exit
@@ -4085,7 +4422,16 @@ proc els::find_spec {} {
 # disagree — Replace All must NEVER walk `tag ranges findAll` instead: Tk merges
 # abutting ranges of one tag, so N adjacent matches would collapse into ONE
 # replacement, silently deleting text.
-proc els::find_scan {w} {
+#
+# `limit` caps the number of VALID matches returned (0 = unlimited).  A common
+# substring on one very long line yields hundreds of thousands of hits, each
+# costing two widget index operations here — uncapped that froze the UI for the
+# whole scan on every keystroke (robustness R5).  find_update passes FIND_MAXHITS
+# so incremental highlight stays bounded; Replace All passes 0 because it MUST
+# see and rewrite every match — a capped Replace All would silently skip text.
+# Truncation is recorded in ::els::find_truncated so the count can show "N+".
+proc els::find_scan {w {limit 0}} {
+    set ::els::find_truncated 0
     set spec [els::find_spec]
     if {$spec eq ""} { return {} }
     lassign $spec pat sargs
@@ -4111,6 +4457,14 @@ proc els::find_scan {w} {
         # and saves — text that was never in the document)
         if {[$w compare $e > $last]} { continue }
         lappend out [list $s $e]
+        # flag truncation only when a genuine (limit+1)th match exists — scan one
+        # past the cap, then drop it — so a buffer with EXACTLY $limit matches shows
+        # the true count, not a spurious "N+"
+        if {$limit > 0 && [llength $out] > $limit} {
+            set out [lrange $out 0 end-1]
+            set ::els::find_truncated 1
+            break
+        }
     }
     return $out
 }
@@ -4146,11 +4500,16 @@ proc els::find_update {} {
     $w tag remove findOne 1.0 end
     set find_matches {}
     if {$::els::find_q eq ""} { set find_count "" ; return }
-    set scan [els::find_scan $w]
+    set scan [els::find_scan $w $::els::FIND_MAXHITS]
     if {$scan eq "bad"} { set find_count "bad pattern" ; return }
     if {![llength $scan]} { set find_count "No results" ; return }
     set find_matches $scan
-    foreach m $scan { $w tag add findAll {*}$m }
+    # one batched tag-add over all ranges, not one call per match: the flat
+    # {s e s e …} form is the multi-range syntax `tag add` accepts, and it turns
+    # the O(matches) per-match loop that froze the UI on long lines into a single
+    # widget call (robustness R5).  findAll is display-only, so Tk merging
+    # abutting ranges here is harmless — Replace All never reads this tag.
+    $w tag add findAll {*}[concat {*}$scan]
     set n [llength $find_matches]
     set ins [$w index insert]
     set cur 0
@@ -4172,7 +4531,10 @@ proc els::find_highlight {idx} {
     $w tag add findOne $s $e
     $w mark set insert $s
     $w see $s
-    set find_count "[expr {$idx + 1}] of $n"
+    # "+" when the scan was capped at FIND_MAXHITS: there are more matches than
+    # the N we track/highlight/step through (robustness R5)
+    set more "" ; if {$::els::find_truncated} { set more "+" }
+    set find_count "[expr {$idx + 1}] of $n$more"
     els::update_pos
     els::update_current_line
     els::draw_gutter   ;# the caret moved — refresh the gutter band + visible nums
@@ -4422,6 +4784,33 @@ proc els::zoom {d}      { els::set_font_size [expr {$::els::font_size + $d}] }
 proc els::zoom_reset {} { els::set_font_size 11 }
 
 # ---- update check -------------------------------------------------------
+# Resolve a Windows system tool to its ABSOLUTE path under %SystemRoot%\System32.
+# Never invoke curl/rundll32/cmd by bare name: Tcl's exec searches the CURRENT
+# DIRECTORY before PATH on Windows, and when els is launched by double-clicking a
+# document the CWD is that document's folder — so a bare-name exec would run a
+# malicious `curl.exe` planted beside a shared/extracted file.  Returns "" (fail
+# safe — the caller then does nothing) if SystemRoot is unset or the tool is
+# absent (e.g. curl.exe predates Windows 10 1803).  els.exe is x64, so System32
+# is the real 64-bit dir with no WOW64 redirection.
+proc els::system32 {exe} {
+    if {![info exists ::env(SystemRoot)] || $::env(SystemRoot) eq ""} { return "" }
+    set p [file join $::env(SystemRoot) System32 $exe]
+    if {![file exists $p]} { return "" }
+    return $p
+}
+# As system32, but for tools that live directly in %SystemRoot% (e.g.
+# explorer.exe, which is NOT in System32) — same anti-planting rationale.
+proc els::windir {exe} {
+    if {![info exists ::env(SystemRoot)] || $::env(SystemRoot) eq ""} { return "" }
+    set p [file join $::env(SystemRoot) $exe]
+    if {![file exists $p]} { return "" }
+    return $p
+}
+# ELS_NO_UPDATE_CHECK opts out of the launch-time network call entirely (portable
+# / locked-down / offline installs), mirroring ELS_NO_SINGLE_INSTANCE.
+proc els::update_check_off {} {
+    return [expr {[info exists ::env(ELS_NO_UPDATE_CHECK)] && $::env(ELS_NO_UPDATE_CHECK) ne ""}]
+}
 # Best-effort, fire-and-forget check of the GitHub Releases API — a public,
 # unauthenticated GET (one request at startup, far within the 60/hr limit, so
 # it stays within GitHub's terms).  This runtime has no TLS, so we lean on
@@ -4429,10 +4818,12 @@ proc els::zoom_reset {} { els::set_font_size 11 }
 # no console window flashes.  Any failure (offline, no curl, odd JSON) is
 # swallowed silently — the editor never blocks or complains.
 proc els::check_update {} {
-    if {$::els::selftest} return
+    if {$::els::selftest || [els::update_check_off]} return
+    set curl [els::system32 curl.exe]
+    if {$curl eq ""} return
     set url "https://api.github.com/repos/anafalanx/els/releases/latest"
     if {[catch {
-        set ch [::open [list | curl.exe -s -m 6 \
+        set ch [::open [list | $curl -s -m 6 \
             -H "User-Agent: els-editor" \
             -H "Accept: application/vnd.github+json" $url 2> NUL] r]
     }]} { return }
@@ -4463,10 +4854,14 @@ proc els::show_update {ver} {
     .sb.update configure -text $ver
     els::tooltip .sb.update "els $ver is available — click to download"
 }
+# Open a URL in the user's browser.  Absolute System32 paths only — see
+# els::system32 for why a bare `rundll32.exe`/`cmd.exe` is unsafe here too (a
+# double-click launch leaves the CWD in the document's folder).
 proc els::open_url {url} {
-    if {[catch {exec rundll32.exe url.dll,FileProtocolHandler $url &}]} {
-        catch {exec cmd.exe /c start "" $url &}
-    }
+    set rundll [els::system32 rundll32.exe]
+    if {$rundll ne "" && ![catch {exec $rundll url.dll,FileProtocolHandler $url &}]} { return }
+    set cmd [els::system32 cmd.exe]
+    if {$cmd ne ""} { catch {exec $cmd /c start "" $url &} }
 }
 
 proc els::startup_probe {report} {
@@ -4509,6 +4904,44 @@ proc els::startup_probe {report} {
 }
 
 # ---- main ---------------------------------------------------------------
+# ---- diagnostics: a small rotating log + a production bgerror ------------
+# A GUI-subsystem exe has no console, so a field failure (a save error, a decode
+# fault, a background callback error) otherwise vanishes or — worse — pops Tk's
+# default modal "raining dialogs".  els::log appends a line to els.log next to
+# els.conf, rotating at ~256 KB with one generation kept.  Self-catching with a
+# reentry latch: logging can never itself raise into bgerror or crash the app.
+proc els::log {level msg} {
+    if {$::els::log_active} return
+    if {$::els::config_path eq ""} return   ;# no chosen config dir yet: nowhere safe to write
+    set ::els::log_active 1
+    catch {
+        set lf [file join [file dirname $::els::config_path] els.log]
+        if {![catch {file size $lf} sz] && $sz > 262144} {
+            catch {file rename -force $lf "$lf.1"}   ;# one generation
+        }
+        set ts [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+        set fh [::open $lf a]
+        try {
+            fconfigure $fh -encoding utf-8
+            puts $fh "$ts \[$level\] $msg"
+        } finally { close $fh }
+    }
+    set ::els::log_active 0
+}
+# The production background-error handler, installed (only) for a normal launch.
+# It must NEVER exit and NEVER stack modal dialogs: flush dirty swaps first (so a
+# crash-inducing error still preserves unsaved edits), log the trace, then show a
+# single non-modal status-bar note.  The startup PROBE keeps its own exit-3
+# handler; tests install their own capture; neither path reaches here.
+proc els::bgerror {msg args} {
+    if {$::els::log_active} return   ;# a logging failure surfaced as a bg error: swallow
+    set trace $msg
+    if {[llength $args]} { catch {set trace [dict get [lindex $args 0] -errorinfo]} }
+    catch {els::swap_flush_all}
+    catch {els::log error $trace}
+    catch {els::status_note "internal error (logged to els.log)"}
+}
+
 proc els::main {} {
     set a0 [lindex $::argv 0]
     if {$a0 eq "--selftest"} {
@@ -4553,6 +4986,14 @@ proc els::main {} {
             set ::els::probe_quiet 1
             proc ::bgerror {msg args} { catch {puts stderr "els startup-probe: $msg"} ; exit 3 }
             catch {interp bgerror {} ::bgerror}
+        } else {
+            # production run: route uncaught async errors to els::bgerror (flush
+            # swaps, log, one non-modal note) instead of Tk's modal "raining
+            # dialogs".  Installed HERE, not at source time, so the test harness's
+            # own bgerror capture (helpers.tcl) is never clobbered.
+            proc ::bgerror {msg args} { els::bgerror $msg {*}$args }
+            catch {interp bgerror {} els::bgerror}
+            catch {proc ::tk::dialog::error::bgerror {msg args} { els::bgerror $msg {*}$args }}
         }
         # open every file argument, each in its own tab (the first reuses the
         # initial empty document).  Explicit launch files take precedence over

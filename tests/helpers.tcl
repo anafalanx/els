@@ -132,10 +132,14 @@ proc els_reset {} {
     set ::els::active ""
     set ::els::seq 0
     foreach a {docPath docEnc docBom docEol docRaw docRecovered swapSig savedSig
-               dirtySince loading docLossyOk docLossyPause} {
+               savedSigPath dirtySince loading docLossyOk docLossyPause docExtModPause
+               swap_fail_streak} {
         array unset ::els::$a
         array set ::els::$a {}
     }
+    # Wave-1 scalar globals + window state, so one test's value can't leak forward
+    set ::els::log_active 0 ; set ::els::geom_save_warned 0 ; set ::els::geom_normal ""
+    catch {wm state . normal}
     set ::els_test_lossy_answer cancel
     set ::els_test_lossy_calls {}
     # Crash-recovery subsystem: cancel any pending timers and reset all state so a

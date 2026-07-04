@@ -304,6 +304,50 @@ test single-c.4 {a stale handoff spool file is swept} -setup recover_reset -body
     list [file exists $old] [file exists $fresh]
 } -result {0 1}
 
+test single-c.5 {handoff round-trips a NON-ASCII path (UTF-8 spool), not silently dropped} -setup recover_reset -body {
+    # José-你好.txt — the exact class (accented Windows profile / CJK name) the old
+    # iso8859-1-write / utf-8-read asymmetry dropped on the floor
+    set p [file join $::ELS_TMP "José-你好.txt"] ; raw_write $p "unicode path\n"
+    els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+    set hd [file join $::ELS_TMP handoff]
+    set spooled [llength [glob -nocomplain -directory $hd *.open]]
+    els::handoff_drain
+    set opened 0
+    foreach d $::els::docs {
+        if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set opened 1 }
+    }
+    set left [llength [glob -nocomplain -directory $hd *.open]]
+    list $spooled $opened $left
+} -result {1 1 0}
+
+test single-c.6 {an undecodable (legacy iso8859-1) spool is consumed and dropped, not re-drained or opened} -setup recover_reset -body {
+    set hd [file join $::ELS_TMP handoff] ; file mkdir $hd
+    set bad [file join $hd legacy-1.open]
+    set fh [::open $bad {WRONLY CREAT TRUNC}] ; fconfigure $fh -translation binary
+    puts -nonewline $fh "\xff\xfe" ; close $fh      ;# 0xFF is never valid UTF-8
+    set before [llength $::els::docs]
+    els::handoff_drain
+    list [expr {[llength $::els::docs] == $before}] [file exists $bad]
+} -result {1 0}
+
+test extmod-recover-1.1 {a crash-recovered fresh tab arms the R3 guard from the swap's savedSig} -setup recover_reset -body {
+    set p [file join $::ELS_TMP recov-extmod.txt]
+    raw_write $p "on-disk at crash time\n"
+    set sig [els::file_sig $p]                      ;# the file's signature AT CRASH TIME
+    set rec [dict create schema 1 sessionId sX docId dX path $p \
+                 enc utf-8 bom 0 eol lf cursor 1.0 dirty 1 \
+                 savedSig $sig mtime [clock seconds] host h \
+                 bodyCrc 0 text "recovered unsaved edits"]
+    set tid [els::recover_load $rec fresh]
+    set armed [expr {[info exists ::els::savedSig($tid)] && $::els::savedSig($tid) eq $sig \
+                     && [info exists ::els::savedSigPath($tid)] && $::els::savedSigPath($tid) eq $p}]
+    # the file changes on disk AFTER the crash; a quiet save must NOT clobber it
+    raw_write $p "CHANGED SINCE THE CRASH\n"
+    set rc [els::save $tid 1]
+    list $armed $rc [info exists ::els::docExtModPause($tid)] \
+         [expr {[raw_read $p] eq "CHANGED SINCE THE CRASH\n"}]
+} -result {1 0 1 1}
+
 # ---- bug-hunt wave 3: clean docs never swap; metadata + claims ------------
 
 test swap-clean-2.1 {swap_touch on a CLEAN doc latches nothing and writes nothing} -setup recover_reset -body {

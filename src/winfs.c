@@ -163,14 +163,36 @@ static int TryLock_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     return TCL_OK;
 }
 
+/* ---- virtual desktop geometry ---------------------------------------------
+ * els::win_virtual_screen -> "x y w h" of the VIRTUAL desktop: the bounding rect
+ * of ALL monitors, with x/y the (possibly negative) top-left.  Tk's `wm maxsize`
+ * and `winfo screenwidth` report only the PRIMARY monitor on Windows, so a saved
+ * window on a monitor to the right of / below the primary would be wrongly judged
+ * off-screen; the geometry clamp (els::clamp_geometry) needs the true union. */
+static int VirtualScreen_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                             [[maybe_unused]] int objc, [[maybe_unused]] Tcl_Obj *const objv[]) {
+    int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    Tcl_Obj *r = Tcl_NewListObj(0, nullptr);
+    Tcl_ListObjAppendElement(ip, r, Tcl_NewIntObj(x));
+    Tcl_ListObjAppendElement(ip, r, Tcl_NewIntObj(y));
+    Tcl_ListObjAppendElement(ip, r, Tcl_NewIntObj(w));
+    Tcl_ListObjAppendElement(ip, r, Tcl_NewIntObj(h));
+    Tcl_SetObjResult(ip, r);
+    return TCL_OK;
+}
+
 int Winfs_Init(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, "9.0", 0) == nullptr) return TCL_ERROR;
     /* fully-qualified name: Tcl creates ::els if it doesn't exist yet (this Init
      * may run before main.tcl is sourced, in the native build). */
-    Tcl_CreateObjCommand(ip, "::els::win_replace_file", ReplaceFile_Cmd, nullptr, nullptr);
-    Tcl_CreateObjCommand(ip, "::els::win_lock_file",    LockFile_Cmd,    nullptr, nullptr);
-    Tcl_CreateObjCommand(ip, "::els::win_unlock_file",  UnlockFile_Cmd,  nullptr, nullptr);
-    Tcl_CreateObjCommand(ip, "::els::win_try_lock",     TryLock_Cmd,     nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_replace_file",   ReplaceFile_Cmd,   nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_lock_file",      LockFile_Cmd,      nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_unlock_file",    UnlockFile_Cmd,    nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_try_lock",       TryLock_Cmd,       nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_virtual_screen", VirtualScreen_Cmd, nullptr, nullptr);
     if (Tcl_PkgProvide(ip, "winfs", "0.1") != TCL_OK) return TCL_ERROR;
     return TCL_OK;
 }

@@ -63,6 +63,16 @@ test winfs-2.2 {try_lock still reads held/free/missing correctly with the tighte
     list $held $free $missing
 } -result {0 1 1}
 
+test winfs-3.1 {win_virtual_screen returns a 4-int rect covering all monitors} -constraints winfsBuilt -setup {load_winfs} -body {
+    set r [els::win_virtual_screen]
+    # {x y w h}: x/y may be negative (a monitor left/above the primary); w/h > 0.
+    # w must be at least the primary width (winfo screenwidth), never smaller.
+    list [llength $r] \
+         [expr {[string is integer -strict [lindex $r 0]] && [string is integer -strict [lindex $r 1]]}] \
+         [expr {[lindex $r 2] > 0 && [lindex $r 3] > 0}] \
+         [expr {[lindex $r 2] >= [winfo screenwidth .]}]
+} -result {4 1 1 1}
+
 test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
     set p [file join $::ELS_TMP wfs_save.txt]
     set f [open $p w] ; puts -nonewline $f "downloaded content\n" ; close $f

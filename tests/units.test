@@ -185,3 +185,50 @@ test unit-selftest-path-1 {selftest_report_path honours an explicit request} -bo
 test unit-selftest-path-2 {selftest_report_path falls back to a default file name} -body {
     string match *els-selftest.txt [els::selftest_report_path ""]
 } -result 1
+
+# ---- exec-surface hardening (System32 absolute paths + update opt-out) ----
+test unit-system32-1 {system32 resolves an absolute path under System32, never a bare name} -body {
+    # cmd.exe is present in System32 on every Windows, so this is deterministic
+    set p [els::system32 cmd.exe]
+    list [file pathtype $p] [string match -nocase {*[/\][Ss]ystem32[/\]cmd.exe} $p]
+} -result {absolute 1}
+
+test unit-system32-2 {system32 fails safe to "" when SystemRoot is unavailable (no bare-name exec)} -body {
+    set saved $::env(SystemRoot)
+    unset ::env(SystemRoot)
+    set p [els::system32 cmd.exe]
+    set ::env(SystemRoot) $saved
+    set p
+} -result {}
+
+test unit-system32-3 {system32 returns "" for a tool that is not present} -body {
+    els::system32 definitely-not-a-real-tool-xyz.exe
+} -result {}
+
+test unit-update-off-2 {update_check_off tracks the env var, independent of curl presence} -body {
+    set had [info exists ::env(ELS_NO_UPDATE_CHECK)]
+    set saved [expr {$had ? $::env(ELS_NO_UPDATE_CHECK) : ""}]
+    catch {unset ::env(ELS_NO_UPDATE_CHECK)}
+    set off0 [els::update_check_off]
+    set ::env(ELS_NO_UPDATE_CHECK) 1
+    set off1 [els::update_check_off]
+    if {$had} { set ::env(ELS_NO_UPDATE_CHECK) $saved } else { unset ::env(ELS_NO_UPDATE_CHECK) }
+    list $off0 $off1
+} -result {0 1}
+
+test unit-update-off-1 {ELS_NO_UPDATE_CHECK makes check_update a no-op (never spawns curl)} -setup {
+    # stub system32 to a real-looking path so the `$curl eq ""` early return can't
+    # mask a regressed opt-out: only update_check_off keeps the sentinel intact
+    rename els::system32 _els_s32_real
+    proc els::system32 {exe} { return "C:/Windows/System32/$exe" }
+} -cleanup {
+    if {[llength [info commands _els_s32_real]]} { catch {rename els::system32 {}} ; rename _els_s32_real els::system32 }
+} -body {
+    set ::els::update_buf "SENTINEL"        ;# set only inside check_update AFTER spawn
+    set had [info exists ::env(ELS_NO_UPDATE_CHECK)]
+    set saved [expr {$had ? $::env(ELS_NO_UPDATE_CHECK) : ""}]
+    set ::env(ELS_NO_UPDATE_CHECK) 1
+    els::check_update
+    if {$had} { set ::env(ELS_NO_UPDATE_CHECK) $saved } else { unset ::env(ELS_NO_UPDATE_CHECK) }
+    set ::els::update_buf                    ;# unchanged -> the spawn path was skipped
+} -result {SENTINEL}

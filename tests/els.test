@@ -550,3 +550,102 @@ test bk-1.11 {same-named files in different folders keep separate rings} -setup 
     set ib [els::open $pb] ; els::switch_to $ib ; [els::W $ib] insert end "b" ; els::save
     list [raw_read [lindex [bk_ring $pa] 0]] [raw_read [lindex [bk_ring $pb] 0]]
 } -result [list "AAA\n" "BBB\n"]
+
+# ---- R3: external-change (lost-update) guard ------------------------------
+# Another program rewrites the open file on disk; saving must not silently
+# clobber that change.  raw_write with different-length content guarantees the
+# file signature (size:mtime:crc) differs regardless of mtime granularity.
+
+test extmod-1.1 {a manual save over an externally-changed file PROMPTS} -setup {els_reset} -body {
+    set p [els_tmpfile em1.txt "original content\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "my local edit"
+    raw_write $p "EXTERNALLY REWRITTEN BY ANOTHER PROGRAM\n"
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer cancel
+    set rc [els::save]
+    list $rc $::els_test_mbcount
+} -result {0 1}
+
+test extmod-1.2 {Cancel preserves the external bytes on disk (no clobber)} -setup {els_reset} -body {
+    set p [els_tmpfile em2.txt "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local"
+    raw_write $p "EXTERNAL VERSION\n"
+    set ::els_test_mbanswer cancel
+    els::save
+    expr {[raw_read $p] eq "EXTERNAL VERSION\n"}
+} -result 1
+
+test extmod-1.3 {Overwrite (Yes) clobbers the disk version with our buffer} -setup {els_reset} -body {
+    set p [els_tmpfile em3.txt "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] delete 1.0 end ; [els::W $id] insert end "our content"
+    raw_write $p "EXTERNAL\n"
+    set ::els_test_mbanswer yes
+    set rc [els::save]
+    list $rc [string match "*our content*" [raw_read $p]]
+} -result {1 1}
+
+test extmod-1.4 {Reload (No) discards our edits and re-reads disk} -setup {els_reset} -body {
+    set p [els_tmpfile em4.txt "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local junk"
+    raw_write $p "THE REAL DISK CONTENT"
+    set ::els_test_mbanswer no
+    els::save
+    list [els::doc_dirty $id] [[els::W $id] get 1.0 "end - 1 char"]
+} -result {0 {THE REAL DISK CONTENT}}
+
+test extmod-1.5 {autosave (quiet) NEVER prompts on external change; it pauses instead} -setup {els_reset} -body {
+    set p [els_tmpfile em5.txt "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local"
+    raw_write $p "EXTERNAL\n"
+    set ::els_test_mbcount 0
+    set rc [els::save $id 1]
+    list $rc $::els_test_mbcount [info exists ::els::docExtModPause($id)] \
+         [expr {[raw_read $p] eq "EXTERNAL\n"}]
+} -result {0 0 1 1}
+
+test extmod-1.6 {a normal save does NOT prompt: our own prior save must not false-positive} -setup {els_reset} -body {
+    set p [els_tmpfile em6.txt "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "edit one"
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer yes
+    set r1 [els::save]
+    [els::W $id] insert end " edit two"
+    set r2 [els::save]
+    list $r1 $r2 $::els_test_mbcount
+} -result {1 1 0}
+
+test extmod-1.7 {Save As onto a different existing file does not trigger the external-change prompt} -setup {els_reset} -body {
+    set p [els_tmpfile em7a.txt "original\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "content"
+    set other [els_tmpfile em7b.txt "different existing file\n"]
+    set ::els_test_savefile $other
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer yes
+    els::saveas
+    set ::els_test_mbcount
+} -result 0
+
+test extmod-1.8 {reload_from_disk re-reads FRESH bytes from disk, not the cached docRaw} -setup {els_reset} -body {
+    set p [els_tmpfile em8.txt "original disk content"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "X"
+    raw_write $p "BRAND NEW DISK CONTENT"
+    els::reload_from_disk $id
+    list [els::doc_dirty $id] [[els::W $id] get 1.0 "end - 1 char"]
+} -result {0 {BRAND NEW DISK CONTENT}}
+
+test extmod-1.9 {a byte-identical external rewrite (mtime-only bump) does NOT prompt or pause} -setup {els_reset} -body {
+    set p [els_tmpfile em9.txt "identical bytes\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local edit"
+    # rewrite the SAME bytes (OneDrive/AV/backup touch) then bump mtime past open
+    raw_write $p "identical bytes\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set ::els_test_mbcount 0
+    set rc [els::save $id]
+    list $rc $::els_test_mbcount [info exists ::els::docExtModPause($id)]
+} -result {1 0 0}
