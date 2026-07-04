@@ -649,3 +649,56 @@ test extmod-1.9 {a byte-identical external rewrite (mtime-only bump) does NOT pr
     set rc [els::save $id]
     list $rc $::els_test_mbcount [info exists ::els::docExtModPause($id)]
 } -result {1 0 0}
+
+# ---- P2-c: large-file open guard + bounded undo (Wave 2) -------------------
+# The threshold is lowered per-test (a real 25 MB fixture would be slow + litter);
+# -cleanup restores a large threshold so later tests never spuriously prompt.
+
+test bigfile-1.1 {a large-file open PROMPTS interactively; declining creates no tab} -setup {els_reset} \
+        -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile big1.txt "0123456789 — more than five bytes\n"]
+    set ::els::OPEN_WARN_SIZE 5
+    set before [llength $::els::docs]
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer no
+    set rc [els::open $p]
+    list $rc $::els_test_mbcount [expr {[llength $::els::docs] == $before}]
+} -result {{} 1 1}
+
+test bigfile-1.2 {accepting the large-file prompt opens the file} -setup {els_reset} \
+        -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile big2.txt "large content here\n"]
+    set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbanswer yes
+    set id [els::open $p]
+    list [expr {$id ne ""}] [els::same_path $::els::docPath($id) $p]
+} -result {1 1}
+
+test bigfile-1.3 {the quiet path (session restore / recovery) opens a large file WITHOUT prompting} -setup {els_reset} \
+        -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile big3.txt "restored large file\n"]
+    set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbcount 0
+    set id [els::open $p 1]                 ;# quiet=1
+    list [expr {$id ne ""}] $::els_test_mbcount
+} -result {1 0}
+
+test bigfile-1.4 {a normal (under-threshold) open never prompts} -setup {els_reset} -body {
+    set p [els_tmpfile smallish.txt "small\n"]
+    set ::els_test_mbcount 0
+    els::open $p
+    set ::els_test_mbcount
+} -result 0
+
+test bigfile-1.5 {documents are created with a bounded undo stack (-maxundo)} -setup {els_reset} -body {
+    expr {[[els::T] cget -maxundo] == $::els::MAXUNDO && $::els::MAXUNDO > 0}
+} -result 1
+
+test bigfile-1.6 {a throw during decode/insert (e.g. OOM) restores the busy cursor, never strands it} -setup {els_reset} -body {
+    set p [els_tmpfile big6.txt "content\n"]
+    rename els::decode _els_decode_real
+    proc els::decode {args} { error "simulated OOM in decode" }
+    catch {. configure -cursor ""}          ;# baseline
+    set rc [els::open $p]                     ;# decode throws inside the read/insert block
+    list $rc [. cget -cursor]                 ;# "" = open failed cleanly, cursor NOT stuck on "watch"
+} -cleanup {
+    if {[llength [info commands _els_decode_real]]} { catch {rename els::decode {}} ; rename _els_decode_real els::decode }
+    catch {. configure -cursor ""}
+} -result {{} {}}

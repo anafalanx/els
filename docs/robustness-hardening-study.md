@@ -28,7 +28,11 @@
 > | **R7** off-screen geometry | ✅ IMPLEMENTED (Wave 1) | `els::clamp_geometry` vs the true virtual desktop (`win_virtual_screen`) + zoomed-state persistence |
 > | **P3** native `WinMain` capstone | ✅ SHIPPED | `src/els_main.c` (the SEH crash-handler sub-item is deferred — see §7) |
 >
-> **The only ranked item still open is the large-file open guard** (§2 Bucket C / §4 P2-c).
+> **Every ranked risk in this study is now implemented, including P2-c** (the
+> large-file open guard — §2 Bucket C / §4 P2-c — shipped Wave 2, 2026-07-04:
+> `els::open` confirms before reading a >25 MB file, with a busy cursor and a
+> bounded undo stack). The **one** remaining sub-item is the P3 SEH crash handler,
+> deliberately deferred (see §7).
 > Two design points below are now **superseded**: (1) els **does** have single-instance
 > file-handoff — Bucket B's "els has NO single-instance machinery, by design" is obsolete;
 > (2) §8 open questions Q1 (ReplaceFileW) and Q2 (a bounded backups ring, not a single
@@ -66,7 +70,7 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 5. **UI freeze** in find/replace when many matches land on one very long line (minified JS/CSS/JSON, single-line CSV). — ✅ DONE (R5, Wave 1)
 6. **No production `bgerror`** — the shipped app falls back to Tk's modal "raining dialogs"; **no diagnostic log anywhere.** — ✅ DONE (R6, Wave 1)
 7. **Restored geometry not clamped** to a visible monitor — window strands off-screen after a monitor change. — ✅ DONE (R7, Wave 1)
-8. Minor: no large-file guard *(⏳ still open — the one remaining ranked gap)*; long-path/DPI manifest gaps *(✅ longPathAware done; PerMonitorV2 deliberately deferred)*; `save_geometry` fails silently *(✅ now logs + notes)*.
+8. Minor: no large-file guard *(✅ DONE — P2-c, Wave 2)*; long-path/DPI manifest gaps *(✅ longPathAware done; PerMonitorV2 deliberately deferred)*; `save_geometry` fails silently *(✅ now logs + notes)*.
 
 ---
 
@@ -315,7 +319,7 @@ All families stay hermetic exactly as `helpers.tcl` guarantees (pinned dirs, stu
         │  (defines the swap FILE FORMAT + dir layout = the frozen contract)
         ▼
 ✅ P1  Find/replace guard · production bgerror + log · strict-encoding gate
-   P2  ✅ Geometry clamp · ✅ ext-mod detection · ⏳ large-file guard · ✅ manifest · ✅ save_geometry visibility
+   P2  ✅ Geometry clamp · ✅ ext-mod detection · ✅ large-file guard · ✅ manifest · ✅ save_geometry visibility
         ▼
    P3  ✅ Native C WinMain  ·  ⏳ SEH crash handler  ──► CAPSTONE, depends on P0-b's swap format
 ```
@@ -324,8 +328,8 @@ All families stay hermetic exactly as `helpers.tcl` guarantees (pinned dirs, stu
 crash-handler sub-item is **deliberately deferred** — with the shipped ~2 s swap
 cadence a C-level segfault now loses at most a couple of seconds of typing, so the
 large, corrupt-process-context handler is low payoff. Reopen only if `els.log`
-(now that R6 exists) shows real C-level crashes in the field. The **one remaining
-ranked gap is P2-c, the large-file open guard.**
+(now that R6 exists) shows real C-level crashes in the field. With P2-c shipped
+in Wave 2, the SEH handler is the **only** unimplemented sub-item left in this study.
 
 The native port is **last, not first.** The Tcl swap+reconcile layer (P0-b) covers the common abrupt-exit classes a pure-Tcl idle/periodic writer *can* pre-empt — power loss, taskkill, OS reboot, bgerror-exit. A C-level segfault is the **residual tail** that only an OS-level SEH handler can survive, and that handler is near-useless without the Tcl reader that detects orphans, reconciles against disk, and prompts. So: **freeze the swap format/dir now** as the shared contract; ship the Tcl layer; add the thin, write-only C producer afterward. (P2-d's manifest naturally rides along with the native-port build work.)
 

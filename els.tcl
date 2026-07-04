@@ -42,6 +42,8 @@ namespace eval els {
     variable BK_MININT 60           ;# s: skip a backup if the newest is this fresh
     variable BK_MAXAGE 2592000      ;# s: prune backups older than 30 days
     variable BK_MAXSIZE 20971520    ;# bytes: don't back up files larger than 20 MB
+    variable OPEN_WARN_SIZE 26214400 ;# bytes: confirm before opening a file larger than 25 MB
+    variable MAXUNDO 2000           ;# cap the per-doc undo stack (compound actions) so a long session can't grow it without bound
     # ---- crash-recovery / autosave subsystem (R2 / docs robustness P0-b) ----
     # A swap file per dirty doc under <configdir>/swap/, written atomically and
     # often, so a crash / power-loss / kill never loses unsaved edits; on the next
@@ -1447,7 +1449,7 @@ proc els::new_doc {{path ""}} {
     set id "d$seq"
     incr seq
     set w [els::W $id]
-    text $w -undo 1 -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
+    text $w -undo 1 -maxundo $::els::MAXUNDO -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
         -insertbackground $::els::CARET -insertwidth 4 -insertofftime 0 \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
@@ -2557,6 +2559,18 @@ proc els::open {{p ""} {quiet 0}} {
             return $id
         }
     }
+    # Large-file guard: the whole file is read, decoded, and held ~4x in RAM with no
+    # way to cancel, so a mis-dropped multi-hundred-MB file wedges the editor.  Warn
+    # before the read on an interactive open — and BEFORE creating a tab, so a "no"
+    # leaves no stray buffer.  The quiet path (session restore / crash recovery)
+    # opens anyway: prompting would block startup, and silently skipping would drop
+    # the file from the restored session.
+    if {!$quiet && ![catch {file size $p} sz] && $sz > $::els::OPEN_WARN_SIZE} {
+        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+            -message "\"[file tail $p]\" is large ([expr {$sz / 1048576}] MB).\
+                      \nOpening it may take a while and use a lot of memory. Open it anyway?"]
+        if {$ans ne "yes"} { return "" }
+    }
     set prevActive $active
     set created 0
     if {[els::pristine $active]} {
@@ -2566,31 +2580,45 @@ proc els::open {{p ""} {quiet 0}} {
         set created 1
     }
     set w [els::W $id]
-    if {[catch {
+    # a big read/decode/insert blocks the single-threaded UI — show a busy cursor so
+    # the freeze reads as "working", not "hung".  Read AND decode/insert are in ONE
+    # catch (both can throw — e.g. an out-of-memory on a huge file, the very case
+    # this feature guards) and the cursor is cleared UNCONDITIONALLY after it, so no
+    # exit path — including an uncaught throw on the quiet session-restore path —
+    # can strand a watch cursor on the whole app.
+    catch {. configure -cursor watch} ; update idletasks
+    set rc [catch {
         set fh [::open $p r]
         fconfigure $fh -translation binary
         set raw [read $fh]
         close $fh
-    } err]} {
+        # detect encoding + EOL, decode, normalise the buffer to LF internally
+        lassign [els::detect_encoding $raw] enc bom
+        set text [els::decode $raw $enc $bom]
+        set eol [els::detect_eol $text]
+        set text [string map [list \r\n \n \r \n] $text]
+        $w delete 1.0 end
+        $w insert end $text
+    } err]
+    catch {. configure -cursor ""}
+    if {$rc} {
         if {!$quiet} {
             tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
         }
-        # discard only a doc WE created for this open — a reused pre-existing
-        # pristine tab is the user's; and return focus to the tab that was
-        # active before (close_doc's neighbor pick lands on an arbitrary one)
-        if {$created && [llength $::els::docs] > 1} { els::close_doc $id }
+        # discard only a doc WE created for this open — a reused pre-existing pristine
+        # tab is the user's, so just clear any partial insert back to empty; and
+        # return focus to the tab that was active before (close_doc's neighbor pick
+        # lands on an arbitrary one)
+        if {$created && [llength $::els::docs] > 1} {
+            els::close_doc $id
+        } else {
+            catch {$w delete 1.0 end ; $w edit reset ; $w edit modified 0}
+        }
         if {$prevActive ne "" && $prevActive in $::els::docs} {
             els::switch_to $prevActive
         }
         return ""
     }
-    # detect encoding + EOL, decode, normalise the buffer to LF internally
-    lassign [els::detect_encoding $raw] enc bom
-    set text [els::decode $raw $enc $bom]
-    set eol [els::detect_eol $text]
-    set text [string map [list \r\n \n \r \n] $text]
-    $w delete 1.0 end
-    $w insert end $text
     $w mark set insert 1.0
     $w see insert
     set docPath($id) $p
