@@ -186,6 +186,7 @@ proc els_reset {} {
     set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}
     set ::els::restore_session 1
     set ::els::session_files {}
+    set ::els::session_pending {}
     set ::els::session_active ""
     set ::els::session_owned 1   ;# tests act as a plain (session-adopting) run
     # Per-test hygiene: restore the dialog stubs to their defaults and clear the

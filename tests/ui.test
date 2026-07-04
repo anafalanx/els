@@ -1298,6 +1298,42 @@ test session-4.1 {an explicit-file-arg launch does not destroy the stored sessio
     dict get $data session_files
 } -result {C:/saved/a.txt C:/saved/b.txt}
 
+# ---- Wave 2: session-restore preservation of transiently-offline files -----
+
+test session-pending-1.1 {a session file missing at restore is remembered as pending, not dropped} -setup {ui_reset} -body {
+    set present [els_tmpfile sp_present.txt "here\n"]
+    set gone [file join $::ELS_TMP sp_gone.txt] ; catch {file delete -force $gone}
+    set ::els::session_files [list $present $gone]
+    set ::els::restore_session 1
+    els::session_restore
+    set openedPresent 0
+    foreach id $::els::docs {
+        if {[info exists ::els::docPath($id)] && [els::same_path $::els::docPath($id) $present]} { set openedPresent 1 }
+    }
+    list $openedPresent [expr {[els::session_path $gone] in [els::session_sanitize $::els::session_pending]}]
+} -result {1 1}
+
+test session-pending-1.2 {save_geometry keeps a pending (offline) file in the persisted session, not just open tabs} -setup {ui_reset} -body {
+    set present [els_tmpfile sp2_present.txt "x\n"]
+    set gone [file join $::ELS_TMP sp2_gone.txt] ; catch {file delete -force $gone}
+    set ::els::session_files [list $present $gone]
+    set ::els::restore_session 1
+    els::session_restore                              ;# opens present, pends the offline gone
+    els::save_geometry                                ;# owned -> persists current + pending
+    set persisted [dict get [raw_read $::els::config_path] session_files]
+    list [expr {[els::session_path $present] in $persisted}] \
+         [expr {[els::session_path $gone] in $persisted}]
+} -result {1 1}
+
+test session-pending-1.3 {the pending merge dedupes a same-file path case-insensitively (no double entry)} -setup {ui_reset} -body {
+    set p [els_tmpfile sp3.txt "x\n"]
+    els::open $p ; set ::els::session_owned 1                 ;# p is an open tab now
+    set variant [string map {tests TESTS} $p]                ;# same file, different case
+    set ::els::session_pending [list $variant]
+    els::save_geometry
+    llength [dict get [raw_read $::els::config_path] session_files]
+} -result 1
+
 test cfg-2.5 {the first-run dialog's <Return> routes through the button (no % substitution of paths)} -setup {ui_reset} -body {
     els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
     catch {wm withdraw .cfgask}

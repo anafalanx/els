@@ -142,6 +142,9 @@ namespace eval els {
     variable recent_cap 12       ;# how many recent files to keep
     variable restore_session 1   ;# reopen file-backed tabs from the previous run
     variable session_files {}     ;# file-backed tabs saved from the previous run
+    variable session_pending {}   ;# saved session files that could NOT be restored this
+                                  ;# run (offline drive / locked at boot) — kept so a
+                                  ;# transient outage doesn't permanently forget them
     variable session_active ""    ;# active file path saved from the previous run
     variable session_owned 0      ;# 1 once THIS run adopted the saved session: an
                                   ;# explicit-file-arg launch never adopted it, so
@@ -485,6 +488,17 @@ proc els::save_geometry {} {
     if {[catch {
         if {$::els::session_owned} {
             set sf [els::session_current_files]
+            # keep this run's un-restorable files (offline/locked at boot) in the
+            # saved session so a transient outage doesn't erase them; once such a
+            # file opens it appears in session_current_files and the dedupe skips it,
+            # and closing a restored tab drops it as usual.  Dedupe with same_path
+            # (case-insensitive on Windows), matching the rest of the module — a
+            # different-case spelling of an open file must not be listed twice.
+            foreach p [els::session_sanitize $::els::session_pending] {
+                set dup 0
+                foreach q $sf { if {[els::same_path $p $q]} { set dup 1 ; break } }
+                if {!$dup} { lappend sf $p }
+            }
             set sa [els::session_current_active]
         } else {
             # this run never adopted the saved session (an explicit-file-arg
@@ -3900,11 +3914,16 @@ proc els::saveas {} {
 proc els::session_restore {} {
     if {!$::els::restore_session} { return 0 }
     set ::els::session_owned 1   ;# restoring IS adopting the stored session
+    set ::els::session_pending {}
     set restored {}
     foreach p [els::session_sanitize $::els::session_files] {
-        if {![file exists $p]} { continue }
+        # a file that is missing OR fails to open right now (a disconnected drive,
+        # a network share still coming up, a file briefly locked by a backup tool)
+        # is NOT dropped from the session — it is remembered as pending so the next
+        # save_geometry keeps it and the next launch retries it
+        if {![file exists $p]} { lappend ::els::session_pending $p ; continue }
         set id [els::open $p 1]
-        if {$id ne ""} { lappend restored [list $p $id] }
+        if {$id ne ""} { lappend restored [list $p $id] } else { lappend ::els::session_pending $p }
     }
     if {![llength $restored]} { return 0 }
     set target ""
