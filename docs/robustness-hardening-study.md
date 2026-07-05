@@ -82,8 +82,20 @@
 > (a forced disk flush on every ~2s swap tick is too costly for a snapshot a process
 > crash already preserves). Best-effort (never blocks a save) and native-only, so the
 > pure-Tcl dev path is unchanged. Tests: `winfs-5.1..5.3`.
-
----
+>
+> **P3 SEH crash handler — declined (2026-07-05), not merely deferred.** A deliberate
+> decision after weighing it explicitly. To salvage the last <2 s of *unswapped* edits a
+> crash handler must read the buffers out of the Tcl/Tk text widgets — i.e. call back
+> into Tcl from the faulting thread, where the interp/heap may be mid-operation, so the
+> handler can itself **deadlock** (heap lock held) or re-fault, turning a clean crash
+> into a hang. And the payoff is small: the swap subsystem already snapshots every dirty
+> doc every ~2 s (and shortly after each typing pause), and orphan-swap detection already
+> recognises an unclean exit and offers recovery next launch — so a hard crash today
+> already loses at most a couple of seconds of edits. A *safe* handler (a no-Tcl crash
+> breadcrumb to `els.log`) would add only diagnostics, which orphan detection largely
+> already provides. Net: not worth the risk of making crashes worse. Revisit only if a
+> future native "write-only C producer" stages swap bytes in C so the handler needs no
+> Tcl. (Supersedes the "deferred" note on the P3 row above and in §7.)
 
 ## 1. Executive summary & robustness posture today
 
