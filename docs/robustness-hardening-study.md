@@ -66,6 +66,22 @@
 > key reaches a recovered buffer until the user deliberately clicks in — the
 > accelerators are bound on `.` too, so shortcuts are unaffected. Regression:
 > `recover-focus-1.1`; the bare KeyPress-inserts-at-caret mechanism is `ui-3.1`.
+>
+> **Real `fsync` on save (2026-07-05).** Closes the durability gap flagged below
+> ("No fsync in Tcl 9.0.3 — flush+close only reach OS buffers"): a new native helper
+> `els::win_fsync` (`FlushFileBuffers`, `src/winfs.c`), called by `els::write_atomic` on
+> the **target after** the atomic replace, forces the file's data **and** the rename
+> metadata (the name→data binding) to the platter, so a saved document survives power
+> loss, not just a process crash (whose OS-cached bytes the OS still flushes). An
+> adversarial review caught the first cut flushing only the *pre-replace temp*: that
+> persists the new data clusters but not the directory change that repoints the name at
+> them, and NTFS journaling only guarantees post-crash *consistency*, not that the
+> replace is *persisted* at return — so a power cut just after the replace could roll
+> the name back to the old data. Flushing the final target fixes it. `els::write_atomic`
+> gained a `durable` flag; only `els::save` sets it — swaps/config/backups skip the flush
+> (a forced disk flush on every ~2s swap tick is too costly for a snapshot a process
+> crash already preserves). Best-effort (never blocks a save) and native-only, so the
+> pure-Tcl dev path is unchanged. Tests: `winfs-5.1..5.3`.
 
 ---
 

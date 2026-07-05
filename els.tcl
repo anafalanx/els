@@ -2773,7 +2773,7 @@ proc els::_save_emit {chan bytes} {
 # command is absent (a dev/tclsh run) the plain `file rename -force` below is used,
 # which does not carry those; a >260-char or locked target falls back to an
 # in-place write (non-atomic only for those rare cases).
-proc els::write_atomic {path bytes {tmpHint ""}} {
+proc els::write_atomic {path bytes {tmpHint ""} {durable 0}} {
     if {[file exists $path] && ![catch {file attributes $path -readonly} ro] && $ro} {
         return "the file is read-only"
     }
@@ -2795,16 +2795,31 @@ proc els::write_atomic {path bytes {tmpHint ""}} {
         return $e   ;# temp write failed; original untouched — do NOT fall back to
                     ;# an in-place truncate (it could also fail and lose the file)
     }
-    # Prefer ReplaceFileW (native build, src/winfs.c) when replacing an existing
-    # file: it is atomic AND preserves the target's ACLs, alternate data streams
-    # (e.g. the mark-of-the-web), and attributes — which a rename-replace drops.
+    # Durability model (SAVE-ONLY — only els::save passes durable; swaps/config/backups
+    # skip it, a forced flush on every ~2s swap tick being too costly for a snapshot a
+    # process crash already preserves).  The load-bearing flush is on the FINAL TARGET
+    # AFTER it holds the new content: FlushFileBuffers(target) forces the file's data AND
+    # the rename metadata (the name->data binding) to the platter.  NTFS journaling only
+    # guarantees post-crash CONSISTENCY, not that the replace is PERSISTED when the call
+    # returns — so without this a power cut just after the replace can roll the name back
+    # to the OLD data (the new, temp-flushed bytes then being an orphaned extent).  Flush
+    # is best-effort (never blocks a save) and native-only.
+    # Prefer ReplaceFileW (native build, src/winfs.c) when replacing an existing file:
+    # atomic AND preserves the target's ACLs, alternate data streams (mark-of-the-web),
+    # and attributes — which a rename-replace drops.
     if {[file exists $path] && [llength [info commands ::els::win_replace_file]]} {
         if {[els::win_replace_file [file nativename $path] [file nativename $tmp]] eq ""} {
+            if {$durable && [llength [info commands ::els::win_fsync]]} {
+                catch {els::win_fsync [file nativename $path]}
+            }
             return ""
         }
         # ReplaceFileW failed — fall through; the temp is still present.
     }
     if {![catch {file rename -force $tmp $path}]} {
+        if {$durable && [llength [info commands ::els::win_fsync]]} {
+            catch {els::win_fsync [file nativename $path]}
+        }
         return ""   ;# plain atomic rename — the common path without the C helper
     }
     # `file rename -force` cannot overwrite a target on a >260-char path (a locked
@@ -2818,6 +2833,9 @@ proc els::write_atomic {path bytes {tmpHint ""}} {
     # success; on failure, name the surviving temp so the bytes aren't lost.
     set err [els::_write_inplace $path $bytes]
     if {$err eq ""} {
+        if {$durable && [llength [info commands ::els::win_fsync]]} {
+            catch {els::win_fsync [file nativename $path]}
+        }
         catch {file delete -force $tmp}
         return ""
     }
@@ -3964,7 +3982,9 @@ proc els::save {{id ""} {quiet 0}} {
     # an overwriting save first preserves the file's CURRENT content as a
     # backup (best-effort; never blocks the save)
     if {[file exists $docPath($id)]} { els::backup_keep $docPath($id) }
-    if {[set err [els::write_atomic $docPath($id) $bytes]] ne ""} {
+    # durable: fsync the bytes to the platter — a saved document is the user's data
+    # and must survive power loss, not just a process crash (see els::write_atomic)
+    if {[set err [els::write_atomic $docPath($id) $bytes "" 1]] ne ""} {
         if {$quiet} {
             els::status_note "auto-save failed: [file tail $docPath($id)]"
         } else {

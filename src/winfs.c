@@ -217,11 +217,51 @@ static int VirtualScreen_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     return TCL_OK;
 }
 
+/* ---- durability: force buffered file data to the platter ------------------
+ * els::win_fsync <path> : FlushFileBuffers on <path> so its already-written bytes
+ *   survive power loss, not just a process crash (a crash leaves the data in the
+ *   OS cache, which the OS still flushes; only power loss / BSOD loses it).  els
+ *   calls this on the TARGET *after* the atomic replace, which forces both the file
+ *   data AND the rename metadata (the name->data binding) durable.  Flushing only
+ *   the pre-replace temp would persist the new data clusters but NOT the directory
+ *   change that repoints the name at them: NTFS journaling makes the volume come
+ *   back structurally CONSISTENT, not the last replace PERSISTED, so a power cut
+ *   right after the replace could roll the name back to the old data.  Returns "" on
+ *   success or a short error string (best-effort: the caller never blocks a save). */
+static int Fsync_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                     int objc, Tcl_Obj *const objv[]) {
+    if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "path"); return TCL_ERROR; }
+    Tcl_Size n; const char *p = Tcl_GetStringFromObj(objv[1], &n);
+    WCHAR *w = utf8_to_wide(p, n);
+    if (w == nullptr) { Tcl_SetObjResult(ip, Tcl_NewStringObj("path conversion failed", -1)); return TCL_OK; }
+    /* GENERIC_WRITE is required for FlushFileBuffers; share read+write so a
+     * concurrent reader/writer of the same file can't make the open fail. */
+    HANDLE h = CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD gle = GetLastError();           /* capture BEFORE Tcl_Free clobbers it */
+    Tcl_Free((char *)w);
+    if (h == INVALID_HANDLE_VALUE) {
+        Tcl_SetObjResult(ip, Tcl_ObjPrintf("open error %lu", (unsigned long)gle));
+        return TCL_OK;
+    }
+    BOOL ok = FlushFileBuffers(h);
+    gle = ok ? 0u : GetLastError();
+    CloseHandle(h);
+    if (ok) {
+        Tcl_SetObjResult(ip, Tcl_NewObj());                 /* "" = success */
+    } else {
+        Tcl_SetObjResult(ip, Tcl_ObjPrintf("FlushFileBuffers error %lu",
+                                            (unsigned long)gle));
+    }
+    return TCL_OK;
+}
+
 int Winfs_Init(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, "9.0", 0) == nullptr) return TCL_ERROR;
     /* fully-qualified name: Tcl creates ::els if it doesn't exist yet (this Init
      * may run before main.tcl is sourced, in the native build). */
     Tcl_CreateObjCommand(ip, "::els::win_replace_file",   ReplaceFile_Cmd,   nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_fsync",          Fsync_Cmd,         nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_lock_file",      LockFile_Cmd,      nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_unlock_file",    UnlockFile_Cmd,    nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_try_lock",       TryLock_Cmd,       nullptr, nullptr);

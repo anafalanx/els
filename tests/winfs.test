@@ -108,3 +108,29 @@ test winfs-1.3 {els::save routes through win_replace_file and preserves the file
     set residue [glob -nocomplain -directory $::ELS_TMP .els-save-*.tmp]
     list $rc $ads [llength $residue]
 } -result {1 1 0}
+
+# ---- durability: win_fsync (FlushFileBuffers) ------------------------------
+
+test winfs-5.1 {win_fsync forces a written file's bytes to disk and returns "" on success} -constraints winfsBuilt -setup {load_winfs} -body {
+    set p [file join $::ELS_TMP fsync_ok.txt]
+    set f [open $p w] ; puts -nonewline $f "durable bytes" ; close $f
+    set err [els::win_fsync [file nativename $p]]
+    set f [open $p r] ; set got [read $f] ; close $f    ;# content survives the flush intact
+    list $err $got
+} -result {{} {durable bytes}}
+
+test winfs-5.2 {win_fsync on a missing file returns a graceful error string, never a crash} -constraints winfsBuilt -setup {load_winfs} -body {
+    set p [file join $::ELS_TMP fsync_missing_xyz.txt]
+    catch {file delete -force $p}
+    set err [els::win_fsync [file nativename $p]]
+    list [expr {$err ne ""}] [string match "open error*" $err]
+} -result {1 1}
+
+test winfs-5.3 {write_atomic with durable=1 (the save path) flushes and round-trips byte-exact} -constraints winfsBuilt -setup {load_winfs} -body {
+    set p [file join $::ELS_TMP fsync_wa.txt]
+    set f [open $p w] ; puts -nonewline $f "old" ; close $f    ;# existing target -> ReplaceFileW + fsync temp
+    set err [els::write_atomic $p "new durable content" "" 1]
+    set f [open $p r] ; fconfigure $f -translation binary ; set got [read $f] ; close $f
+    set residue [glob -nocomplain -directory $::ELS_TMP .els-save-*.tmp]
+    list $err $got [llength $residue]
+} -result {{} {new durable content} 0}
