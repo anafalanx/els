@@ -1261,6 +1261,23 @@ proc els::build {} {
     .menu.edit add command -label Paste -accelerator Ctrl+V -command {els::menu_event <<Paste>>}
     .menu.edit add command -label "Select All" -accelerator Ctrl+A -command {els::menu_event <<SelectAll>>}
     .menu.edit add separator
+    .menu.edit add command -label "Move Line Up"    -accelerator Alt+Up       -command {els::xform::move -1}
+    .menu.edit add command -label "Move Line Down"  -accelerator Alt+Down     -command {els::xform::move 1}
+    .menu.edit add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
+    .menu.edit add command -label "Delete Line"     -accelerator Ctrl+Shift+K -command els::xform::delete_line
+    .menu.edit add command -label "Join Lines"      -accelerator Ctrl+J       -command els::xform::join_lines
+    .menu.edit add command -label "Indent"          -accelerator Tab          -command els::xform::indent
+    .menu.edit add command -label "Dedent"          -accelerator Shift+Tab    -command els::xform::dedent
+    .menu.edit add separator
+    .menu.edit add command -label "Sort Lines"             -command {els::xform::sort 1}
+    .menu.edit add command -label "Sort Lines Descending"  -command {els::xform::sort -1}
+    .menu.edit add command -label "Reverse Lines"          -command els::xform::reverse
+    .menu.edit add command -label "Remove Duplicate Lines" -command els::xform::dedupe
+    .menu.edit add separator
+    .menu.edit add command -label "UPPERCASE"                -command {els::xform::case upper}
+    .menu.edit add command -label "lowercase"                -command {els::xform::case lower}
+    .menu.edit add command -label "Trim Trailing Whitespace" -command els::xform::trim_trailing
+    .menu.edit add separator
     .menu.edit add command -label "Find..."       -accelerator Ctrl+F -command {els::find_show find}
     .menu.edit add command -label "Replace..."    -accelerator Ctrl+H -command {els::find_show replace}
     .menu.edit add command -label "Go to Line..." -accelerator Ctrl+G -command els::goto_line
@@ -1420,11 +1437,22 @@ proc els::build {} {
     # Button-3 action, so the caret is deliberately left where it is.
     bind elsText <Button-3>           { els::popup_text_menu %W %X %Y; break }
     # neutralize Tk's emacs-style Text defaults that surprise on a Windows editor
-    # (Ctrl+K kill-to-end, Ctrl+D delete-next, Ctrl+T transpose); break pre-empts
-    # the default Text binding so these keys do nothing
+    # (Ctrl+K kill-to-end, Ctrl+T transpose); break pre-empts the default binding
     bind elsText <Control-k> break
-    bind elsText <Control-d> break
     bind elsText <Control-t> break
+
+    # text-transform shortcuts (the Edit-menu commands).  Ctrl+D used to be a
+    # neutralized Text default (delete-next-char); it is now Duplicate Line.
+    bind elsText <Control-d>        { els::xform::duplicate;   break }
+    bind elsText <Control-j>        { els::xform::join_lines;  break }
+    bind elsText <Control-Shift-K>  { els::xform::delete_line; break }
+    bind elsText <Alt-Up>           { els::xform::move -1; break }
+    bind elsText <Alt-Down>         { els::xform::move  1; break }
+    # Tab indents only a multi-line selection (otherwise it is a literal tab);
+    # Shift+Tab always dedents.
+    bind elsText <Key-Tab>          { if {[els::xform::tab_indents %W]} { els::xform::indent; break } }
+    bind elsText <Shift-Key-Tab>    { els::xform::dedent; break }
+    bind elsText <Key-ISO_Left_Tab> { els::xform::dedent; break }
 
     # the same accelerators on the toplevel, for when focus is off the text
     bind . <Control-n> { els::new;       break }
@@ -1439,6 +1467,11 @@ proc els::build {} {
     bind . <Control-f> { els::find_show find;    break }
     bind . <Control-h> { els::find_show replace; break }
     bind . <Control-g> { els::goto_line;         break }
+    bind . <Control-d>       { els::xform::duplicate;   break }
+    bind . <Control-j>       { els::xform::join_lines;  break }
+    bind . <Control-Shift-K> { els::xform::delete_line; break }
+    bind . <Alt-Up>          { els::xform::move -1; break }
+    bind . <Alt-Down>        { els::xform::move  1; break }
     bind . <Control-plus>       { els::zoom 1;     break }
     bind . <Control-equal>      { els::zoom 1;     break }
     bind . <Control-minus>      { els::zoom -1;    break }
@@ -1843,6 +1876,205 @@ proc els::menu_redo {} {
     els::refresh_schedule
 }
 proc els::menu_event {ev} { set w [els::T] ; if {$w ne ""} { event generate $w $ev } }
+
+# ---- text transforms (Edit menu) ------------------------------------------
+# A curated, opinionated set of buffer transforms.  Each is undo-atomic (one
+# separator-bracketed edit == one undo) and routes through swap_touch + a view
+# refresh so crash protection and the gutter/whitespace stay in sync, exactly
+# like a typed edit.  Conventions: line-reorder ops act on the selected lines or,
+# with no selection, the WHOLE buffer; the rest act on the selected lines (or the
+# current line).  els indents with a tab (no width knob); dedent also eats up to
+# four leading spaces so space-indented text still outdents.
+namespace eval ::els::xform {}
+
+# Bracket BODY (run in the caller's frame) as a single undo unit on widget W, then
+# poke the swap + view like any edit.
+proc els::xform::atomic {w body} {
+    set as [$w cget -autoseparators]
+    $w configure -autoseparators 0
+    $w edit separator
+    set rc [catch {uplevel 1 $body} res opts]
+    $w edit separator
+    $w configure -autoseparators $as
+    if {$rc == 0} { catch {els::swap_touch} ; catch {els::refresh_schedule} }
+    return -options $opts $res
+}
+proc els::xform::lastline {w} { return [lindex [split [$w index "end - 1 char"] .] 0] }
+# 1-based line span the selection touches, else the current line.  A selection that
+# ends at column 0 does not pull in that trailing (untouched) line.
+proc els::xform::span {w} {
+    set r [$w tag ranges sel]
+    if {[llength $r]} {
+        lassign [split [$w index [lindex $r 0]] .] l1 c1
+        lassign [split [$w index [lindex $r end]] .] l2 c2
+        if {$c2 == 0 && $l2 > $l1} { incr l2 -1 }
+        return [list $l1 $l2]
+    }
+    lassign [split [$w index insert] .] l c
+    return [list $l $l]
+}
+proc els::xform::span_or_all {w} {
+    if {[llength [$w tag ranges sel]]} { return [els::xform::span $w] }
+    return [list 1 [els::xform::lastline $w]]
+}
+# Replace whole lines L1..L2 with LIST (leaving the trailing newline structure intact).
+proc els::xform::replace_lines {w l1 l2 list} {
+    $w replace "$l1.0" "$l2.end" [join $list \n]
+}
+proc els::xform::reselect {w l1 n} {
+    $w tag remove sel 1.0 end
+    if {$n > 0} { $w tag add sel "$l1.0" "[expr {$l1 + $n - 1}].end" ; $w mark set insert "$l1.0" }
+}
+
+# --- move a line / block up or down ---------------------------------------
+proc els::xform::move {dir} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span $w] l1 l2
+    if {$dir < 0 && $l1 <= 1} return
+    if {$dir > 0 && $l2 >= [els::xform::lastline $w]} return
+    if {$dir < 0} {
+        els::xform::atomic $w {
+            set lines [split [$w get "[expr {$l1-1}].0" "$l2.end"] \n]
+            els::xform::replace_lines $w [expr {$l1-1}] $l2 \
+                [concat [lrange $lines 1 end] [list [lindex $lines 0]]]
+        }
+        els::xform::reselect $w [expr {$l1-1}] [expr {$l2-$l1+1}]
+    } else {
+        els::xform::atomic $w {
+            set lines [split [$w get "$l1.0" "[expr {$l2+1}].end"] \n]
+            els::xform::replace_lines $w $l1 [expr {$l2+1}] \
+                [concat [list [lindex $lines end]] [lrange $lines 0 end-1]]
+        }
+        els::xform::reselect $w [expr {$l1+1}] [expr {$l2-$l1+1}]
+    }
+}
+
+# --- duplicate the current line / selected lines below the block ----------
+proc els::xform::duplicate {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span $w] l1 l2
+    set block [$w get "$l1.0" "$l2.end"]
+    els::xform::atomic $w { $w insert "$l2.end" "\n$block" }
+    els::xform::reselect $w [expr {$l2+1}] [expr {$l2-$l1+1}]
+}
+
+# --- delete the current line / selected lines entirely --------------------
+proc els::xform::delete_line {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span $w] l1 l2
+    set last [els::xform::lastline $w]
+    els::xform::atomic $w {
+        if {$l2 >= $last} {
+            if {$l1 <= 1} { $w delete 1.0 end } else { $w delete "[expr {$l1-1}].end" "end - 1 char" }
+        } else {
+            $w delete "$l1.0" "[expr {$l2+1}].0"
+        }
+    }
+    $w tag remove sel 1.0 end
+    catch {$w mark set insert "$l1.0"} ; $w see insert
+}
+
+# --- join the selected lines (or current + next) into one -----------------
+proc els::xform::join_lines {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span $w] l1 l2
+    if {$l1 == $l2} {
+        if {$l2 >= [els::xform::lastline $w]} return
+        incr l2
+    }
+    set lines [split [$w get "$l1.0" "$l2.end"] \n]
+    set joined [lindex $lines 0]
+    foreach l [lrange $lines 1 end] { append joined " " [string trimleft $l] }
+    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 [list $joined] }
+    $w tag remove sel 1.0 end ; $w mark set insert "$l1.end"
+}
+
+# --- sort / reverse / dedupe lines (selection, else whole buffer) ---------
+proc els::xform::sort {{dir 1}} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span_or_all $w] l1 l2
+    set lines [split [$w get "$l1.0" "$l2.end"] \n]
+    set out [expr {$dir < 0 ? [lsort -decreasing $lines] : [lsort $lines]}]
+    if {$out eq $lines} return
+    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 $out }
+    els::xform::reselect $w $l1 [llength $out]
+}
+proc els::xform::reverse {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span_or_all $w] l1 l2
+    set lines [split [$w get "$l1.0" "$l2.end"] \n]
+    if {[llength $lines] < 2} return
+    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 [lreverse $lines] }
+    els::xform::reselect $w $l1 [llength $lines]
+}
+proc els::xform::dedupe {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span_or_all $w] l1 l2
+    set lines [split [$w get "$l1.0" "$l2.end"] \n]
+    set out {} ; set seen {}
+    foreach l $lines { if {![dict exists $seen $l]} { dict set seen $l 1 ; lappend out $l } }
+    if {$out eq $lines} return
+    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 $out }
+    els::xform::reselect $w $l1 [llength $out]
+}
+
+# --- case transforms (selection, else current line) -----------------------
+proc els::xform::case {mode} {
+    set w [els::T] ; if {$w eq ""} return
+    set r [$w tag ranges sel]
+    if {[llength $r]} { set a [$w index [lindex $r 0]] ; set b [$w index [lindex $r end]] } \
+    else { set a [$w index "insert linestart"] ; set b [$w index "insert lineend"] }
+    set txt [$w get $a $b]
+    set new [expr {$mode eq "upper" ? [string toupper $txt] : [string tolower $txt]}]
+    if {$new eq $txt} return
+    els::xform::atomic $w { $w replace $a $b $new }
+    $w tag remove sel 1.0 end
+    $w tag add sel $a [$w index "$a + [string length $new] chars"]
+}
+
+# --- trim trailing whitespace across the whole buffer ---------------------
+proc els::xform::trim_trailing {} {
+    set w [els::T] ; if {$w eq ""} return
+    set lines [split [$w get 1.0 "end - 1 char"] \n]
+    set out [lmap l $lines { string trimright $l " \t" }]
+    if {$out eq $lines} return
+    set ins [$w index insert]
+    els::xform::atomic $w { $w replace 1.0 "end - 1 char" [join $out \n] }
+    catch {$w mark set insert $ins} ; $w see insert
+}
+
+# --- indent / dedent the selected lines (or the current line) -------------
+proc els::xform::indent {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span $w] l1 l2
+    els::xform::atomic $w {
+        for {set l $l1} {$l <= $l2} {incr l} { $w insert "$l.0" "\t" }
+    }
+    $w tag remove sel 1.0 end ; $w tag add sel "$l1.0" "$l2.end"
+}
+proc els::xform::dedent {} {
+    set w [els::T] ; if {$w eq ""} return
+    lassign [els::xform::span $w] l1 l2
+    els::xform::atomic $w {
+        for {set l $l1} {$l <= $l2} {incr l} {
+            set line [$w get "$l.0" "$l.end"]
+            if {[string index $line 0] eq "\t"} {
+                $w delete "$l.0" "$l.0 + 1 char"
+            } elseif {[string index $line 0] eq " "} {
+                set n 0 ; while {$n < 4 && [string index $line $n] eq " "} { incr n }
+                $w delete "$l.0" "$l.0 + $n chars"
+            }
+        }
+    }
+    $w tag remove sel 1.0 end ; $w tag add sel "$l1.0" "$l2.end"
+}
+# Tab indents only when the selection spans more than one line; otherwise a Tab is
+# just a Tab.  Shift+Tab always dedents (the current line if nothing is selected).
+proc els::xform::tab_indents {w} {
+    if {![llength [$w tag ranges sel]]} { return 0 }
+    lassign [els::xform::span $w] l1 l2
+    return [expr {$l2 > $l1}]
+}
 proc els::on_modified {w} {
     variable active
     set id [els::id_of $w]

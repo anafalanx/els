@@ -1604,10 +1604,10 @@ test reg-7.1 {Whole Word + Regex alternation does not match inside larger words}
 } -result 2
 
 # ---- UX polish ----------------------------------------------------------
-test ui-3.4 {Ctrl+K / Ctrl+D / Ctrl+T do nothing (Tk's emacs Text defaults neutralized)} -setup {ui_reset} -body {
+test ui-3.4 {Ctrl+K / Ctrl+T do nothing (Tk's emacs Text defaults neutralized; Ctrl+D is now Duplicate Line)} -setup {ui_reset} -body {
     set w [els::T] ; $w insert end "hello world"
     $w mark set insert 1.0
-    event generate $w <Control-k> ; event generate $w <Control-d> ; event generate $w <Control-t>
+    event generate $w <Control-k> ; event generate $w <Control-t>
     update
     els_text
 } -result {hello world}

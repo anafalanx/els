@@ -1,0 +1,182 @@
+# tests/xform.test -- the curated text-manipulation commands (els::xform::*).
+# Each proc is exercised directly (buffer in -> buffer out) plus edge cases, undo
+# atomicity, and a couple of keybinding smoke checks.  els_reset builds a focused
+# active document (helpers.tcl), so [els::T] is a live text widget.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+# fill the active buffer with $s, clear the undo stack, drop the caret at 1.0
+proc xf_fill {s} {
+    set w [els::T]
+    $w delete 1.0 end ; $w insert end $s ; $w edit reset ; $w mark set insert 1.0
+    return $w
+}
+proc xf_body {} { return [[els::T] get 1.0 "end - 1 char"] }
+proc xf_sel {a b} { set w [els::T] ; $w tag remove sel 1.0 end ; $w tag add sel $a $b }
+
+# ---- move line up / down --------------------------------------------------
+test xform-move-1.1 {move the current line down} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 1.0
+    els::xform::move 1 ; xf_body
+} -result "b\na\nc"
+test xform-move-1.2 {move the current line up} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 2.0
+    els::xform::move -1 ; xf_body
+} -result "b\na\nc"
+test xform-move-1.3 {move up at the top is a no-op} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 1.0
+    els::xform::move -1 ; xf_body
+} -result "a\nb\nc"
+test xform-move-1.4 {move down at the bottom is a no-op} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 3.0
+    els::xform::move 1 ; xf_body
+} -result "a\nb\nc"
+test xform-move-1.5 {move a multi-line selection down as a block} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc\nd"] ; xf_sel 1.0 2.end
+    els::xform::move 1 ; xf_body
+} -result "c\na\nb\nd"
+
+# ---- duplicate ------------------------------------------------------------
+test xform-dup-1.1 {duplicate the current line below it} -setup {els_reset} -body {
+    set w [xf_fill "a\nb"] ; $w mark set insert 1.0
+    els::xform::duplicate ; xf_body
+} -result "a\na\nb"
+test xform-dup-1.2 {duplicate a multi-line selection as a block} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; xf_sel 1.0 2.end
+    els::xform::duplicate ; xf_body
+} -result "a\nb\na\nb\nc"
+
+# ---- delete line ----------------------------------------------------------
+test xform-del-1.1 {delete a middle line} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 2.0
+    els::xform::delete_line ; xf_body
+} -result "a\nc"
+test xform-del-1.2 {delete the last line (no dangling blank line)} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 3.0
+    els::xform::delete_line ; xf_body
+} -result "a\nb"
+test xform-del-1.3 {delete the first line} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w mark set insert 1.0
+    els::xform::delete_line ; xf_body
+} -result "b\nc"
+test xform-del-1.4 {delete the only line empties the buffer} -setup {els_reset} -body {
+    set w [xf_fill "abc"] ; $w mark set insert 1.0
+    els::xform::delete_line ; xf_body
+} -result ""
+test xform-del-1.5 {delete all lines spanned by a selection} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc\nd"] ; xf_sel 2.0 3.end
+    els::xform::delete_line ; xf_body
+} -result "a\nd"
+
+# ---- join lines -----------------------------------------------------------
+test xform-join-1.1 {join the current line with the next} -setup {els_reset} -body {
+    set w [xf_fill "hello\nworld"] ; $w mark set insert 1.0
+    els::xform::join_lines ; xf_body
+} -result "hello world"
+test xform-join-1.2 {join selected lines, trimming leading whitespace} -setup {els_reset} -body {
+    set w [xf_fill "a\n  b\n\tc"] ; xf_sel 1.0 3.end
+    els::xform::join_lines ; xf_body
+} -result "a b c"
+test xform-join-1.3 {join on the last line is a no-op} -setup {els_reset} -body {
+    set w [xf_fill "a\nb"] ; $w mark set insert 2.0
+    els::xform::join_lines ; xf_body
+} -result "a\nb"
+
+# ---- sort / reverse / dedupe (whole buffer with no selection) -------------
+test xform-sort-1.1 {sort the whole buffer ascending} -setup {els_reset} -body {
+    xf_fill "cherry\napple\nbanana" ; els::xform::sort 1 ; xf_body
+} -result "apple\nbanana\ncherry"
+test xform-sort-1.2 {sort descending} -setup {els_reset} -body {
+    xf_fill "apple\nbanana\ncherry" ; els::xform::sort -1 ; xf_body
+} -result "cherry\nbanana\napple"
+test xform-sort-1.3 {sort only the selected lines, leaving the rest} -setup {els_reset} -body {
+    set w [xf_fill "z\nc\na\nx"] ; xf_sel 2.0 3.end
+    els::xform::sort 1 ; xf_body
+} -result "z\na\nc\nx"
+test xform-rev-1.1 {reverse the line order} -setup {els_reset} -body {
+    xf_fill "a\nb\nc" ; els::xform::reverse ; xf_body
+} -result "c\nb\na"
+test xform-dedupe-1.1 {remove duplicate lines, keeping first occurrence order} -setup {els_reset} -body {
+    xf_fill "a\nb\na\nc\nb\na" ; els::xform::dedupe ; xf_body
+} -result "a\nb\nc"
+
+# ---- case transforms ------------------------------------------------------
+test xform-case-1.1 {UPPERCASE the selection} -setup {els_reset} -body {
+    set w [xf_fill "hello there"] ; xf_sel 1.0 1.5
+    els::xform::case upper ; xf_body
+} -result "HELLO there"
+test xform-case-1.2 {lowercase the selection} -setup {els_reset} -body {
+    set w [xf_fill "HELLO THERE"] ; xf_sel 1.0 1.end
+    els::xform::case lower ; xf_body
+} -result "hello there"
+test xform-case-1.3 {with no selection, case acts on the current line} -setup {els_reset} -body {
+    set w [xf_fill "one\ntwo"] ; $w mark set insert 2.0
+    els::xform::case upper ; xf_body
+} -result "one\nTWO"
+
+# ---- trim trailing whitespace ---------------------------------------------
+test xform-trim-1.1 {trim trailing spaces and tabs on every line} -setup {els_reset} -body {
+    xf_fill "a  \nb\t\nc" ; els::xform::trim_trailing ; xf_body
+} -result "a\nb\nc"
+test xform-trim-1.2 {a clean buffer is left untouched (not dirtied)} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; $w edit modified 0
+    els::xform::trim_trailing
+    list [xf_body] [$w edit modified]
+} -result [list "a\nb\nc" 0]
+
+# ---- indent / dedent ------------------------------------------------------
+test xform-indent-1.1 {indent the selected lines with a tab} -setup {els_reset} -body {
+    set w [xf_fill "a\nb"] ; xf_sel 1.0 2.end
+    els::xform::indent ; xf_body
+} -result "\ta\n\tb"
+test xform-dedent-1.1 {dedent removes a leading tab} -setup {els_reset} -body {
+    set w [xf_fill "\ta\n\tb"] ; xf_sel 1.0 2.end
+    els::xform::dedent ; xf_body
+} -result "a\nb"
+test xform-dedent-1.2 {dedent also eats up to four leading spaces} -setup {els_reset} -body {
+    set w [xf_fill "    a\n  b"] ; xf_sel 1.0 2.end
+    els::xform::dedent ; xf_body
+} -result "a\nb"
+
+# ---- undo atomicity: one transform == one undo ----------------------------
+test xform-undo-1.1 {a sort is a single undo step} -setup {els_reset} -body {
+    set w [xf_fill "c\nb\na"] ; els::xform::sort 1
+    $w edit undo ; xf_body
+} -result "c\nb\na"
+test xform-undo-1.2 {a duplicate is a single undo step} -setup {els_reset} -body {
+    set w [xf_fill "a\nb"] ; $w mark set insert 1.0 ; els::xform::duplicate
+    $w edit undo ; xf_body
+} -result "a\nb"
+
+# ---- boundary / edge cases ------------------------------------------------
+test xform-edge-1.1 {every command is safe (no throw) on an empty buffer} -setup {els_reset} -body {
+    set errs {}
+    foreach cmd {{move 1} {move -1} duplicate delete_line join_lines {sort 1} {sort -1} \
+                 reverse dedupe {case upper} {case lower} trim_trailing indent dedent} {
+        xf_fill ""    ;# a fresh empty buffer before each
+        if {[catch {els::xform::[lindex $cmd 0] {*}[lrange $cmd 1 end]} e]} { lappend errs "$cmd: $e" }
+    }
+    set errs
+} -result {}
+test xform-edge-1.2 {duplicate the LAST line (mandatory-final-newline boundary)} -setup {els_reset} -body {
+    set w [xf_fill "a\nb"] ; $w mark set insert 2.0
+    els::xform::duplicate ; xf_body
+} -result "a\nb\nb"
+test xform-edge-1.3 {trim preserves a trailing blank final line, only stripping the trailing spaces} -setup {els_reset} -body {
+    xf_fill "x \ny " ; els::xform::trim_trailing ; xf_body
+} -result "x\ny"
+test xform-edge-1.4 {a selection ending at column 0 does not pull in that trailing line (move down)} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; xf_sel 1.0 2.0
+    els::xform::move 1 ; xf_body
+} -result "b\na\nc"
+test xform-edge-1.5 {sort / reverse of a single line is a no-op (does not dirty the doc)} -setup {els_reset} -body {
+    set w [xf_fill "solo"] ; $w edit modified 0
+    els::xform::sort 1 ; els::xform::reverse
+    list [xf_body] [$w edit modified]
+} -result [list "solo" 0]
+
+# ---- keybinding smoke: Ctrl+D is wired to Duplicate -----------------------
+test xform-key-1.1 {Ctrl+D on elsText invokes Duplicate Line (repurposed from a neutralized default)} -setup {els_reset} -body {
+    string match "*xform::duplicate*" [bind elsText <Control-d>]
+} -result 1
