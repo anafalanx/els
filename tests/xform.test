@@ -14,6 +14,18 @@ proc xf_fill {s} {
 }
 proc xf_body {} { return [[els::T] get 1.0 "end - 1 char"] }
 proc xf_sel {a b} { set w [els::T] ; $w tag remove sel 1.0 end ; $w tag add sel $a $b }
+proc xf_menu_has {menu label} {
+    for {set i 0} {$i <= [$menu index end]} {incr i} {
+        if {[$menu type $i] eq "command" && ![catch {$menu entrycget $i -label} l] && $l eq $label} { return 1 }
+    }
+    return 0
+}
+proc xf_menubar_has {label} {
+    for {set i 0} {$i <= [.menu index end]} {incr i} {
+        if {[.menu type $i] eq "cascade" && ![catch {.menu entrycget $i -label} l] && $l eq $label} { return 1 }
+    }
+    return 0
+}
 
 # ---- move line up / down --------------------------------------------------
 test xform-move-1.1 {move the current line down} -setup {els_reset} -body {
@@ -180,3 +192,11 @@ test xform-edge-1.5 {sort / reverse of a single line is a no-op (does not dirty 
 test xform-key-1.1 {Ctrl+D on elsText invokes Duplicate Line (repurposed from a neutralized default)} -setup {els_reset} -body {
     string match "*xform::duplicate*" [bind elsText <Control-d>]
 } -result 1
+
+# ---- the commands live in a top-level Buffer menu, not in Edit -------------
+test xform-menu-1.1 {a Buffer menu carries the transforms; Edit no longer does} -setup {els_reset} -body {
+    list [xf_menubar_has Buffer] \
+         [xf_menu_has .menu.buffer "Duplicate Line"] [xf_menu_has .menu.buffer "Sort Lines"] \
+         [xf_menu_has .menu.buffer "UPPERCASE"] \
+         [xf_menu_has .menu.edit "Duplicate Line"]
+} -result {1 1 1 1 0}

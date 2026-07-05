@@ -1261,26 +1261,31 @@ proc els::build {} {
     .menu.edit add command -label Paste -accelerator Ctrl+V -command {els::menu_event <<Paste>>}
     .menu.edit add command -label "Select All" -accelerator Ctrl+A -command {els::menu_event <<SelectAll>>}
     .menu.edit add separator
-    .menu.edit add command -label "Move Line Up"    -accelerator Alt+Up       -command {els::xform::move -1}
-    .menu.edit add command -label "Move Line Down"  -accelerator Alt+Down     -command {els::xform::move 1}
-    .menu.edit add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
-    .menu.edit add command -label "Delete Line"     -accelerator Ctrl+Shift+K -command els::xform::delete_line
-    .menu.edit add command -label "Join Lines"      -accelerator Ctrl+J       -command els::xform::join_lines
-    .menu.edit add command -label "Indent"          -accelerator Tab          -command els::xform::indent
-    .menu.edit add command -label "Dedent"          -accelerator Shift+Tab    -command els::xform::dedent
-    .menu.edit add separator
-    .menu.edit add command -label "Sort Lines"             -command {els::xform::sort 1}
-    .menu.edit add command -label "Sort Lines Descending"  -command {els::xform::sort -1}
-    .menu.edit add command -label "Reverse Lines"          -command els::xform::reverse
-    .menu.edit add command -label "Remove Duplicate Lines" -command els::xform::dedupe
-    .menu.edit add separator
-    .menu.edit add command -label "UPPERCASE"                -command {els::xform::case upper}
-    .menu.edit add command -label "lowercase"                -command {els::xform::case lower}
-    .menu.edit add command -label "Trim Trailing Whitespace" -command els::xform::trim_trailing
-    .menu.edit add separator
     .menu.edit add command -label "Find..."       -accelerator Ctrl+F -command {els::find_show find}
     .menu.edit add command -label "Replace..."    -accelerator Ctrl+H -command {els::find_show replace}
     .menu.edit add command -label "Go to Line..." -accelerator Ctrl+G -command els::goto_line
+
+    # Buffer: the text-manipulation commands, lifted out of Edit to keep it uncluttered.
+    # Line ops act on the selected lines (or the current line); sort/reverse/dedupe act on
+    # the selection, else the whole buffer.
+    menu .menu.buffer
+    .menu add cascade -label Buffer -menu .menu.buffer
+    .menu.buffer add command -label "Move Line Up"    -accelerator Alt+Up       -command {els::xform::move -1}
+    .menu.buffer add command -label "Move Line Down"  -accelerator Alt+Down     -command {els::xform::move 1}
+    .menu.buffer add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
+    .menu.buffer add command -label "Delete Line"     -accelerator Ctrl+Shift+K -command els::xform::delete_line
+    .menu.buffer add command -label "Join Lines"      -accelerator Ctrl+J       -command els::xform::join_lines
+    .menu.buffer add command -label "Indent"          -accelerator Tab          -command els::xform::indent
+    .menu.buffer add command -label "Dedent"          -accelerator Shift+Tab    -command els::xform::dedent
+    .menu.buffer add separator
+    .menu.buffer add command -label "Sort Lines"             -command {els::xform::sort 1}
+    .menu.buffer add command -label "Sort Lines Descending"  -command {els::xform::sort -1}
+    .menu.buffer add command -label "Reverse Lines"          -command els::xform::reverse
+    .menu.buffer add command -label "Remove Duplicate Lines" -command els::xform::dedupe
+    .menu.buffer add separator
+    .menu.buffer add command -label "UPPERCASE"                -command {els::xform::case upper}
+    .menu.buffer add command -label "lowercase"                -command {els::xform::case lower}
+    .menu.buffer add command -label "Trim Trailing Whitespace" -command els::xform::trim_trailing
     menu .menu.view
     .menu add cascade -label View -menu .menu.view
     .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \

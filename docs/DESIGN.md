@@ -121,7 +121,7 @@ Written down so they stay decided:
 - No regex debugger, token-builder, or named-search manager: over-scoped.
 - No modal find/replace dialog.
 - **No scripting / extension API.** The text-manipulation commands ship as a fixed,
-  curated set (Edit menu; see below), not as a user-scriptable buffer API. A scripting
+  curated set (Buffer menu; see below), not as a user-scriptable buffer API. A scripting
   surface is the ultimate knob — it would contradict the whole "no settings" identity,
   add a security/API-stability surface to a data-safety editor, and turn 1.0 from "a
   decided tool" into "an extensible platform." Decided against, 2026-07-05.
@@ -130,7 +130,7 @@ Written down so they stay decided:
 
 ## Text commands
 
-A small, opinionated set of buffer transforms (Edit menu + keys), each undo-atomic. Line
+A small, opinionated set of buffer transforms (Buffer menu + keys), each undo-atomic. Line
 ops act on the selected lines or the current line; sort/reverse/dedupe act on the selection
 or, with none, the whole buffer.
 

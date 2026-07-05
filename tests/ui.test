@@ -358,13 +358,13 @@ test ui-7.1 {the scrollbar hides for a short doc, shows for a long one} -setup {
 } -result {0 1}
 
 # ---- menus --------------------------------------------------------------
-test ui-8.1 {the menu bar has File / View / Help cascades} -setup {ui_reset} -body {
+test ui-8.1 {the menu bar has File / Edit / Buffer / View / Help cascades} -setup {ui_reset} -body {
     set labels {}
     for {set i 0} {$i <= [.menu index end]} {incr i} {
         if {[.menu type $i] eq "cascade"} { lappend labels [.menu entrycget $i -label] }
     }
     set labels
-} -result {File Edit View Help}
+} -result {File Edit Buffer View Help}
 
 test ui-8.2 {File menu items are wired} -setup {ui_reset} -body {
     set b [llength $::els::docs]

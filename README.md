@@ -55,7 +55,7 @@ in **Settings > Default apps**.
   highlighting, Match Case / Whole Word / Regex, backreferences, an adapt-case
   replace, search history, a wrapped-search indicator, and a built-in regex
   reference.
-- **Text commands** (Edit menu): a curated, undo-atomic set — move lines up/down
+- **Text commands** (Buffer menu): a curated, undo-atomic set — move lines up/down
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
   dedent (Tab / Shift+Tab), sort / sort-descending / reverse / remove-duplicate
   lines, UPPERCASE / lowercase, and trim trailing whitespace.
