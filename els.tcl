@@ -3517,6 +3517,14 @@ proc els::recover_load {rec branch} {
     set ::els::dirtySince($tid) 1
     els::update_tab $tid
     els::settitle
+    # Keep recovered content EXACTLY as it crashed until the user deliberately
+    # engages.  new_doc -> switch_to left this widget keyboard-focused with the caret
+    # at the restored cursor, so a stray printable keystroke arriving during the
+    # non-interactive startup window — e.g. a space in flight as the window first
+    # grabs foreground — would insert into the recovered text at the caret (a leading
+    # space when the cursor is at 1.0).  Drop keyboard focus to the toplevel: the
+    # accelerators are bound there too, and a click re-engages the tab for editing.
+    catch {focus .}
     return $tid
 }
 # decision: recover | discard.  Suspends autosave so the running tick can't write

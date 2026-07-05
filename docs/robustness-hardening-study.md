@@ -48,12 +48,24 @@
 > asserts ring *content*, not just count. (b) **Astral / IME coverage** — new
 > `astral-*` round-trip tests (emoji, CJK-Ext-B, ZWJ sequences, decomposed combining
 > and Hangul jamo) confirm beyond-BMP text and un-normalised combining runs survive
-> open→buffer→save and the swap format. (c) **Observed, low-severity:** under
-> pathological disk contention a crash-*recovered* buffer has, very rarely, shown a
-> spurious leading space. The swap format's CRC proves the *stored* text is intact
-> (`swap_read` rejects a bad payload), so the whitespace is introduced after the
-> in-memory insert and the recovered content is never lost; the recovery probe now
-> asserts trimmed content-equality. Not root-caused (not reproducible on demand).
+> open→buffer→save and the swap format.
+>
+> **Recovery-whitespace anomaly — root-caused and fixed (2026-07-05).** The rare
+> spurious leading space on a crash-*recovered* buffer (seen only under pathological
+> disk contention) is a **stray startup keystroke**, not a data bug. `swap_read`'s
+> length+CRC check proves the stored text is byte-exact, and the whole recover chain
+> runs in one synchronous callback with no event-loop turn, so the space can only
+> enter *after* `recover_load` returns. `new_doc → switch_to` left the recovered
+> widget keyboard-focused with the caret at the restored cursor (1.0), and els's
+> `elsText` bindtag does not `break` the default `Text` `<KeyPress>` binding — so a
+> printable key delivered while the freshly-mapped process transiently held the
+> foreground (a space in flight from the host input queue) inserted U+0020 at index
+> 0 → `" RECOVERED!"`. Only the space bar fits (Return gives a leading newline;
+> modifiers/arrows insert nothing), which is why the injected char is a space. Fix:
+> `recover_load` now drops keyboard focus to the toplevel (`focus .`), so no stray
+> key reaches a recovered buffer until the user deliberately clicks in — the
+> accelerators are bound on `.` too, so shortcuts are unaffected. Regression:
+> `recover-focus-1.1`; the bare KeyPress-inserts-at-caret mechanism is `ui-3.1`.
 
 ---
 

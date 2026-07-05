@@ -539,3 +539,23 @@ test review-recovered-label-1.1 {a recovered tab is labelled "(recovered)"; savi
     els::save
     list $labelled [info exists ::els::docRecovered($id)]
 } -result {1 0}
+
+# ---- recovered content must not absorb a stray startup keystroke -----------
+# Root-caused flake: a crash-recovered buffer was left keyboard-focused (via
+# new_doc -> switch_to -> focus $w) with the caret at the restored cursor (1.0), so a
+# stray printable key in flight as the window first grabbed foreground during startup
+# inserted at the caret — a leading space when the cursor sat at 1.0 — yielding a
+# rare " RECOVERED!".  (The bare KeyPress-inserts-at-caret mechanism is ui-3.1;
+# recover_load now drops focus to the toplevel so no stray key can reach the buffer.)
+
+test recover-focus-1.1 {recover_load drops keyboard focus to the toplevel so a stray startup key cannot reach the recovered buffer} -setup recover_reset -body {
+    set rec [dict create schema 1 sessionId sK docId dK path "" enc utf-8 bom 0 eol lf \
+                 cursor 1.0 dirty 1 savedSig "" mtime [clock seconds] host h bodyCrc 0 text "RECOVERED!"]
+    set tid [els::recover_load $rec untitled]
+    set w [els::W $tid]
+    # switch_to focused the recovered widget; the fix moved focus to "." — a stray
+    # printable key now lands on the toplevel (no text insert), and the recovered
+    # buffer is byte-exact.  ([focus] eq "." proves the focus-off actually ran, not
+    # merely that focus happens to differ from the widget.)
+    list [expr {[focus] eq "."}] [expr {[focus] ne $w}] [$w get 1.0 "end - 1 char"]
+} -result {1 1 RECOVERED!}
