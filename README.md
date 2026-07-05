@@ -266,7 +266,7 @@ behind atomic saves and the crash-recovery liveness locks. Tests live in
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.90**: a complete editor, polishing toward 1.0.
+it, or build it yourself. Currently **v0.91**: a complete editor, polishing toward 1.0.
 
 Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
 [`LICENSE`](LICENSE).
