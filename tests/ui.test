@@ -482,8 +482,10 @@ test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup
     set blob [join $texts \n]
     destroy .keys
     list $isWin [string match *Ctrl+N* $blob] [string match *New?tab* $blob] \
-         [string match *Zoom?in* $blob] [string match *Replace* $blob]
-} -result {1 1 1 1 1}
+         [string match *Zoom?in* $blob] [string match *Replace* $blob] \
+         [string match *Duplicate?line* $blob] [string match {*Ctrl+Shift+K*} $blob] \
+         [string match *Move?line?up* $blob]
+} -result {1 1 1 1 1 1 1 1}
 
 test ui-9.2a {Shortcuts lists navigation/selection keys with a zoom-independent font} -setup {ui_reset} -body {
     els::set_font_size 28 0                ;# zoom the editor up (no persist)

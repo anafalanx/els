@@ -4386,6 +4386,13 @@ proc els::shortcuts {} {
                 Ctrl+V  {Paste}
                 Ctrl+A  {Select all}
             }
+            Lines {
+                {Alt+↑/↓}       {Move line up / down}
+                Ctrl+D          {Duplicate line}
+                Ctrl+Shift+K    {Delete line}
+                Ctrl+J          {Join lines}
+                {Tab/Shift+Tab} {Indent / dedent selection}
+            }
         }
         {
             Navigation {
