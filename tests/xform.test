@@ -151,6 +151,36 @@ test xform-dedent-1.2 {dedent also eats up to four leading spaces} -setup {els_r
     els::xform::dedent ; xf_body
 } -result "a\nb"
 
+# ---- Tab / Shift+Tab key BINDINGS (must never delete a selection) ----------
+# Regression: Tk's default Text <Tab> (tk::TextInsert) REPLACES a selection with a
+# tab.  els's <Key-Tab> binding must intercept ANY selection (indent it + break) so a
+# stray fall-through can never eat the selected text; only a bare caret inserts a tab.
+test xform-tab-1.1 {Tab with a multi-line selection indents every line} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc"] ; xf_sel 1.0 2.end ; focus -force $w
+    event generate $w <Key-Tab> ; update
+    xf_body
+} -result "\ta\n\tb\nc"
+test xform-tab-1.2 {Tab with a selection ending at column 0 indents, never deletes text} -setup {els_reset} -body {
+    set w [xf_fill "hello\nworld"] ; xf_sel 1.2 2.0 ; focus -force $w   ;# mid-line-1 -> start-of-line-2
+    event generate $w <Key-Tab> ; update
+    xf_body
+} -result "\thello\nworld"
+test xform-tab-1.3 {Tab with a within-line selection indents the line, keeping the text} -setup {els_reset} -body {
+    set w [xf_fill "hello world"] ; xf_sel 1.0 1.5 ; focus -force $w
+    event generate $w <Key-Tab> ; update
+    xf_body
+} -result "\thello world"
+test xform-tab-1.4 {Tab with no selection inserts a literal tab at the caret} -setup {els_reset} -body {
+    set w [xf_fill "ab"] ; $w mark set insert 1.1 ; focus -force $w
+    event generate $w <Key-Tab> ; update
+    xf_body
+} -result "a\tb"
+test xform-tab-1.5 {Shift+Tab dedents the selected lines} -setup {els_reset} -body {
+    set w [xf_fill "\ta\n\tb"] ; xf_sel 1.0 2.end ; focus -force $w
+    event generate $w <Shift-Key-Tab> ; update
+    xf_body
+} -result "a\nb"
+
 # ---- undo atomicity: one transform == one undo ----------------------------
 test xform-undo-1.1 {a sort is a single undo step} -setup {els_reset} -body {
     set w [xf_fill "c\nb\na"] ; els::xform::sort 1

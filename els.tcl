@@ -1453,8 +1453,9 @@ proc els::build {} {
     bind elsText <Control-Shift-K>  { els::xform::delete_line; break }
     bind elsText <Alt-Up>           { els::xform::move -1; break }
     bind elsText <Alt-Down>         { els::xform::move  1; break }
-    # Tab indents only a multi-line selection (otherwise it is a literal tab);
-    # Shift+Tab always dedents.
+    # Tab indents whenever there is a selection (else a literal tab) and MUST break so
+    # it never reaches Tk's default Text <Tab>, which would replace the selection with a
+    # tab; Shift+Tab always dedents.
     bind elsText <Key-Tab>          { if {[els::xform::tab_indents %W]} { els::xform::indent; break } }
     bind elsText <Shift-Key-Tab>    { els::xform::dedent; break }
     bind elsText <Key-ISO_Left_Tab> { els::xform::dedent; break }
@@ -2073,12 +2074,13 @@ proc els::xform::dedent {} {
     }
     $w tag remove sel 1.0 end ; $w tag add sel "$l1.0" "$l2.end"
 }
-# Tab indents only when the selection spans more than one line; otherwise a Tab is
-# just a Tab.  Shift+Tab always dedents (the current line if nothing is selected).
+# Tab indents whenever text is selected (any selection — one line or many) so the
+# binding ALWAYS breaks while a selection exists and can never fall through to Tk's
+# default Text <Tab>, whose tk::TextInsert deletes the selection and replaces it with
+# a tab (silent text loss).  With no selection, Tab is a literal tab at the caret.
+# Shift+Tab always dedents (the current line when nothing is selected).
 proc els::xform::tab_indents {w} {
-    if {![llength [$w tag ranges sel]]} { return 0 }
-    lassign [els::xform::span $w] l1 l2
-    return [expr {$l2 > $l1}]
+    return [expr {[llength [$w tag ranges sel]] > 0}]
 }
 proc els::on_modified {w} {
     variable active

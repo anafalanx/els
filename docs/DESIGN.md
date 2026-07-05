@@ -135,7 +135,7 @@ ops act on the selected lines or the current line; sort/reverse/dedupe act on th
 or, with none, the whole buffer.
 
 - **Lines:** Move Up/Down (Alt+↑/↓), Duplicate (Ctrl+D), Delete (Ctrl+Shift+K),
-  Join (Ctrl+J), Indent/Dedent (Tab/Shift+Tab on a multi-line selection).
+  Join (Ctrl+J), Indent/Dedent (Tab/Shift+Tab on a selection).
 - **Reorder:** Sort, Sort Descending, Reverse, Remove Duplicate Lines.
 - **Transform:** UPPERCASE, lowercase, Trim Trailing Whitespace.
 
