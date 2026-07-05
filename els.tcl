@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.81"      ;# power-loss-durable saves (fsync); crash-recovery keystroke hardening
+    variable version "0.90"      ;# text-manipulation commands (Buffer menu); els is feature-complete for real use
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
