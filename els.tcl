@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.80"      ;# Focus mode, Explorer drag-drop, extended right-click menu; backup-ring + astral hardening
+    variable version "0.81"      ;# power-loss-durable saves (fsync); crash-recovery keystroke hardening
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
