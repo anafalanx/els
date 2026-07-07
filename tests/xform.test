@@ -230,3 +230,76 @@ test xform-menu-1.1 {a Buffer menu carries the transforms; Edit no longer does} 
          [xf_menu_has .menu.buffer "UPPERCASE"] \
          [xf_menu_has .menu.edit "Duplicate Line"]
 } -result {1 1 1 1 0}
+
+# ---- bug-hunt wave 2: newline-terminated buffers (the phantom final line) ----
+# A document whose text ends in \n leaves the widget's mandatory final line
+# EMPTY: that pseudo-line represents the trailing newline, not content.  Line
+# ops must stop at the last DOCUMENT line (xform::lastdoc) — before this wave,
+# sort/reverse dragged a phantom "" to the top of the buffer and ate the
+# trailing newline, dedupe ate it whenever an interior blank line existed,
+# Select-All case grew the buffer by one newline per pass, and move-down/join
+# at the last content line swapped real text with the phantom.
+
+test xform-nl-2.1 {sort of a newline-terminated buffer: no blank first line, trailing newline kept} -setup {els_reset} -body {
+    xf_fill "banana\napple\ncherry\n" ; els::xform::sort 1 ; xf_body
+} -result "apple\nbanana\ncherry\n"
+
+test xform-nl-2.2 {sort descending of a newline-terminated buffer} -setup {els_reset} -body {
+    xf_fill "b\na\nc\n" ; els::xform::sort -1 ; xf_body
+} -result "c\nb\na\n"
+
+test xform-nl-2.3 {Select All then sort behaves exactly like whole-buffer sort} -setup {els_reset} -body {
+    set w [xf_fill "banana\napple\ncherry\n"] ; xf_sel 1.0 end
+    els::xform::sort 1 ; xf_body
+} -result "apple\nbanana\ncherry\n"
+
+test xform-nl-2.4 {reverse of a newline-terminated buffer} -setup {els_reset} -body {
+    xf_fill "1\n2\n3\n" ; els::xform::reverse ; xf_body
+} -result "3\n2\n1\n"
+
+test xform-nl-2.5 {dedupe with an interior blank line keeps the trailing newline (and stays clean)} -setup {els_reset} -body {
+    set w [xf_fill "x\n\ny\n"] ; $w edit modified 0
+    els::xform::dedupe
+    list [xf_body] [$w edit modified]
+} -result [list "x\n\ny\n" 0]
+
+test xform-nl-2.6 {dedupe with real duplicates keeps the trailing newline} -setup {els_reset} -body {
+    xf_fill "x\nx\ny\n" ; els::xform::dedupe ; xf_body
+} -result "x\ny\n"
+
+test xform-nl-2.7 {dedupe on a lone-newline buffer is a no-op} -setup {els_reset} -body {
+    xf_fill "\n" ; els::xform::dedupe ; xf_body
+} -result "\n"
+
+test xform-nl-2.8 {Select-All UPPERCASE is stable: no extra newline, idempotent} -setup {els_reset} -body {
+    set w [xf_fill "ab\ncd\n"]
+    xf_sel 1.0 end ; els::xform::case upper
+    set once [xf_body]
+    xf_sel 1.0 end ; els::xform::case upper
+    list $once [xf_body]
+} -result [list "AB\nCD\n" "AB\nCD\n"]
+
+test xform-nl-2.9 {move down at the last content line of a terminated buffer is a no-op} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc\n"] ; $w mark set insert 3.0
+    els::xform::move 1 ; xf_body
+} -result "a\nb\nc\n"
+
+test xform-nl-2.10 {join on the last content line of a terminated buffer is a no-op (no stray space)} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\n"] ; $w mark set insert 2.0
+    els::xform::join_lines ; xf_body
+} -result "a\nb\n"
+
+test xform-nl-2.11 {move down still works between content lines of a terminated buffer} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc\n"] ; $w mark set insert 2.0
+    els::xform::move 1 ; xf_body
+} -result "a\nc\nb\n"
+
+test xform-nl-2.12 {delete_line on the last content line still removes line + separator} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\nc\n"] ; $w mark set insert 3.0
+    els::xform::delete_line ; xf_body
+} -result "a\nb\n"
+
+test xform-nl-2.13 {Select-All indent does not turn the phantom line into a real tab line} -setup {els_reset} -body {
+    set w [xf_fill "a\nb\n"] ; xf_sel 1.0 end
+    els::xform::indent ; xf_body
+} -result "\ta\n\tb\n"

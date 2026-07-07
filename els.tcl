@@ -1906,14 +1906,30 @@ proc els::xform::atomic {w body} {
     return -options $opts $res
 }
 proc els::xform::lastline {w} { return [lindex [split [$w index "end - 1 char"] .] 0] }
+# Last DOCUMENT line.  When the text ends in \n, "end - 1 char" sits at column 0
+# of the widget's mandatory final line: an empty pseudo-line that represents the
+# trailing newline, not content (els::find_scan pins the same invariant).  Line
+# ops must stop above it, or they drag a phantom "" into their input and write
+# it back as real text (sort/reverse moved a blank line to the top and ate the
+# trailing newline; dedupe ate it whenever an interior blank line existed).
+# delete_line is the one caller that wants the raw widget line (lastline):
+# deleting "the empty last line" legitimately removes the trailing newline.
+proc els::xform::lastdoc {w} {
+    lassign [split [$w index "end - 1 char"] .] l c
+    if {$c == 0 && $l > 1} { incr l -1 }
+    return $l
+}
 # 1-based line span the selection touches, else the current line.  A selection that
-# ends at column 0 does not pull in that trailing (untouched) line.
+# ends at column 0 does not pull in that trailing (untouched) line; a selection
+# reaching past the last document line (Select All runs to `end`) is clamped to it.
 proc els::xform::span {w} {
     set r [$w tag ranges sel]
     if {[llength $r]} {
         lassign [split [$w index [lindex $r 0]] .] l1 c1
         lassign [split [$w index [lindex $r end]] .] l2 c2
         if {$c2 == 0 && $l2 > $l1} { incr l2 -1 }
+        set ld [els::xform::lastdoc $w]
+        if {$l2 > $ld && $ld >= $l1} { set l2 $ld }
         return [list $l1 $l2]
     }
     lassign [split [$w index insert] .] l c
@@ -1921,7 +1937,7 @@ proc els::xform::span {w} {
 }
 proc els::xform::span_or_all {w} {
     if {[llength [$w tag ranges sel]]} { return [els::xform::span $w] }
-    return [list 1 [els::xform::lastline $w]]
+    return [list 1 [els::xform::lastdoc $w]]
 }
 # Replace whole lines L1..L2 with LIST (leaving the trailing newline structure intact).
 proc els::xform::replace_lines {w l1 l2 list} {
@@ -1937,7 +1953,7 @@ proc els::xform::move {dir} {
     set w [els::T] ; if {$w eq ""} return
     lassign [els::xform::span $w] l1 l2
     if {$dir < 0 && $l1 <= 1} return
-    if {$dir > 0 && $l2 >= [els::xform::lastline $w]} return
+    if {$dir > 0 && $l2 >= [els::xform::lastdoc $w]} return
     if {$dir < 0} {
         els::xform::atomic $w {
             set lines [split [$w get "[expr {$l1-1}].0" "$l2.end"] \n]
@@ -1985,7 +2001,7 @@ proc els::xform::join_lines {} {
     set w [els::T] ; if {$w eq ""} return
     lassign [els::xform::span $w] l1 l2
     if {$l1 == $l2} {
-        if {$l2 >= [els::xform::lastline $w]} return
+        if {$l2 >= [els::xform::lastdoc $w]} return
         incr l2
     }
     set lines [split [$w get "$l1.0" "$l2.end"] \n]
@@ -2028,7 +2044,14 @@ proc els::xform::dedupe {} {
 proc els::xform::case {mode} {
     set w [els::T] ; if {$w eq ""} return
     set r [$w tag ranges sel]
-    if {[llength $r]} { set a [$w index [lindex $r 0]] ; set b [$w index [lindex $r end]] } \
+    if {[llength $r]} {
+        set a [$w index [lindex $r 0]] ; set b [$w index [lindex $r end]]
+        # Select All runs to `end`, past the mandatory final newline: a replace
+        # can never delete that newline, but it WOULD insert the copy carried
+        # in $new — growing the buffer by one line per pass.  Clamp to the
+        # last real character.
+        if {[$w compare $b > "end - 1 char"]} { set b [$w index "end - 1 char"] }
+    } \
     else { set a [$w index "insert linestart"] ; set b [$w index "insert lineend"] }
     set txt [$w get $a $b]
     set new [expr {$mode eq "upper" ? [string toupper $txt] : [string tolower $txt]}]
