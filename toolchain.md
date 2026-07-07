@@ -1,43 +1,45 @@
 # els toolchain
 
-How els is built, tested, and packaged using zmal's shared runtime payloads.
-els is a hosted zmal project under `C:\zmal\_els`; zmal's `z.exe` is the public
-front door, and [`z.json`](z.json) drives `tools/tasks.tcl` with zmal's
+How els is built, tested, and packaged using z's shared runtime payloads.
+els is a hosted z project under `C:\z\_els`; the z workspace's `z.exe` is the public
+front door, and [`z.json`](z.json) drives `tools/tasks.tcl` with z's
 `tclsh90`. els carries no private toolchain — every payload comes from
-`<zmal>/r`.
+`<z>/r`.
 
 ## Language policy
 
-The project and its tooling use only two languages, plus zmal's command surface:
+The project and its tooling use only two languages, plus z's command surface:
 
 | Allowed | Used for |
 |---|---|
 | Tcl 9 | the editor (`els.tcl`), tooling (`tools/*.tcl`), tests (`tests/*`) |
-| C23 | native extensions (`src/*.c`), built with zmal's UCRT64 gcc |
-| zmal command surface | `z.json` |
+| C23 | native extensions (`src/*.c`), built with z's UCRT64 gcc |
+| z command surface | `z.json` |
 
 No bash, no PowerShell, no Python, and no project-local package manager scripts.
 Avoid new `.cmd`, `.bat`, or `.ps1` glue; use `z <command>` from `_els` or
-`z in els <command>` from the zmal root.
+`z in els <command>` from the z workspace root.
 
 The native `els.exe` needs Windows PE resources: an icon, an application
 manifest, and version info. els keeps them out of committed source. They are
 generated from Tcl at build time (`tools/genres.tcl`, `tools/mkico.tcl`) into the
-gitignored `build/` directory and compiled with zmal's `windres`.
+gitignored `build/` directory and compiled with z's `windres`.
 
-## zmal shared runtime payloads
+## z shared runtime payloads
 
-els builds against zmal's runtime payloads under `<zmal>/r` — owned by zmal,
-shared across projects, never copied into the repo. `tools/tasks.tcl` resolves
-three roots from the `ZMAL_*` environment variables `z.exe` exports, falling back
-to the hosted layout (`<zmal>/_els` → `<zmal>/r/...`). `z tasks env` prints the
+els builds against z's runtime payloads under `<z>/r` — owned by z,
+shared across projects, never copied into the repo. `z.exe` exports only
+`Z_ROOT` (plus `Z_PROJECT_ROOT`/`Z_PROJECT_NAME` inside a project);
+`tools/tasks.tcl` resolves the three payload roots from the optional `Z_*`
+override variables below when set, otherwise deriving them from `Z_ROOT` or
+the hosted layout (`<z>/_els` → `<z>/r/...`). `z tasks env` prints the
 resolved paths:
 
 | Variable | Root | What | Version / note |
 |---|---|---|---|
-| `ZMAL_TCLTK` | `r/tcltk/9.0.3` | Tcl/Tk 9 shared build (`tcl9/`), static build + link libs (`tcl9s/`), staged script libraries (`tcllib/`), source snippets (`tclsrc/`), and the Markdown manual (`manual/INDEX.md`) | 9.0.3 |
-| `ZMAL_MSYS2` | `r/msys2` | gcc, binutils, windres, strip (`ucrt64/bin`) | gcc 16.1.0 |
-| `ZMAL_TWAPI` | `r/twapi/5.2.0` | Windows API extension used by screenshot tooling | 5.2.0 |
+| `Z_TCLTK` | `r/tcltk/9.0.3` | Tcl/Tk 9 shared build (`tcl9/`), static build + link libs (`tcl9s/`), staged script libraries (`tcllib/`), source snippets (`tclsrc/`), and the Markdown manual (`manual/INDEX.md`) | 9.0.3 |
+| `Z_MSYS2` | `r/msys2` | gcc, binutils, windres, strip (`ucrt64/bin`) | gcc 16.1.0 |
+| `Z_TWAPI` | `r/twapi/5.2.0` | Windows API extension used by screenshot tooling | 5.2.0 |
 
 `z check` checks the payload pieces els uses. `z check --deep` also runs
 functional probes: Tcl evaluation, Tk widget creation, twapi loading, C23
@@ -60,13 +62,13 @@ The rule is:
 
 [`z.json`](z.json) is the normal entry point. It:
 
-1. lets zmal discover the project root;
-2. runs each command as `tclsh90 tools/tasks.tcl <task>` (zmal resolves
+1. lets z discover the project root;
+2. runs each command as `tclsh90 tools/tasks.tcl <task>` (z resolves
    `tclsh90` to `r/tcltk/9.0.3/tcl9/bin/tclsh90.exe`);
 3. keeps project commands visible as `z test`, `z build`, `z check`, etc.
 
 No project-local ignition script is tracked. Durable docs, scripts, and agent
-instructions must use zmal `z` commands.
+instructions must use `z` commands.
 
 ## Task runner: `tools/tasks.tcl`
 
@@ -87,12 +89,12 @@ z readme-shots       regenerate README screenshots
 z build [out]        build the native exe -> dist/els.exe
 z probe-exe [exe]    verify fused exe startup/session/recovery behavior
 z build-ext          compile src/*.c C23 extensions -> build/*.dll
-z check [--deep]     check zmal's runtime payloads
+z check [--deep]     check z's runtime payloads
 z tasks env          print resolved payload roots and versions
 ```
 
 There are deliberately no fetch/prep tasks here. A missing payload piece means
-zmal's runtime is not fully hydrated — restore it on the zmal side, not in els.
+z's runtime is not fully hydrated — restore it on the z side, not in els.
 
 ## C23 and Tcl extensions
 
@@ -121,7 +123,7 @@ loadable extension.
    `build/els.exe.manifest`; `tools/mkico.tcl` generates `build/els.ico`.
 2. `windres` compiles `build/els.rc` to `build/els.res`.
 3. gcc compiles `src/els_main.c`, `src/icudet.c`, and `src/winfs.c`.
-4. gcc links against zmal's static Tcl/Tk libraries in `<TCLTK>/tcl9s/lib` plus
+4. gcc links against z's static Tcl/Tk libraries in `<TCLTK>/tcl9s/lib` plus
    Win32 system libraries, then strips the bare exe.
 5. `tools/package.tcl` stages `els.tcl`, resources, `tcl_library`, and
    `tk_library` (from `<TCLTK>/tcllib`), then appends the zipfs payload to the
@@ -169,6 +171,6 @@ z shot --selftest
 ## Distribution
 
 Users only need the released `els.exe`. Developers need the els repo plus a
-hydrated zmal tree (`<zmal>/r/tcltk`, `r/msys2`, `r/twapi`). Those
-multi-hundred-MB payloads belong to zmal, are shared across projects, and are
+hydrated z workspace tree (`<z>/r/tcltk`, `r/msys2`, `r/twapi`). Those
+multi-hundred-MB payloads belong to z, are shared across projects, and are
 never committed to els.

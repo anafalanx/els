@@ -1,6 +1,6 @@
 #!/usr/bin/env tclsh
 # tools/tasks.tcl - the internal els task runner behind z.json. ALL project tooling
-# lives here (Tcl), plus C built by zmal's vendored UCRT64 gcc. It is invoked
+# lives here (Tcl), plus C built by z's vendored UCRT64 gcc. It is invoked
 # through z.exe, which discovers the project root and command manifest.
 
 proc script_root {} {
@@ -9,17 +9,17 @@ proc script_root {} {
     return [file dirname [file dirname $s]]
 }
 
-# els is a hosted zmal project: it builds against zmal's SHARED runtime payloads
-# under <zmal>/r (Tcl/Tk 9, MSYS2 UCRT64 gcc, twapi) and carries no private
-# .toolchain.  z.exe starts this script with zmal's tclsh90 and exports ZMAL_ROOT;
-# the discovery below resolves each payload from the ZMAL_* env vars or the hosted
+# els is a hosted z project: it builds against z's SHARED runtime payloads
+# under <z>/r (Tcl/Tk 9, MSYS2 UCRT64 gcc, twapi) and carries no private
+# .toolchain.  z.exe starts this script with z's tclsh90 and exports Z_ROOT;
+# the discovery below resolves each payload from the Z_* env vars or the hosted
 # layout, so the script also works when run directly with the vendored tclsh.
 proc zmal_paths {root args} {
     set out {}
-    if {[info exists ::env(ZMAL_ROOT)] && $::env(ZMAL_ROOT) ne ""} {
-        lappend out [file join $::env(ZMAL_ROOT) {*}$args]
+    if {[info exists ::env(Z_ROOT)] && $::env(Z_ROOT) ne ""} {
+        lappend out [file join $::env(Z_ROOT) {*}$args]
     }
-    # Hosted layout: <zmal>/_els, so the zmal root is the project parent.
+    # Hosted layout: <z>/_els, so the z workspace root is the project parent.
     lappend out [file join [file dirname $root] {*}$args]
     return $out
 }
@@ -37,15 +37,15 @@ proc discover_payload {root envs rel marker missingPath} {
 }
 
 set ROOT [script_root]
-set TC    [discover_payload $ROOT ZMAL_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
+set TC    [discover_payload $ROOT Z_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
               [file join [file dirname $ROOT] r tcltk 9.0.3]]
-set MSYS2 [discover_payload $ROOT ZMAL_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
+set MSYS2 [discover_payload $ROOT Z_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
               [file join [file dirname $ROOT] r msys2]]
-set TWAPI [discover_payload $ROOT ZMAL_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
+set TWAPI [discover_payload $ROOT Z_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
               [file join [file dirname $ROOT] r twapi 5.2.0]]
-set ::env(ZMAL_TCLTK) [file nativename $TC]
-set ::env(ZMAL_MSYS2) [file nativename $MSYS2]
-set ::env(ZMAL_TWAPI) [file nativename $TWAPI]
+set ::env(Z_TCLTK) [file nativename $TC]
+set ::env(Z_MSYS2) [file nativename $MSYS2]
+set ::env(Z_TWAPI) [file nativename $TWAPI]
 
 foreach {var rel marker} {
     TCL_LIBRARY {tcllib tcl_library} init.tcl
@@ -71,7 +71,7 @@ if {[llength $pkgpaths]} {
     set auto_path [concat $pkgpaths $auto_path]
 }
 
-# zmal runtime wins on PATH: Tcl/Tk 9 BEFORE MSYS2, which ships its own Tcl/Tk 8.6
+# z runtime wins on PATH: Tcl/Tk 9 BEFORE MSYS2, which ships its own Tcl/Tk 8.6
 # that els must never use.
 set vbins {}
 foreach b [list [file join $TC tcl9 bin] [file join $MSYS2 ucrt64 bin] [file join $MSYS2 usr bin]] {
@@ -116,7 +116,7 @@ proc need {args} {
     foreach tool $args {
         set p [tool_path $tool]
         if {$p eq "" || ![file exists $p]} {
-            error "required tool '$tool' is missing - restore zmal's runtime payloads (r/tcltk, r/msys2, r/twapi)"
+            error "required tool '$tool' is missing - restore z's runtime payloads (r/tcltk, r/msys2, r/twapi)"
         }
     }
 }
@@ -139,7 +139,7 @@ proc task_help {args} {
   z sign [exe]          code-sign the release exe (Certum/SimplySign) + re-probe + verify
   z probe-exe [exe]     verify the fused exe's startup/session/recovery behavior
   z build-ext           compile the C23 extension(s) in src/ -> build/*.dll
-  z check [--deep]      check zmal's runtime payloads (r/tcltk, r/msys2, r/twapi)
+  z check [--deep]      check z's runtime payloads (r/tcltk, r/msys2, r/twapi)
   z tasks env           print resolved toolchain paths + versions}
 }
 
@@ -167,12 +167,13 @@ proc task_probe-exe {args} {
     stream [tclsh] [P tools probe_exe.tcl] $exe
 }
 
-# find_signtool locates signtool.exe (from the Windows SDK; not a zmal payload).
-# Prefers the highest installed SDK version, then the zmal r/winsdk junction, then PATH.
+# find_signtool locates signtool.exe (from the Windows SDK; not a z payload).
+# Prefers the highest installed SDK version, then the z r/winsdk junction, then PATH.
 proc find_signtool {} {
     set sdk [lsort [glob -nocomplain {C:/Program Files (x86)/Windows Kits/10/bin/*/x64/signtool.exe}]]
     if {[llength $sdk]} { return [lindex $sdk end] }
-    set j {C:/zmal/r/winsdk/10.0.26100.0/signtool.exe}
+    set zroot [expr {[info exists ::env(Z_ROOT)] && $::env(Z_ROOT) ne "" ? $::env(Z_ROOT) : "C:/z"}]
+    set j [file join $zroot r winsdk 10.0.26100.0 signtool.exe]
     if {[file exists $j]} { return $j }
     set p [auto_execok signtool]
     if {[llength $p]} { return [lindex $p 0] }
@@ -346,7 +347,7 @@ proc task_build-ext {args} {
 proc task_build {args} {
     need gcc tclsh
     if {![file exists [tclshs]]} {
-        error "static tclsh missing in zmal's Tcl/Tk payload (r/tcltk/9.0.3/tcl9s/bin)"
+        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.3/tcl9s/bin)"
     }
     set out [lindex $args 0] ; if {$out eq ""} { set out [P dist els.exe] }
     if {[string match -* $out]} { error "z build takes no flags (got '$out'); usage: z build ?outfile?" }

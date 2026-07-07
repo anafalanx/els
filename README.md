@@ -204,9 +204,9 @@ Stated plainly so you know before you rely on it:
 
 ## Toolchain & tasks
 
-`els` is hosted under `C:\zmal\_els`. zmal is the public front door: the
-committed `z.json` drives `tools/tasks.tcl` with zmal's `tclsh90`, and els builds
-against zmal's shared runtime payloads under `<zmal>/r` — it carries no
+`els` is hosted under `C:\z\_els`. z is the public front door: the
+committed `z.json` drives `tools/tasks.tcl` with z's `tclsh90`, and els builds
+against z's shared runtime payloads under `<z>/r` — it carries no
 project-local toolchain. No project-local launcher script is tracked.
 
 ```
@@ -218,11 +218,11 @@ z readme-shots    # regenerate the README screenshots
 z probe-exe       # process-level startup checks for the built exe (dist/els.exe)
 z build           # build the native exe -> dist/els.exe
 z build-ext       # compile src/*.c C23 extensions -> build/*.dll
-z check           # check zmal's runtime payloads (--deep runs functional probes)
+z check           # check z's runtime payloads (--deep runs functional probes)
 z tasks env       # show the resolved payload roots
 ```
 
-From the zmal root, use `z in els <command>`, for example `z in els test`.
+From the z workspace root, use `z in els <command>`, for example `z in els test`.
 
 `z build` produces one self-contained native exe (~5.1 MB, zero non-system
 DLLs): a real Windows PE with our own C23 `WinMain`, Tcl + Tk + the charset
@@ -236,14 +236,14 @@ intermediates only and the repo root holds no binaries. A rebuild stages the new
 exe and swaps it into place, so it works even while `dist/els.exe` is running
 (the old copy is parked as `els.exe.old` until the next build; restart els to
 pick up the new one). Users only need the released `els.exe`; developers need
-the repo plus a hydrated zmal tree (`<zmal>/r`).
+the repo plus a hydrated z workspace tree (`<z>/r`).
 
 The project uses **only C and Tcl 9** for durable tooling. Avoid adding bash,
-PowerShell, Python, `.bat`, `.cmd`, or `.ps1` glue; use zmal `z` commands
+PowerShell, Python, `.bat`, `.cmd`, or `.ps1` glue; use `z` commands
 instead. See
 [`toolchain.md`](toolchain.md) for the full setup.
 
-zmal's shared runtime (`<zmal>/r`) provides Tcl/Tk 9, the UCRT64 gcc/C23, twapi,
+z's shared runtime (`<z>/r`) provides Tcl/Tk 9, the UCRT64 gcc/C23, twapi,
 the static Tcl/Tk libraries, the packaging script libraries, and the Tcl/Tk 9
 manual. `z check` reports the components els uses; `z check --deep` runs
 functional checks. There are no project-local fetch/prep tasks.

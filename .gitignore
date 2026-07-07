@@ -1,4 +1,4 @@
-# els builds against zmal's shared runtime (<zmal>/r); it has no project-local
+# els builds against z's shared runtime (<z>/r); it has no project-local
 # toolchain.  Ignore any locally-hydrated .toolchain (and moved-aside variants)
 # so the multi-hundred-MB payload can never be committed by accident.
 /.toolchain/

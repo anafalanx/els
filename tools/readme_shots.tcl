@@ -10,7 +10,7 @@ set ROOT [script_root]
 set TMP  [file join $ROOT tests _tmp readme_shots]
 set OUT  [file join $ROOT docs img]
 
-# wish + tclsh come from zmal's shared runtime, passed in by `z readme-shots`
+# wish + tclsh come from z's shared runtime, passed in by `z readme-shots`
 # (els carries no private .toolchain).  twapi is found by shot.tcl via the
 # TCLLIBPATH this process already inherits from the z front door.
 set WISH  [lindex $argv 0]

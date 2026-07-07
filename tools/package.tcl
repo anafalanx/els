@@ -12,25 +12,25 @@ proc script_root {} {
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-# els uses zmal's SHARED Tcl/Tk payload (<zmal>/r/tcltk/9.0.3); tasks.tcl exports
-# ZMAL_TCLTK/ZMAL_ROOT into our environment, and we fall back to the hosted layout.
+# els uses z's SHARED Tcl/Tk payload (<z>/r/tcltk/9.0.3); tasks.tcl exports
+# Z_TCLTK/Z_ROOT into our environment, and we fall back to the hosted layout.
 proc zmal_paths {root args} {
     set out {}
-    if {[info exists ::env(ZMAL_ROOT)] && $::env(ZMAL_ROOT) ne ""} {
-        lappend out [file join $::env(ZMAL_ROOT) {*}$args]
+    if {[info exists ::env(Z_ROOT)] && $::env(Z_ROOT) ne ""} {
+        lappend out [file join $::env(Z_ROOT) {*}$args]
     }
     lappend out [file join [file dirname $root] {*}$args]
     return $out
 }
 proc discover_tcltk {root} {
     set cands {}
-    if {[info exists ::env(ZMAL_TCLTK)] && $::env(ZMAL_TCLTK) ne ""} { lappend cands $::env(ZMAL_TCLTK) }
+    if {[info exists ::env(Z_TCLTK)] && $::env(Z_TCLTK) ne ""} { lappend cands $::env(Z_TCLTK) }
     lappend cands {*}[zmal_paths $root r tcltk 9.0.3]
     foreach p $cands {
         set p [file normalize $p]
         if {[file exists [file join $p tcl9 bin tclsh90.exe]]} { return $p }
     }
-    error "zmal Tcl/Tk payload not found (r/tcltk/9.0.3) - restore zmal's runtime payloads"
+    error "z Tcl/Tk payload not found (r/tcltk/9.0.3) - restore z's runtime payloads"
 }
 set ROOT [script_root]
 set TC   [discover_tcltk $ROOT]

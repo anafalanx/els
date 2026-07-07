@@ -1,1 +1,1 @@
-{"mcpServers":{"drenn":{"type":"stdio","command":"C:\\zmal\\_drenn\\build\\drenn.exe","args":["--mcp"],"timeout":120000}}}
+{"mcpServers":{"drenn":{"type":"stdio","command":"C:\\z\\_drenn\\build\\drenn.exe","args":["--mcp"],"timeout":120000}}}

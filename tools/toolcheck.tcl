@@ -1,7 +1,7 @@
 #!/usr/bin/env tclsh
-# tools/toolcheck.tcl - check that zmal's shared runtime payloads have what els
+# tools/toolcheck.tcl - check that z's shared runtime payloads have what els
 # needs and, with --deep, that they actually work.  els carries no private
-# .toolchain: Tcl/Tk 9, the UCRT64 gcc, and twapi all come from <zmal>/r.
+# .toolchain: Tcl/Tk 9, the UCRT64 gcc, and twapi all come from <z>/r.
 
 proc script_root {} {
     set s [info script]
@@ -10,8 +10,8 @@ proc script_root {} {
 }
 proc zmal_paths {root args} {
     set out {}
-    if {[info exists ::env(ZMAL_ROOT)] && $::env(ZMAL_ROOT) ne ""} {
-        lappend out [file join $::env(ZMAL_ROOT) {*}$args]
+    if {[info exists ::env(Z_ROOT)] && $::env(Z_ROOT) ne ""} {
+        lappend out [file join $::env(Z_ROOT) {*}$args]
     }
     lappend out [file join [file dirname $root] {*}$args]
     return $out
@@ -29,11 +29,11 @@ proc discover_payload {root envs rel marker missingPath} {
     return [file normalize $missingPath]
 }
 set ROOT [script_root]
-set TC    [discover_payload $ROOT ZMAL_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
+set TC    [discover_payload $ROOT Z_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
               [file join [file dirname $ROOT] r tcltk 9.0.3]]
-set MSYS2 [discover_payload $ROOT ZMAL_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
+set MSYS2 [discover_payload $ROOT Z_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
               [file join [file dirname $ROOT] r msys2]]
-set TWAPI [discover_payload $ROOT ZMAL_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
+set TWAPI [discover_payload $ROOT Z_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
               [file join [file dirname $ROOT] r twapi 5.2.0]]
 proc P      {args} { return [file join $::ROOT  {*}$args] }
 proc TCp    {args} { return [file join $::TC    {*}$args] }
@@ -108,7 +108,7 @@ proc status_of {comp} {
 
 proc report {} {
     puts ""
-    puts "els toolcheck  -  zmal shared runtime payloads"
+    puts "els toolcheck  -  z shared runtime payloads"
     puts "    tcltk  [file nativename $::TC]"
     puts "    msys2  [file nativename $::MSYS2]"
     puts "    twapi  [file nativename $::TWAPI]"
@@ -125,7 +125,7 @@ proc report {} {
             outdated { set status "UPDATE" ; set note "have $v, want [dict get $c want]"
                        if {$kind eq "core"} { incr issues } }
             missing  { set status [expr {$kind eq "core" ? "MISSING" : "(absent)"}]
-                       set note [expr {$kind eq "core" ? "restore zmal's runtime payloads" : ""}]
+                       set note [expr {$kind eq "core" ? "restore z's runtime payloads" : ""}]
                        if {$kind eq "core"} { incr issues } }
         }
         puts [format "  %-24s %-9s %s" [dict get $c name] $status $note]
@@ -196,7 +196,7 @@ set issues [report]
 if {$doDeep} { incr issues [deep] }
 puts ""
 if {$issues > 0} {
-    puts "  $issues issue(s). A MISSING core piece means a zmal runtime payload is incomplete."
+    puts "  $issues issue(s). A MISSING core piece means a z runtime payload is incomplete."
     exit 1
 }
 puts [expr {$doDeep ? "  all components present, current, and functional." \
