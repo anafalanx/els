@@ -609,3 +609,26 @@ test astral-2.3 {astral content survives the swap serialize/deserialize round-tr
     set rec [els::swap_read [write_raw astral_swap.swp $blob]]
     expr {[dict exists $rec text] && [dict get $rec text] eq $want}
 } -result 1
+
+# ---- bug-hunt wave 2: ICU verdicts the name map must not drop ---------------
+# ICU reports logical-order Hebrew as ISO-8859-8-I — byte-table identical to
+# ISO-8859-8 (the -I only flags ordering).  icu_to_tcl returned "" for it, so a
+# correctly-detected Hebrew file fell through to the cp1252 fallback (mojibake).
+
+test hebdet-1.1 {ISO-8859-8-I (ICU's logical-order Hebrew verdict) maps onto iso8859-8} -body {
+    els::icu_to_tcl ISO-8859-8-I
+} -result iso8859-8
+
+test hebdet-1.2 {visual-order ISO-8859-8 still maps} -body {
+    els::icu_to_tcl ISO-8859-8
+} -result iso8859-8
+
+test hebdet-1.3 {a logical-Hebrew ISO-8859-8 file opens as Hebrew, not cp1252 mojibake} \
+        -constraints detect -setup {els_reset} -body {
+    set heb [string repeat "בראשית ברא אלהים את השמים ואת הארץ " 3]
+    set p [write_raw heb8i.txt [encoding convertto iso8859-8 "$heb\n"]]
+    els::open $p
+    # ICU may statistically verdict 8859-8(-I) or its cp1255 superset; both
+    # decode these bytes to the same Hebrew letters — cp1252/latin1 is the bug.
+    list [expr {$::els::docEnc($::els::active) in {iso8859-8 cp1255}}] [[els::T] get 1.0 1.6]
+} -result [list 1 "בראשית"]

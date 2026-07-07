@@ -2405,6 +2405,8 @@ proc els::load_detect {} {
 }
 
 # Map an ICU canonical charset name onto a Tcl encoding name ("" = no match).
+# ICU reports logical-order Hebrew as ISO-8859-8-I: byte-table identical to
+# ISO-8859-8 (the -I only flags ordering), so it maps onto the same encoding.
 proc els::icu_to_tcl {name} {
     set key [string tolower [string map {- "" _ "" " " ""} $name]]
     set map {
@@ -2412,7 +2414,8 @@ proc els::icu_to_tcl {name} {
         utf32 utf-32le  utf32le utf-32le  utf32be utf-32be  usascii ascii
         iso88591 iso8859-1   iso88592 iso8859-2   iso88593 iso8859-3
         iso88594 iso8859-4   iso88595 iso8859-5   iso88596 iso8859-6
-        iso88597 iso8859-7   iso88598 iso8859-8   iso88599 iso8859-9
+        iso88597 iso8859-7   iso88598 iso8859-8   iso88598i iso8859-8
+        iso88599 iso8859-9
         iso885910 iso8859-10 iso885913 iso8859-13 iso885914 iso8859-14
         iso885915 iso8859-15 iso885916 iso8859-16
         windows1250 cp1250 windows1251 cp1251 windows1252 cp1252 windows1253 cp1253
