@@ -655,6 +655,53 @@ test extmod-1.9 {a byte-identical external rewrite (mtime-only bump) does NOT pr
     list $rc $::els_test_mbcount [info exists ::els::docExtModPause($id)]
 } -result {1 0 0}
 
+# ---- bug-hunt wave 2: the >CRC-cap external-change blind spot (F05) ---------
+# Above SWAP_FILE_CRC_CAP a file signature's crc is SAMPLED (first + last 64 KiB),
+# so a size-preserving rewrite of the MIDDLE leaves size+crc identical.  mtime,
+# dropped from the content key for exact (<=cap) sigs to avoid byte-identical
+# false positives, is the only remaining signal there — sig_content must keep it
+# above the cap, or a manual save silently clobbers the external change.
+
+test extmod-1.10 {sig_content keeps mtime above the cap, drops it at/under (unit)} -body {
+    set cap $::els::SWAP_FILE_CRC_CAP
+    list [els::sig_content "1000:111:222"] \
+         [els::sig_content "[expr {$cap + 1}]:111:222"] \
+         [expr {[els::sig_content "[expr {$cap+1}]:111:222"] ne \
+                [els::sig_content "[expr {$cap+1}]:999:222"]}] \
+         [expr {[els::sig_content "1000:111:222"] eq [els::sig_content "1000:999:222"]}]
+} -result {1000:222 16777217:111:222 1 1}
+
+test extmod-1.11 {a same-size middle rewrite of a >cap file PROMPTS (no silent clobber)} \
+        -setup {els_reset} -cleanup {set ::els::SWAP_FILE_CRC_CAP 16777216} -body {
+    # 200 KB file so head[0:64K]+tail[end-64K:] leave a genuine unsampled middle;
+    # lower the cap so this modest fixture takes the sampled path.
+    set ::els::SWAP_FILE_CRC_CAP 100000
+    set base [string repeat A 200000]
+    set p [els_tmpfile big_mid.txt $base]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local edit"
+    # external program rewrites 20 bytes at the true middle, size preserved
+    raw_write $p [string replace $base 100000 100019 [string repeat B 20]]
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer cancel
+    set rc [els::save $id]
+    list $rc $::els_test_mbcount
+} -result {0 1}
+
+test extmod-1.12 {a head-window rewrite of a >cap file still PROMPTS (control: crc-visible)} \
+        -setup {els_reset} -cleanup {set ::els::SWAP_FILE_CRC_CAP 16777216} -body {
+    set ::els::SWAP_FILE_CRC_CAP 100000
+    set base [string repeat A 200000]
+    set p [els_tmpfile big_head.txt $base]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local edit"
+    raw_write $p [string replace $base 100 119 [string repeat B 20]]   ;# inside head 64 KiB
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer cancel
+    els::save $id
+    set ::els_test_mbcount
+} -result 1
+
 # ---- P2-c: large-file open guard + bounded undo (Wave 2) -------------------
 # The threshold is lowered per-test (a real 25 MB fixture would be slow + litter);
 # -cleanup restores a large threshold so later tests never spuriously prompt.

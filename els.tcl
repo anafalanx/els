@@ -3299,14 +3299,20 @@ proc els::doc_saved_sig {id} {
     if {[info exists ::els::savedSig($id)]} { return $::els::savedSig($id) }
     return ""
 }
-# The CONTENT part of a "size:mtime:crc" signature (drops the volatile mtime).
-# The R3 lost-update guard compares on this, so a byte-identical external rewrite
-# — OneDrive/Dropbox sync, antivirus, a backup tool, or a save-in-place that
-# rewrites the same bytes, all of which bump mtime — does not false-positive as a
-# change.  Recovery reconciliation keeps the full mtime-bearing comparison.
+# The CONTENT part of a "size:mtime:crc" signature.  The R3 lost-update guard
+# compares on this.  At/under SWAP_FILE_CRC_CAP the crc covers every byte, so the
+# volatile mtime is DROPPED — a byte-identical external rewrite (OneDrive/Dropbox
+# sync, antivirus, a backup tool, or a save-in-place that rewrites the same
+# bytes, all of which bump mtime) does not false-positive as a change.  ABOVE the
+# cap the crc is sampled (head+tail only) and blind to a size-preserving rewrite
+# of the middle, so mtime is the only remaining change signal and is KEPT: for a
+# >16 MiB file a bumped mtime prompts "changed on disk" (the safe direction —
+# overwrite/reload/cancel, no silent clobber) rather than being ignored.
+# Recovery reconciliation keeps the full mtime-bearing comparison regardless.
 proc els::sig_content {sig} {
     set p [split $sig :]
     if {[llength $p] != 3} { return $sig }
+    if {[lindex $p 0] > $::els::SWAP_FILE_CRC_CAP} { return $sig }
     return "[lindex $p 0]:[lindex $p 2]"
 }
 
@@ -3525,6 +3531,13 @@ proc els::handoff_send {cfg fileArgs} {
 proc els::handoff_drain {} {
     set hd [els::handoff_dir]
     if {$hd eq ""} { return }
+    # A drain needs the tab UI to exist.  set_config_path (hence handoff_start)
+    # runs during build BEFORE `frame .tabs`, so a spool already waiting at
+    # startup would otherwise be deleted-then-opened into a throw (new_doc
+    # lappends the doc id before make_tab fails on the missing .tabs), stranding
+    # a tab-less ghost doc AND losing the handed-off file.  Defer to the poll,
+    # which fires once the UI is up.
+    if {![winfo exists .tabs]} { return }
     set raise 0
     foreach f [lsort [glob -nocomplain -directory $hd *.open]] {
         set data "" ; set ok 0
@@ -3591,7 +3604,13 @@ proc els::handoff_start {} {
     els::handoff_tick
 }
 proc els::handoff_tick {} {
-    catch {els::handoff_drain}
+    # Never drain while a modal is up (swap_suspend marks one): the drain opens
+    # files and switch_to's them, and an after-timer fires during a native
+    # tk_messageBox's message pump — so a file handed off while the "Save
+    # changes?" quit prompt is open would change the active doc out from under
+    # it (quit then saves the wrong doc and silently aborts).  The poll resumes
+    # on the next tick, and quit drains explicitly once its prompts are done.
+    if {!$::els::swap_suspend} { catch {els::handoff_drain} }
     set ::els::handoff_after [after 500 els::handoff_tick]
 }
 proc els::handoff_stop {} {
@@ -4517,7 +4536,7 @@ proc els::quit {} {
             set ::els::swap_suspend 0
             if {$ans eq "cancel"} { return }   ;# aborted quit: autosave stays armed
             if {$ans eq "yes"} {
-                els::save
+                els::save $id   ;# save the PROMPTED doc, never a since-changed $active
                 if {[els::doc_dirty $id]} { return }
             }
         }
