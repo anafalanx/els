@@ -311,3 +311,60 @@ test perf-4.6 {one past the cap IS flagged, tracking exactly FIND_MAXHITS with a
     list [llength $::els::find_matches] $::els::find_truncated \
          [string match "* of 5000+" $::els::find_count]
 } -result {5000 1 1}
+
+# ---- bug-hunt wave 2: repl_for must re-match with the widget's line rules ----
+# Tk `search -regexp` matches under implicit -linestop -lineanchor (text(n));
+# repl_for's backreference re-match ran plain-mode, so `.`/`[^...]` swallowed
+# newlines PAST the widget match — the tail arithmetic then truncated the
+# replacement (usually to empty, silently deleting the matched text) — and a
+# trailing `$` failed to re-match at all, silently writing the original text
+# back while Replace All still reported it as replaced.
+
+test replline-5.1 {greedy . cannot eat past the widget match into later lines} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "aXb\nyyb"
+    set ::els::find_regex 1 ; set ::els::find_q {a.*b} ; set ::els::find_r Z
+    els::find_update ; els::find_replace_all
+    list [string map [list \n |] [$w get 1.0 "end - 1 char"]] $::els::find_count
+} -result {Z|yyb {Replaced 1}}
+
+test replline-5.2 {a $-anchored pattern really replaces (line ends and buffer end)} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo\nbar foo"
+    set ::els::find_regex 1 ; set ::els::find_q {foo$} ; set ::els::find_r X
+    els::find_update ; els::find_replace_all
+    list [string map [list \n |] [$w get 1.0 "end - 1 char"]] $::els::find_count
+} -result {{X|bar X} {Replaced 2}}
+
+test replline-5.3 {single Replace on a $-anchored match rewrites it} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo\nbar foo"
+    set ::els::find_regex 1 ; set ::els::find_q {foo$} ; set ::els::find_r X
+    els::find_update ; els::find_replace_one
+    string map [list \n |] [$w get 1.0 "end - 1 char"]
+} -result {X|bar foo}
+
+test replline-5.4 {backreferences expand under the line-mode re-match} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo\nboo"
+    set ::els::find_regex 1 ; set ::els::find_q {(o)$} ; set ::els::find_r {\1!}
+    els::find_update ; els::find_replace_all
+    string map [list \n |] [$w get 1.0 "end - 1 char"]
+} -result {foo!|boo!}
+
+test replline-5.5 {^-anchored patterns keep replacing on every line} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo\nfoo bar"
+    set ::els::find_regex 1 ; set ::els::find_q {^foo} ; set ::els::find_r X
+    els::find_update ; els::find_replace_all
+    list [string map [list \n |] [$w get 1.0 "end - 1 char"]] $::els::find_count
+} -result {{X|X bar} {Replaced 2}}
+
+test replline-5.6 {greedy . still spans to the LAST candidate on its own line} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "aXb yb\nq"
+    set ::els::find_regex 1 ; set ::els::find_q {a.*b} ; set ::els::find_r Z
+    els::find_update ; els::find_replace_all
+    list [string map [list \n |] [$w get 1.0 "end - 1 char"]] $::els::find_count
+} -result {Z|q {Replaced 1}}
+
+test replline-5.7 {negated classes stop at newlines like the widget search} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a1b\ncb"
+    set ::els::find_regex 1 ; set ::els::find_q {a[^c]*b} ; set ::els::find_r Z
+    els::find_update ; els::find_replace_all
+    list [string map [list \n |] [$w get 1.0 "end - 1 char"]] $::els::find_count
+} -result {Z|cb {Replaced 1}}

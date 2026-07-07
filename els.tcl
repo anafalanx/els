@@ -5062,7 +5062,13 @@ proc els::repl_for {w s e} {
     set repl $find_r
     if {$find_regex} {
         if {$find_word} { set pat "\\m(?:$find_q)\\M" } else { set pat $find_q }
-        set fl {} ; if {!$find_case} { lappend fl -nocase }
+        # -line, because the widget search matched under Tk's implicit
+        # -linestop -lineanchor (text(n) `search -regexp`): a plain-mode
+        # re-match lets `.`/`[^...]` swallow newlines PAST the widget match —
+        # the tail arithmetic below then truncates the replacement, silently
+        # deleting the matched text — and a trailing `$` never re-matches at
+        # all, silently writing the original text back.
+        set fl {-line} ; if {!$find_case} { lappend fl -nocase }
         # Re-match WITH trailing context, anchored at the match start: a
         # context-dependent construct (lookahead (?=...), \M at a word edge)
         # cannot re-match against the excised match text alone, so the
