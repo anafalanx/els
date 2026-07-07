@@ -330,6 +330,43 @@ test single-c.6 {an undecodable (legacy iso8859-1) spool is consumed and dropped
     list [expr {[llength $::els::docs] == $before}] [file exists $bad]
 } -result {1 0}
 
+# bug-hunt wave 2: handoff drain must not run before the tab UI, nor during a
+# modal (F06, F07) — both would open a file and switch_to it at the wrong time.
+
+test single-c.7 {handoff_drain before the tab UI is a no-op: spool kept, no ghost doc, no bgerror (F06)} -setup recover_reset -body {
+    set p [file join $::ELS_TMP preui.txt] ; raw_write $p "handed off pre-UI\n"
+    els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+    set hd [file join $::ELS_TMP handoff]
+    set before [llength $::els::docs]
+    destroy .tabs                       ;# reproduce the mid-build "no .tabs yet" state
+    set ::els_test_bgerrors {}
+    els::handoff_drain
+    list [winfo exists .tabs] \
+         [llength [glob -nocomplain -directory $hd *.open]] \
+         [expr {[llength $::els::docs] == $before}] \
+         [llength $::els_test_bgerrors]
+} -result {0 1 1 0}
+
+test single-c.8 {handoff_tick defers the drain while a modal is up (swap_suspend), then drains (F07)} -setup recover_reset -body {
+    set p [file join $::ELS_TMP modal.txt] ; raw_write $p "handed off mid-modal\n"
+    els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+    set hd [file join $::ELS_TMP handoff]
+    # The spool count is the reliable drain signal: a drain consumes it.  (docs
+    # count / active id can't tell — the first handed-off file reuses the pristine
+    # untitled tab in place, keeping the same doc id.)
+    set ::els::swap_suspend 1          ;# a "Save changes?" prompt (or any modal) is open
+    els::handoff_tick ; els::handoff_stop
+    set duringSpool [llength [glob -nocomplain -directory $hd *.open]]   ;# 1: NOT drained
+    set ::els::swap_suspend 0          ;# modal closed
+    els::handoff_tick ; els::handoff_stop
+    set afterSpool [llength [glob -nocomplain -directory $hd *.open]]    ;# 0: drained
+    set opened 0
+    foreach d $::els::docs {
+        if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set opened 1 }
+    }
+    list $duringSpool $afterSpool $opened
+} -result {1 0 1}
+
 test extmod-recover-1.1 {a crash-recovered fresh tab arms the R3 guard from the swap's savedSig} -setup recover_reset -body {
     set p [file join $::ELS_TMP recov-extmod.txt]
     raw_write $p "on-disk at crash time\n"
