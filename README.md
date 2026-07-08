@@ -262,8 +262,9 @@ builds as a stubs `.dll` (`z build-ext`; see `src/elsx.c`). A real example,
 **`src/icudet.c`**, dynamically loads the Windows system ICU (`icu.dll`) to expose
 its charset detector to Tcl (the basis of els's encoding auto-detection); it is
 compiled into the shipped exe together with **`src/winfs.c`**, the Win32 helper
-behind atomic saves and the crash-recovery liveness locks. Tests live in
-`tests/elsx.test` and `tests/winfs.test`.
+behind atomic saves and the crash-recovery liveness locks, and **`src/windrop.c`**,
+the Explorer drag-and-drop handler. Tests live in `tests/elsx.test` and
+`tests/winfs.test`.
 
 ## About
 

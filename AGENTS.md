@@ -40,7 +40,7 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
 
 - `z build` builds it into `dist/els.exe`, the one artifact that gets run and
   released. `build/` holds intermediates only; the repo root holds no binaries.
-  The build compiles `src/els_main.c`, `src/icudet.c`, and `src/winfs.c`;
+  The build compiles `src/els_main.c`, `src/icudet.c`, `src/winfs.c`, and `src/windrop.c`;
   generates the PE icon/manifest/version resources from Tcl into `build/`;
   runs `windres`; links z's static `r/tcltk/9.0.3/tcl9s` libraries; and appends the
   zipfs payload. The final swap is staged so a running `dist/els.exe` does not

@@ -111,9 +111,10 @@ gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS ^
 
 `src/icudet.c` dynamically loads the Windows system ICU (`icu.dll`) to expose
 charset detection to Tcl. `src/winfs.c` provides Win32 helpers for atomic saves
-and crash-recovery liveness locks. `src/cap.c` supports screenshot capture for
-`tools/shot.tcl`. `src/els_main.c` is the exe entry point and is not built as a
-loadable extension.
+and crash-recovery liveness locks. `src/windrop.c` registers Explorer
+drag-and-drop so files dropped on the window open as tabs. `src/cap.c` supports
+screenshot capture for `tools/shot.tcl`. `src/els_main.c` is the exe entry point
+and is not built as a loadable extension.
 
 ## Build: `z build`
 
@@ -122,7 +123,7 @@ loadable extension.
 1. `tools/genres.tcl` generates `build/els.rc` and
    `build/els.exe.manifest`; `tools/mkico.tcl` generates `build/els.ico`.
 2. `windres` compiles `build/els.rc` to `build/els.res`.
-3. gcc compiles `src/els_main.c`, `src/icudet.c`, and `src/winfs.c`.
+3. gcc compiles `src/els_main.c`, `src/icudet.c`, `src/winfs.c`, and `src/windrop.c`.
 4. gcc links against z's static Tcl/Tk libraries in `<TCLTK>/tcl9s/lib` plus
    Win32 system libraries, then strips the bare exe.
 5. `tools/package.tcl` stages `els.tcl`, resources, `tcl_library`, and
