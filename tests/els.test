@@ -532,6 +532,53 @@ test bk-1.9 {the Keep Backups choice persists through the config round-trip} -se
     set v
 } -result 0
 
+test bk-1.10 {the ring orders by mtime, not the local-time name stamp (DST-safe, F14)} -setup {els_reset} -body {
+    file mkdir [bk_dir]
+    # three backups whose NAME order is the REVERSE of their mtime order, as if
+    # the wall-clock stepped backward between writes
+    set a [file join [bk_dir] "d.txt.00000000.20990101-000000.bak"] ;# name LAST
+    set b [file join [bk_dir] "d.txt.00000000.20500101-000000.bak"] ;# name MID
+    set c [file join [bk_dir] "d.txt.00000000.20200101-000000.bak"] ;# name FIRST
+    raw_write $a "A" ; file mtime $a [expr {[clock seconds] - 300}]  ;# OLDEST mtime
+    raw_write $b "B" ; file mtime $b [expr {[clock seconds] - 200}]
+    raw_write $c "C" ; file mtime $c [expr {[clock seconds] - 100}]  ;# NEWEST mtime
+    set ring [els::backup_ring [bk_dir] "d.txt.*.bak"]
+    file delete -force $a $b $c
+    # mtime order = a,b,c (oldest->newest); a plain name sort gives c,b,a
+    list [file tail [lindex $ring 0]] [file tail [lindex $ring end]]
+} -result {d.txt.00000000.20990101-000000.bak d.txt.00000000.20200101-000000.bak}
+
+test bk-1.11 {prune keeps the newest-mtime backup even when a stale one's name sorts later (F14)} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0 ; set ::els::BK_RING 1
+    set p [els_tmpfile bk111.txt "orig\n"]
+    set id [els::open $p]
+    file mkdir [bk_dir]
+    # a pre-existing backup whose NAME sorts LATE (year 2099) but whose MTIME is
+    # OLD: a name-ordered prune keeps it and drops the real newest
+    set stale [file join [bk_dir] "[els::backup_stem $p].20990101-000000.bak"]
+    raw_write $stale "stale"
+    file mtime $stale [expr {[clock seconds] - 10000}]
+    [els::W $id] insert end "edit" ; els::save    ;# writes a fresh backup of "orig\n"
+    set ring [bk_ring $p]
+    list [file exists $stale] [llength $ring] [raw_read [lindex $ring 0]]
+} -result [list 0 1 "orig\n"]
+
+test bk-1.12 {a newest backup dated in the FUTURE does not suppress a real backup (F14)} -setup {els_reset} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 60
+    set p [els_tmpfile bk112.txt "orig\n"]
+    set id [els::open $p]
+    file mkdir [bk_dir]
+    # newest backup mtime is in the FUTURE (clock was stepped back): a raw
+    # "[now] - mtime < BK_MININT" reads the negative age as "fresh" and skips
+    set future [file join [bk_dir] "[els::backup_stem $p].20990101-000000.bak"]
+    raw_write $future "future"
+    file mtime $future [expr {[clock seconds] + 10000}]
+    [els::W $id] insert end "edit" ; els::save
+    set found 0
+    foreach f [bk_ring $p] { if {[raw_read $f] eq "orig\n"} { set found 1 } }
+    set found
+} -result 1
+
 test bk-1.10 {menu carries Keep Backups and Open Backups Folder} -setup {els_reset} -body {
     set cb 0 ; set cmd 0
     for {set i 0} {$i <= [.menu.file index end]} {incr i} {

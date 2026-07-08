@@ -257,6 +257,7 @@ proc single_setup_primary {} {
     set lp [file join $swapd host-prim-live.lock]
     raw_write $lp "pid 0"
     file mtime $lp [clock seconds]             ;# fresh -> live under the mtime path
+    raw_write [file join $swapd host-prim-live.listen] ""  ;# a LISTENING primary (F34)
     return $appdata
 }
 
@@ -279,6 +280,19 @@ test single-c.2 {ELS_NO_SINGLE_INSTANCE forces multi-instance} -setup recover_re
     file delete -force [file dirname $appdata]
     list $off $on
 } -result {0 1}
+
+test single-c.4 {a live lock with NO listen marker is an opted-out peer, not a handoff target (F34)} -setup recover_reset -body {
+    lassign [els::config_candidates] near appdata
+    if {[file exists $near]} { return 0 }      ;# a portable config is present: not testable here
+    file mkdir [file dirname $appdata]
+    raw_write $appdata "geometry 800x600"
+    set swapd [file join [file dirname $appdata] swap] ; file mkdir $swapd
+    set lp [file join $swapd host-nolisten.lock]
+    raw_write $lp "pid 0" ; file mtime $lp [clock seconds]   ;# live lock, but no .listen marker
+    set r [els::primary_running]
+    file delete -force [file dirname $appdata]
+    set r
+} -result 0
 
 test single-c.3 {handoff round-trip: send spools the file, drain opens it and clears the spool} -setup recover_reset -body {
     set p [file join $::ELS_TMP handed.txt] ; raw_write $p "from a second launch\n"

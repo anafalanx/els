@@ -3253,6 +3253,13 @@ proc els::lock_path {{sid ""}} {
     if {$sid eq ""} { set sid [els::session_id] }
     return [file join [els::swap_dir] "$sid.lock"]
 }
+# A LISTENING single-instance primary drops this marker beside its lock so a peer
+# can tell it apart from an ELS_NO_SINGLE_INSTANCE instance (which also holds a
+# lock, for swap isolation, but never polls the handoff spool) — see F34.
+proc els::listen_path {{sid ""}} {
+    if {$sid eq ""} { set sid [els::session_id] }
+    return [file join [els::swap_dir] "$sid.listen"]
+}
 
 # ---- the swap file: framed, self-validating ------------------------------
 #   ELSSWAP v1\n  <payload bytes>  \nELSSWAPEND <len> <crc32>\n
@@ -3600,7 +3607,13 @@ proc els::primary_running {} {
     set swapdir [file join [file dirname $cfg] swap]
     foreach lp [glob -nocomplain -directory $swapdir *.lock] {
         set sid [file rootname [file tail $lp]]
-        if {[els::lock_is_live $sid $lp]} { return 1 }
+        if {![els::lock_is_live $sid $lp]} continue
+        # A live lock alone isn't a handoff target: an ELS_NO_SINGLE_INSTANCE
+        # instance holds one (for swap isolation) but never polls the spool.  Only
+        # a LISTENING primary drops a <sid>.listen marker beside its lock
+        # (handoff_start), so require it — else our file is spooled to an instance
+        # that never drains it and never opens (F34).
+        if {[file exists [file join $swapdir "$sid.listen"]]} { return 1 }
         # native is authoritative; pure-Tcl mtime fallback may false-positive,
         # but the worst case is a missed handoff (we just open our own window)
     }
@@ -3702,6 +3715,10 @@ proc els::handoff_start {} {
     if {[els::single_instance_off] || $::els::selftest} { return }
     if {[els::handoff_dir] eq ""} { return }
     if {$::els::handoff_after ne ""} { return }
+    # Mark ourselves a LISTENING primary: a peer's primary_running counts a live
+    # lock as a handoff target only if this marker sits beside it, so a file is
+    # never spooled to an ELS_NO_SINGLE_INSTANCE instance that will never drain it (F34).
+    catch { close [::open [els::listen_path] w] }
     els::handoff_tick
 }
 proc els::handoff_tick {} {
@@ -3716,6 +3733,7 @@ proc els::handoff_tick {} {
 }
 proc els::handoff_stop {} {
     if {$::els::handoff_after ne ""} { after cancel $::els::handoff_after; set ::els::handoff_after "" }
+    catch { file delete -force [els::listen_path] }   ;# no longer a listening primary (F34)
 }
 
 # ---- orphan enumeration + reconcile --------------------------------------
@@ -3852,6 +3870,14 @@ proc els::swap_sweep {} {
             if {$sid eq [els::session_id]} continue
             if {[els::lock_is_live $sid $f]} continue
             if {[llength [glob -nocomplain -directory $d "swp-$sid-*.swp"]]} continue
+            catch {file delete -force $f}
+        }
+        # orphan listen markers: same dead-session rule — a live primary keeps its
+        # lock live, so its own marker survives; a crashed one's is swept (F34)
+        foreach f [glob -nocomplain -directory $d *.listen] {
+            set sid [file rootname [file tail $f]]
+            if {$sid eq [els::session_id]} continue
+            if {[els::lock_is_live $sid [file join $d "$sid.lock"]]} continue
             catch {file delete -force $f}
         }
     }
@@ -4220,6 +4246,28 @@ proc els::backup_stem {path} {
 proc els::glob_escape {s} {
     return [regsub -all {[][*?{}\\]} $s {\\&}]
 }
+# Order a backup ring by MTIME (epoch), then name.  The filename stamp is LOCAL
+# wall-clock, so a plain name sort mis-orders after any BACKWARD clock move (DST
+# fall-back, NTP/VM step-back): a backup written just after the step sorts before
+# pre-step ones, so the ring prune ([lrange 0 end-BK_RING]) could delete the
+# just-written newest version while keeping stale copies.  Epoch mtime is
+# continuous across a DST change (only the local representation jumps), so it is
+# the stable creation order (F14).
+proc els::backup_ring_cmp {a b} {
+    set d [expr {[lindex $a 0] - [lindex $b 0]}]
+    if {$d != 0} { return [expr {$d < 0 ? -1 : 1}] }
+    return [string compare [lindex $a 1] [lindex $b 1]]
+}
+proc els::backup_ring {dir glob} {
+    set pairs {}
+    foreach f [glob -nocomplain -directory $dir $glob] {
+        set mt 0 ; catch {set mt [file mtime $f]}
+        lappend pairs [list $mt $f]
+    }
+    set out {}
+    foreach p [lsort -command els::backup_ring_cmp $pairs] { lappend out [lindex $p 1] }
+    return $out
+}
 proc els::backup_keep {path} {
     if {!$::els::backups} { return }
     set dir [els::backup_dir]
@@ -4231,22 +4279,26 @@ proc els::backup_keep {path} {
         file mkdir $dir
         set stem [els::backup_stem $path]
         set glob "[els::glob_escape $stem].*.bak"
-        set ring [lsort [glob -nocomplain -directory $dir $glob]]
+        set ring [els::backup_ring $dir $glob]
         # a fresh-enough newest backup already preserves the interesting
         # (pre-burst) version: skip
         set newest [lindex $ring end]
-        set fresh [expr {$newest ne "" && ![catch {file mtime $newest} mt] \
-                         && [clock seconds] - $mt < $::els::BK_MININT}]
+        set fresh 0
+        if {$newest ne "" && ![catch {file mtime $newest} mt]} {
+            # A NEGATIVE age (newest mtime in the FUTURE, e.g. after an NTP
+            # step-back or VM resume) must NOT read as "fresh", or no backup is
+            # taken until the clock passes the stale file's mtime (F14).
+            set age [expr {[clock seconds] - $mt}]
+            set fresh [expr {$age >= 0 && $age < $::els::BK_MININT}]
+        }
         if {!$fresh} {
             # Microsecond-resolution, fixed-width stamp: the readable date-time plus
-            # the microsecond-within-second (6 digits).  This makes every backup name
-            # unique AND monotonically increasing, so lsort of the ring == creation
-            # order — which the fresh-newest skip ([lindex $ring end]) and the ring
-            # pruning ([lrange $ring 0 end-BK_RING]) both depend on.  A plain
-            # second-resolution stamp collided on same-second bursts, and the old
-            # "-NN" collision suffix sorted BEFORE ".bak", so pruning kept the OLDEST
-            # version of the burst and dropped the newest.  Derive both parts from one
-            # reading so a second-boundary can't skew them.
+            # the microsecond-within-second (6 digits) — makes every backup name
+            # unique even on same-second bursts (a plain second-resolution stamp
+            # collided).  Ring ORDER is by mtime now (els::backup_ring), NOT the
+            # name, so a backward wall-clock step can't misorder the prune (F14);
+            # the stamp only needs uniqueness.  Derive both parts from one reading
+            # so a second-boundary can't skew them.
             set us [clock microseconds]
             set stamp "[clock format [expr {$us / 1000000}] -format %Y%m%d-%H%M%S]-[format %06d [expr {$us % 1000000}]]"
             set target [file join $dir "$stem.$stamp.bak"]
@@ -4258,8 +4310,8 @@ proc els::backup_keep {path} {
             set fh [::open $path rb] ; set bytes [read $fh] ; close $fh
             set werr [els::write_atomic $target $bytes]
             if {$werr ne ""} { error $werr }
-            # prune the ring to the newest BK_RING entries
-            set ring [lsort [glob -nocomplain -directory $dir $glob]]
+            # prune the ring to the newest BK_RING entries (by mtime, F14)
+            set ring [els::backup_ring $dir $glob]
             foreach old [lrange $ring 0 end-$::els::BK_RING] {
                 catch {file delete -force $old}
             }
