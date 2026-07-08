@@ -405,3 +405,26 @@ test focus-1.7 {a buffer-replacing reopen keeps Focus mode active (same line cou
     list [expr {[llength [$w tag ranges focusDim]] > 0}] \
          [expr {"focusDim" in [$w tag names 3.0]}]
 } -result {1 1}
+
+# ---- bug-hunt wave 2: view polish (G-View mat-2, mat-3) --------------------
+
+test ws-3.1 {Show Whitespace OFF clears the tints on background tabs, not just the active one (G-View mat-2)} -setup {els_reset} -body {
+    set ::els::show_ws 1
+    set idA $::els::active
+    [els::W $idA] insert end "x  y\tz" ; update       ;# doc A: double-space + tab
+    els::ws_refresh                                    ;# tag A while it is active
+    set aTagged [expr {[llength [[els::W $idA] tag ranges wsTab]] > 0}]
+    set idB [els::new_doc] ; els::switch_to $idB       ;# B is now the active tab
+    set ::els::show_ws 0 ; els::set_show_ws 0          ;# toggle OFF while B is active
+    set aAfter [llength [[els::W $idA] tag ranges wsTab]]
+    list $aTagged $aAfter
+} -result {1 0}
+
+test tipclamp-3.1 {tooltips clamp against the virtual desktop, not the primary monitor (G-View mat-3)} -body {
+    # two 1920-wide monitors side by side -> virtual {0 0 3840 1080}.  A tip at
+    # x=2500 (on the secondary) width 400 fits and must NOT be pulled back; one
+    # overflowing the true right edge IS pulled in.
+    lassign [els::tip_clamp 2500 100 400 30 0 0 3840 1080] rx1 ry1
+    lassign [els::tip_clamp 3600 100 400 30 0 0 3840 1080] rx2 ry2
+    list $rx1 [expr {$rx2 == 3840 - 400 - 4}]
+} -result {2500 1}

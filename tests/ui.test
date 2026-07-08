@@ -1398,6 +1398,21 @@ test assoc-3.6 {assoc_registered is FALSE for a stale registration pointing at a
     list $stale $healthy
 } -result {0 1}
 
+test reveal-argv-1.1 {a comma/= folder path routes through cmd start; a normal path uses explorer (G-Windows-0)} -body {
+    set comma [els::reveal_argv "C:/docs,v2"]
+    set eq    [els::reveal_argv "C:/a=b"]
+    set plain [els::reveal_argv "C:/docs/normal"]
+    list [expr {[lsearch $comma start] >= 0}] [expr {[lsearch $eq start] >= 0}] \
+         [string match -nocase "*explorer.exe*" [lindex $plain 0]]
+} -result {1 1 1}
+
+test updatepill-1.1 {show_update keeps the pill's hover highlight after adding its tooltip (G-View mat-4)} -setup {ui_reset} -body {
+    els::show_update 9.9
+    list [string match "*tip_schedule*" [bind .sb.update <Enter>]] \
+         [string match "*configure -background*" [bind .sb.update <Enter>]] \
+         [string match "*configure -background*" [bind .sb.update <Leave>]]
+} -result {1 1 1}
+
 test session-4.1 {an explicit-file-arg launch does not destroy the stored session} -setup {ui_reset} -body {
     set ::els::session_files [list C:/saved/a.txt C:/saved/b.txt]
     set ::els::session_active C:/saved/a.txt

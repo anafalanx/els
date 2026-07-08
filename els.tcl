@@ -2742,16 +2742,32 @@ proc els::tab_copy_path {id} {
     clipboard clear
     clipboard append [file nativename $::els::docPath($id)]
 }
+# Build the exec argv to open $dir in Explorer.  A folder path containing a comma
+# or '=' can't go as a bare explorer.exe argument: Tcl's exec doesn't quote those
+# characters and explorer's own comma/equals-delimited command grammar then
+# mis-parses the path and opens the WRONG folder (G-Windows-0).  Route those
+# through the shell `start` verb (cmd.exe, as open_url already does), which takes
+# one quoted path; the common case stays on plain explorer.  "" if none resolves.
+proc els::reveal_argv {dir} {
+    set dir [file nativename $dir]
+    if {[string match {*[,=]*} $dir]} {
+        set cmd [els::system32 cmd.exe]
+        if {$cmd ne ""} { return [list $cmd /c start "" $dir] }
+    }
+    set exp [els::windir explorer.exe]   ;# absolute path: never a planted explorer.exe
+    if {$exp ne ""} { return [list $exp $dir] }
+    return {}
+}
+proc els::open_folder {dir} {
+    set argv [els::reveal_argv $dir]
+    if {[llength $argv]} { catch {exec {*}$argv &} }
+}
 proc els::tab_reveal {id} {
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} return
-    set exp [els::windir explorer.exe]
-    if {$exp eq ""} return   ;# fail safe rather than a bare-name exec (CWD planting)
     # Open the CONTAINING FOLDER (matching the label and backups_open).  Not
     # `/select,<path>`: Tcl's exec quotes the whole "/select,C:\dir with space\f"
-    # token as one quoted argument, and explorer ignores /select when the switch
-    # itself is inside the quotes — so it silently opened the wrong folder for the
-    # majority of real Windows paths (C:\Users\<name with space>, C:\Program Files).
-    catch {exec $exp [file nativename [file dirname $::els::docPath($id)]] &}
+    # token as one argument and explorer ignores /select inside the quotes.
+    els::open_folder [file dirname $::els::docPath($id)]
 }
 proc els::menu_cascade_reserve {menu {depth 1}} {
     if {$depth <= 0 || ![winfo exists $menu]} { return 0 }
@@ -4251,9 +4267,7 @@ proc els::backups_open {} {
     set dir [els::backup_dir]
     if {$dir eq ""} { return }
     catch {file mkdir $dir}
-    set exp [els::windir explorer.exe]   ;# absolute path: never a planted explorer.exe
-    if {$exp eq ""} { return }
-    catch {exec $exp [file nativename $dir] &}
+    els::open_folder $dir
 }
 proc els::set_backups {{persist 1}} {
     if {$persist} { els::save_geometry }
@@ -4887,6 +4901,17 @@ proc els::tip_pop {w text} {
 # A tooltip anchored at explicit screen coordinates (e.g. near the cursor), used
 # for per-row tips in a list where one widget holds many hover targets.  Clamped
 # to the screen rather than a window.
+# Keep a tip fully on-screen: clamp its right/bottom against the VIRTUAL desktop
+# (els::virtual_screen — the native multi-monitor rect), NOT wm maxsize, which is
+# only the PRIMARY monitor's maximized size and teleported a secondary-monitor tip
+# back to the primary's edge (G-View mat-3).  No left/top snap: monitors left/above
+# the primary have legitimately negative root coordinates.
+proc els::tip_clamp {rx ry tw th vx vy vw vh} {
+    set right [expr {$vx + $vw}] ; set bottom [expr {$vy + $vh}]
+    if {$rx + $tw > $right - 4}  { set rx [expr {$right - $tw - 4}] }
+    if {$ry + $th > $bottom - 4} { set ry [expr {$ry - $th - 22}] }
+    return [list $rx $ry]
+}
 proc els::tip_pop_at {text rx ry} {
     catch {destroy .tip}
     if {$text eq ""} { return }
@@ -4898,14 +4923,7 @@ proc els::tip_pop_at {text rx ry} {
     pack .tip.l
     update idletasks
     set tw [winfo reqwidth .tip] ; set th [winfo reqheight .tip]
-    # clamp against the VIRTUAL desktop (wm maxsize tracks it), not winfo
-    # screenwidth/-height, which report only the PRIMARY monitor on Windows —
-    # the old clamp teleported the tip from a secondary monitor to the primary's
-    # edge.  No max(...,0) snap either: monitors left/above the primary have
-    # legitimately negative root coordinates.
-    lassign [wm maxsize .tip] sw sh
-    if {$rx + $tw > $sw - 4} { set rx [expr {$sw - $tw - 4}] }
-    if {$ry + $th > $sh - 4} { set ry [expr {$ry - $th - 22}] }
+    lassign [els::tip_clamp $rx $ry $tw $th {*}[els::virtual_screen]] rx ry
     wm geometry .tip +$rx+$ry
 }
 # A dynamic tooltip: `textcmd` is evaluated each time the tip is about to show,
@@ -5385,12 +5403,15 @@ proc els::goto_do {top} {
 # (Tk can't substitute glyphs).  Scoped to the visible viewport so it stays fast
 # on large files; re-runs on scroll (els::yscroll) and edits (els::refresh_view).
 # Pure tagging (no content change), so it's safe anywhere.
-proc els::ws_refresh {} {
-    set w [els::T]
-    if {$w eq ""} { return }
+proc els::ws_clear {w} {
     $w tag remove wsSpace 1.0 end
     $w tag remove wsTab   1.0 end
     $w tag remove wsTrail 1.0 end
+}
+proc els::ws_refresh {} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    els::ws_clear $w
     if {!$::els::show_ws} { return }
     # linestart: with wrap off and the view scrolled right, @0,0 is a MID-LINE
     # index, and tagging from there left the top row's left-of-viewport
@@ -5409,7 +5430,17 @@ proc els::ws_refresh {} {
 }
 
 proc els::set_show_ws {{persist 1}} {
-    els::ws_refresh
+    # tags are per-widget and the re-tag is viewport-based (the active widget only),
+    # so turning the feature OFF must clear EVERY document's tints, not just the
+    # active one — else a background tab keeps stale whitespace tint until it is
+    # re-toggled while active (matches set_wrap / set_focus_mode) (G-View mat-2)
+    if {$::els::show_ws} {
+        els::ws_refresh
+    } else {
+        foreach id $::els::docs {
+            if {[winfo exists [els::W $id]]} { els::ws_clear [els::W $id] }
+        }
+    }
     if {$persist} { els::save_geometry }
 }
 # View ▸ Line Numbers: hide/show the gutter (grid remove keeps its options, so
@@ -5538,6 +5569,11 @@ proc els::show_update {ver} {
     if {![winfo exists .sb.update]} return
     .sb.update configure -text $ver
     els::tooltip .sb.update "els $ver is available — click to download"
+    # els::tooltip REPLACED <Enter>/<Leave> with tip schedule/cancel; re-append the
+    # hover highlight the pill was built with (see build) with `+`, so it both shows
+    # the tip AND keeps its highlight (and <Leave> restores CHROME) (G-View mat-4)
+    bind .sb.update <Enter> {+.sb.update configure -background $::els::TABBG}
+    bind .sb.update <Leave> {+.sb.update configure -background $::els::CHROME}
 }
 # Open a URL in the user's browser.  Absolute System32 paths only — see
 # els::system32 for why a bare `rundll32.exe`/`cmd.exe` is unsafe here too (a
