@@ -1046,7 +1046,9 @@ proc els::assoc_commands {exe} {
     return $cmds
 }
 # reg.exe commands that fully remove els's app registration (everything
-# assoc_commands writes, including the per-type OpenWithProgids options).  Per-user
+# assoc_commands writes, including the per-type OpenWithProgids options).  Deletes
+# the whole HKCU\Software\anafalanx vendor key, not just its \els\Capabilities leaf,
+# so the otherwise-orphaned empty parent keys are not stranded (F70).  Per-user
 # only.  Any default the USER set via Open with > Always is left alone — that's
 # their choice, Windows protects it, and it's reset in Settings > Default apps, not
 # by us.
@@ -1056,7 +1058,7 @@ proc els::assoc_unregister_commands {exe} {
     set cmds [list \
         [list reg.exe delete "HKCU\\Software\\Classes\\Applications\\$appExe" /f] \
         [list reg.exe delete {HKCU\Software\Classes\els.txt} /f] \
-        [list reg.exe delete {HKCU\Software\anafalanx\els\Capabilities} /f] \
+        [list reg.exe delete {HKCU\Software\anafalanx} /f] \
         [list reg.exe delete {HKCU\Software\RegisteredApplications} /v els /f]]
     foreach e [els::assoc_exts] {
         lappend cmds [list reg.exe delete "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid /f]
@@ -3281,8 +3283,10 @@ proc els::swap_serialize {id sid} {
                cursor [$w index insert] dirty [els::doc_dirty $id] \
                savedSig [els::doc_saved_sig $id] mtime [clock seconds] \
                host [els::host_tag] \
-               bodyCrc [zlib crc32 [encoding convertto -profile replace utf-8 $text]] \
                text $text]
+    # No separate body CRC: the frame trailer below already length+crc32s the whole
+    # payload and swap_read validates it, so a second whole-text encode+crc here was
+    # write-only dead weight that doubled a large dirty doc's per-flush cost (F67).
     set payload [encoding convertto -profile replace utf-8 $d]
     return "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
 }

@@ -573,12 +573,12 @@ test assoc-1.1 {assoc_commands registers els as an app + Open-with option for th
          [expr {[string first UserChoice $blob] < 0}]
 } -result {1 1 1 1 1 1}
 
-test assoc-1.2 {assoc_unregister_commands removes the whole app registration, per-user} -setup {ui_reset} -body {
+test assoc-1.2 {assoc_unregister_commands removes the whole app registration incl. the anafalanx vendor key, per-user} -setup {ui_reset} -body {
     set blob [join [lmap c [els::assoc_unregister_commands [file join $::ELS_TMP els.exe]] {join $c " "}] "\n"]
     list [expr {[string first {reg.exe delete} $blob] >= 0}] \
          [expr {[string first {\Classes\Applications\els.exe} $blob] >= 0}] \
          [expr {[string first {\Classes\els.txt} $blob] >= 0}] \
-         [expr {[string first {anafalanx\els\Capabilities} $blob] >= 0}] \
+         [expr {[string first {delete HKCU\Software\anafalanx /f} $blob] >= 0}] \
          [expr {[string first {RegisteredApplications /v els} $blob] >= 0}] \
          [expr {[string first {\.txt\OpenWithProgids /v els.txt} $blob] >= 0}]
 } -result {1 1 1 1 1 1}
@@ -670,7 +670,7 @@ test assoc-3.5 {assoc_unregister issues exactly the app-registration deletes, ag
     list [expr {[string first {reg.exe delete} $blob] >= 0}] \
          [expr {[string first {\Classes\Applications\assoc_els.exe} $blob] >= 0}] \
          [expr {[string first {\Classes\els.txt} $blob] >= 0}] \
-         [expr {[string first {anafalanx\els\Capabilities} $blob] >= 0}] \
+         [expr {[string first {delete HKCU\Software\anafalanx /f} $blob] >= 0}] \
          [expr {[string first {RegisteredApplications /v els} $blob] >= 0}]
 } -result {1 1 1 1 1}
 

@@ -93,8 +93,9 @@ in **Settings > Default apps**.
 ## Data safety
 
 A text editor's one unforgivable failure is losing text. els defends against
-that with a set of mechanisms that work together. None of them needs setup, and
-none of them ever writes into your files on its own.
+that with a set of mechanisms that work together. They arm as soon as els has a
+place to keep its settings — chosen once, the first time you run it — and need no
+further setup; none of them ever writes into your files on its own.
 
 **Atomic save.** els avoids overwriting a file in place. A save first writes the
 complete new content to a temporary file in the same folder; only when every
