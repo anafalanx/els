@@ -6,7 +6,7 @@ A tiny text editor for Windows: calm, opinionated, no-frills.
 
 els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset
-auto-detection across 95 encodings. It is built to never lose your text:
+auto-detection. It is built to never lose your text:
 saves are atomic, unsaved work is continuously crash-protected, and opening a
 file while els is running joins the existing window instead of spawning a
 second one (see [Data safety](#data-safety)). The look is deliberately quiet:
@@ -37,16 +37,16 @@ in **Settings > Default apps**.
 
 ## Features
 
-- **Data safety, built in**: atomic saves that cannot truncate a file,
-  continuous crash protection for unsaved changes, a guard against saves that
+- **Data safety, built in**: atomic saves (an interrupted save leaves the
+  original intact), continuous crash protection for unsaved changes, a guard against saves that
   would silently lose characters, and one editor window that collects
   everything you open. Explained in [Data safety](#data-safety).
 - **Auto-save, opt-in** (File > Auto-save, off by default): documents that
-  have a file are saved a moment after you stop typing, on tab switch, on
+  have a file are saved a moment after you begin editing, on tab switch, on
   focus loss, and on exit.
-- **Backups, on by default** (File > Keep Backups): every save that
-  overwrites a file first preserves the previous version in a bounded
-  `backups` folder next to `els.conf`.
+- **Backups, on by default** (File > Keep Backups): overwriting a file first
+  preserves its previous version in a bounded `backups` folder next to
+  `els.conf` (a burst of rapid saves keeps one pre-burst copy, not every save).
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
   state under a flat tab strip; drag a tab to reorder.
 - **Drag and drop**: drop files from Explorer onto the text area to open each in
@@ -59,7 +59,8 @@ in **Settings > Default apps**.
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
   dedent (Tab / Shift+Tab), sort / sort-descending / reverse / remove-duplicate
   lines, UPPERCASE / lowercase, and trim trailing whitespace.
-- **Encoding & EOL**: auto-detected on open, preserved on save, shown in the
+- **Encoding & EOL**: auto-detected on open and preserved on save (mixed line
+  endings are normalized to one style), shown in the
   status bar. All 95 Tcl encodings, BOM sniffing (UTF-8/16/32), and
   chardet-quality detection via the Windows system ICU. Click the encoding or
   EOL indicator to reopen-with / convert; new files use Windows line endings
@@ -95,7 +96,7 @@ A text editor's one unforgivable failure is losing text. els defends against
 that with a set of mechanisms that work together. None of them needs setup, and
 none of them ever writes into your files on its own.
 
-**Atomic save.** els never overwrites a file in place. A save first writes the
+**Atomic save.** els avoids overwriting a file in place. A save first writes the
 complete new content to a temporary file in the same folder; only when every
 byte is on disk does it swap the temporary file over the original, in one
 atomic step (Windows' `ReplaceFileW`, which also carries over the file's
@@ -104,7 +105,11 @@ time). The old in-place style of saving has a failure window: if the process
 dies or the disk fills after a file has been truncated but before the new
 content lands, the file is simply gone. With atomic save that window does not
 exist. A save either fully succeeds or leaves the original exactly as it was;
-the worst a crash mid-save can cost you is that one save attempt.
+the worst a crash mid-save can cost you is that one save attempt. The lone
+exception is a target els cannot atomically replace — a path over 260
+characters, or a file another program holds locked open — where it falls back
+to a direct in-place write, keeping the temporary copy as a rescue until that
+write finishes.
 
 **Crash recovery.** Between saves, your unsaved changes exist only in memory,
 which is exactly what a crash, a forced reboot, or a power cut destroys. So
@@ -152,7 +157,7 @@ document (with a quiet statusbar note) until you decide. **File > Reload from
 Disk** re-reads the current file from disk at any time.
 
 **Previous versions (backups).** Saving is the one moment els overwrites
-your data with new content, so every save that replaces an existing file
+your data with new content, so a save that replaces an existing file
 first preserves what the file held, as a plain copy in a `backups` folder
 next to `els.conf` (for a portable install that is right next to `els.exe`).
 The folder is bounded, not an archive: a handful of versions per file, a
@@ -168,7 +173,7 @@ files you later delete or move.
 
 **Auto-save (optional).** **File > Auto-save** is off by default. When you
 turn it on, every document that has a file is saved automatically: a moment
-after you stop typing, when you switch tabs, when the els window loses focus,
+after you begin editing, when you switch tabs, when the els window loses focus,
 and when you close a file or exit, always through the same atomic save.
 Untitled notes are never auto-saved (no filename is invented; crash recovery
 protects them), a save that would lose characters pauses auto-saving for that
