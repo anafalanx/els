@@ -632,3 +632,39 @@ test hebdet-1.3 {a logical-Hebrew ISO-8859-8 file opens as Hebrew, not cp1252 mo
     # decode these bytes to the same Hebrew letters — cp1252/latin1 is the bug.
     list [expr {$::els::docEnc($::els::active) in {iso8859-8 cp1255}}] [[els::T] get 1.0 1.6]
 } -result [list 1 "בראשית"]
+
+# ---- bug-hunt wave 2: encoding detection + save polish (F24, F21, F22) ------
+
+test detectwide-6.1 {a tiny file with one stray NUL is read as text, not misdetected as UTF-16 (F24)} -body {
+    list [els::detect_encoding "a\x00b\x0A"] [els::detect_encoding "hello\x00world\n"]
+} -result {{utf-8 0} {utf-8 0}}
+
+test detectwide-6.2 {a genuine BOM-less UTF-16LE file is still detected as wide (regression guard)} -setup {els_reset} -body {
+    set p [write_raw wide6.txt [encoding convertto utf-16le "The quick brown fox jumps over.\n"]]
+    els::open $p
+    list $::els::docEnc($::els::active) $::els::docBom($::els::active)
+} -result {utf-16le 0}
+
+test reopen-empty-6.1 {Reopen with Encoding works on a genuinely empty (0-byte) file, no false "recovered" refusal (F21)} -setup {els_reset} -body {
+    set p [write_raw empty6.txt ""]                ;# 0-byte file on disk
+    els::open $p
+    set id $::els::active
+    set before [list $::els::docEnc($id) [els_text $id]]
+    set ::els_test_mbcount 0
+    els::reopen_with utf-16le 0                     ;# must NOT pop the "recovered content" refusal
+    list $before [list $::els::docEnc($id) [els_text $id]] $::els_test_mbcount
+} -result {{utf-8 {}} {utf-16le {}} 0}
+
+test reopen-recovered-6.1 {Reopen with Encoding STILL refuses a recovered-but-unsaved tab (uncached bytes)} -setup {els_reset} -body {
+    set id $::els::active
+    set ::els::docPath($id) [file join $::ELS_TMP recov6.txt]   ;# has a path...
+    set ::els::docRaw($id) ""                                   ;# ...but no cached bytes
+    set ::els::docRecovered($id) 1                              ;# and it's a recovered tab
+    set ::els_test_mbcount 0
+    els::reopen_with utf-16le 0
+    list $::els::docEnc($id) $::els_test_mbcount                ;# unchanged + one refusal dialog
+} -result {utf-8 1}
+
+test lossy-utf8-6.1 {the lossy dialog omits the pointless "Save as UTF-8" action when the target is already utf-8 (F22)} -body {
+    list [els::lossy_actions utf-8] [els::lossy_actions cp1252] [els::lossy_actions shiftjis]
+} -result {{lossy cancel} {utf8 lossy cancel} {utf8 lossy cancel}}

@@ -2497,8 +2497,12 @@ proc els::detect_wide {raw sample} {
     set dominant [expr {max($even, $odd)}]
     set other    [expr {min($even, $odd)}]
     # require a structural share of NULs (>~5%) lopsided to one parity; a couple
-    # of stray NULs, or NULs spread across both parities (binary), are not wide
-    if {$nul * 20 < $n || $other > $dominant / 3} { return "" }
+    # of stray NULs, or NULs spread across both parities (binary), are not wide.
+    # The ABSOLUTE floor ($dominant < 4) is essential: on a tiny file the >=5%
+    # share is met by ONE stray NUL (1 NUL is >5% of a <=20-byte sample and is
+    # trivially lopsided), which was misread as UTF-16 mojibake.  A genuine
+    # BOM-less wide file packs many NULs into one parity, so 4 is a safe floor.
+    if {$dominant < 4 || $nul * 20 < $n || $other > $dominant / 3} { return "" }
     if {$::els::have_detect} {
         set d [::elsdet::detect $raw]
         if {[llength $d] == 2} {
@@ -2793,9 +2797,12 @@ proc els::reopen_with {enc bom} {
             -message "Nothing to reopen — this document was never loaded from a file."
         return
     }
-    if {$::els::docRaw($id) eq ""} {
-        # no cached on-disk bytes to re-decode (e.g. a recovered-but-unsaved tab);
-        # decoding "" would silently blank the buffer — refuse instead.
+    if {$::els::docRaw($id) eq "" \
+            && [info exists ::els::docRecovered($id)] && $::els::docRecovered($id)} {
+        # a recovered-but-unsaved tab genuinely has no cached on-disk bytes, so
+        # decoding "" would silently blank it — refuse.  A legitimately EMPTY
+        # (0-byte) file ALSO has docRaw "" but is safe to reopen: decoding "" under
+        # any encoding just yields "", so let the user re-declare its charset (F21).
         tk_messageBox -parent . -icon info -title els \
             -message "Nothing to reopen — this document's on-disk bytes aren't cached\
                       (recovered unsaved content). Save it first to re-read from disk."
@@ -4062,6 +4069,16 @@ proc els::lossy_describe {enc text} {
 
 # Modal three-way choice (utf8 | lossy | cancel).  The test suite replaces
 # this proc with a canned-answer stub, like the native dialogs.
+# The save actions the lossy dialog offers for a failing encoding.  When the
+# encoding is ALREADY utf-8 (an unpaired surrogate the Tk widget holds), the
+# "Save as UTF-8" action is a lie: its branch encodes with -profile replace, so
+# it substitutes U+FFFD exactly like "Save anyway" -- it does NOT keep the
+# character.  Omit it there so the dialog never presents two identical actions
+# with contradictory labels (F22).
+proc els::lossy_actions {enc} {
+    if {$enc eq "utf-8"} { return {lossy cancel} }
+    return {utf8 lossy cancel}
+}
 proc els::lossy_ask {id enc line col uhex count} {
     set top .lossy
     catch {destroy $top}
@@ -4071,17 +4088,27 @@ proc els::lossy_ask {id enc line col uhex count} {
     wm transient $top .
     set countTxt [expr {$count >= 100 ? "100 or more" : $count}]
     set noun [expr {$count == 1 ? "character" : "characters"}]
+    set actions [els::lossy_actions $enc]
+    if {"utf8" in $actions} {
+        set choice "Save as UTF-8 to keep every character, save anyway to replace\nthe unsupported ones with substitutes, or cancel."
+    } else {
+        set choice "Save anyway to replace the unsupported [expr {$count == 1 ? {character} : {characters}}] with a\nsubstitute, or cancel."
+    }
     ttk::label $top.msg -justify left -text \
 "This document contains $countTxt $noun that cannot be written
 as [els::enc_label $enc 0] (first at line $line, column $col: U+$uhex).
 
-Save as UTF-8 to keep every character, save anyway to replace
-the unsupported ones with substitutes, or cancel."
+$choice"
     ttk::frame $top.b
-    ttk::button $top.b.utf8   -text "Save as UTF-8" -command {set ::els::lossy_answer utf8}
-    ttk::button $top.b.lossy  -text "Save anyway"   -command {set ::els::lossy_answer lossy}
-    ttk::button $top.b.cancel -text Cancel          -command {set ::els::lossy_answer cancel}
-    pack $top.b.utf8 $top.b.lossy $top.b.cancel -side left -padx 4
+    set btns {}
+    if {"utf8" in $actions} {
+        ttk::button $top.b.utf8 -text "Save as UTF-8" -command {set ::els::lossy_answer utf8}
+        lappend btns $top.b.utf8
+    }
+    ttk::button $top.b.lossy  -text "Save anyway" -command {set ::els::lossy_answer lossy}
+    ttk::button $top.b.cancel -text Cancel        -command {set ::els::lossy_answer cancel}
+    lappend btns $top.b.lossy $top.b.cancel
+    pack {*}$btns -side left -padx 4
     pack $top.msg -padx 16 -pady {14 10}
     pack $top.b   -padx 16 -pady {0 12}
     wm protocol $top WM_DELETE_WINDOW {set ::els::lossy_answer cancel}
@@ -4093,7 +4120,7 @@ the unsupported ones with substitutes, or cancel."
     if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
     wm deiconify $top
     raise $top
-    focus $top.b.utf8
+    focus [lindex $btns 0]
     grab $top
     set ::els::lossy_answer ""
     vwait ::els::lossy_answer
