@@ -25,7 +25,10 @@ test goto-1.3 {non-numeric input is ignored (cursor stays)} -setup {els_reset} -
     $w insert end "a\nb\nc\n"
     $w mark set insert 2.0
     els::goto_line
-    .goto.f.e insert 0 "xyz"
+    # ttk key-prevalidation rejects a programmatic non-digit insert, so force the
+    # bad input in with validation OFF -- otherwise goto_do sees an EMPTY entry and
+    # its non-numeric guard is never actually exercised (F59).
+    .goto.f.e configure -validate none ; .goto.f.e insert 0 "xyz" ; .goto.f.e configure -validate key
     els::goto_do .goto
     $w index insert
 } -result 2.0
@@ -167,12 +170,20 @@ test gutter-1.4 {the gutter widens as the line count grows by an order of magnit
 test goto-1.4 {go to line rejects hex (0x) and signed (+) input} -setup {els_reset} -body {
     set w [els::T] ; $w insert end "L1\nL2\nL3\nL4\nL5\n"
     $w mark set insert 3.0
-    els::goto_line ; .goto.f.e insert 0 "0x2" ; els::goto_do .goto
+    # Force the bad input past ttk key-prevalidation (which would reject it and
+    # leave an empty entry) so goto_do's ^[0-9]+$ guard is actually exercised, and
+    # assert the entry really held it (F59).
+    els::goto_line
+    .goto.f.e configure -validate none ; .goto.f.e insert 0 "0x2" ; .goto.f.e configure -validate key
+    set hexIn [.goto.f.e get]
+    els::goto_do .goto
     set afterHex [lindex [split [$w index insert] .] 0]
-    els::goto_line ; .goto.f.e insert 0 "+2"  ; els::goto_do .goto
+    els::goto_line
+    .goto.f.e configure -validate none ; .goto.f.e insert 0 "+2" ; .goto.f.e configure -validate key
+    els::goto_do .goto
     set afterPlus [lindex [split [$w index insert] .] 0]
-    list $afterHex $afterPlus
-} -result {3 3}
+    list $hexIn $afterHex $afterPlus
+} -result {0x2 3 3}
 
 test ws-1.3 {Show Whitespace flags interior 2+ space runs mauve; single spaces stay grey} -setup {els_reset} -body {
     set w [els::T]

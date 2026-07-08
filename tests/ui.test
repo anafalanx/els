@@ -2057,6 +2057,17 @@ test ctxmenu-1.2 {right-click text menu: Cut/Copy track the selection} -setup {u
     list $noSel $withSel
 } -result {{disabled disabled} {normal normal}}
 
+test cutpaste-1.1 {Cut removes the selection to the clipboard and Paste restores it (round-trip)} -setup {ui_reset} -body {
+    set id [els::new_doc] ; set w [els::W $id]
+    $w insert end "ONETWO"
+    $w tag add sel 1.0 1.3                       ;# select "ONE"
+    els::menu_event <<Cut>> ; update             ;# routes to the active doc's widget
+    set afterCut [els_text $id]                  ;# "ONE" removed from the buffer
+    $w mark set insert "end - 1 chars"           ;# end of the text, before the final \n
+    els::menu_event <<Paste>> ; update           ;# clipboard "ONE" reinserted
+    list $afterCut [els_text $id]
+} -result {TWO TWOONE}
+
 test ctxmenu-1.3 {Undo is disabled on a pristine buffer, enabled after an edit} -setup {ui_reset} -body {
     set w [els::T]
     els::popup_text_menu $w 5 5

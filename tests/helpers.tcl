@@ -32,6 +32,10 @@ catch {file delete -force $::env(LOCALAPPDATA)}   ;# stale lock/swap litter too
 # Load the els library (UI is not launched on source).
 source [file join $::ELS_ROOT els.tcl]
 
+# Capture the shipped product defaults BEFORE els_reset overwrites them for test
+# hygiene, so a test can assert what els actually ships with (F62).
+set ::els_shipped_backups $::els::backups
+
 # Pin the config path into the temp dir, so build's resolver is skipped and the
 # first-run location dialog can never pop during a test run.
 set ::els::config_path [file join $::ELS_TMP els.conf]
