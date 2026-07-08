@@ -1962,6 +1962,15 @@ test log-6.3 {the reentry latch stops els::log recursing (a logging failure cann
     set existed
 } -result 0
 
+test log-6.4 {a message with a lone surrogate is written whole, not cut off mid-line (pa-2)} -setup {ui_reset} -body {
+    set lf [file join [file dirname $::els::config_path] els.log]
+    catch {file delete -force $lf}
+    els::log warn "before\uD800after"          ;# strict utf-8 would throw after "before"
+    set data [raw_read $lf]
+    catch {file delete -force $lf}
+    list [string match "*after*" $data] [expr {[string index $data end] eq "\n"}]
+} -result {1 1}
+
 test bgerror-6.4 {els::bgerror logs the trace and posts one non-modal note, never raises} -setup {ui_reset} -body {
     set lf [file join [file dirname $::els::config_path] els.log]
     catch {file delete -force $lf}

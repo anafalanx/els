@@ -5678,10 +5678,17 @@ proc els::startup_probe {report} {
         catch {file mkdir [file dirname $report]}
         # write atomically (temp + rename) so a reader polling for the report can
         # never observe a half-written file (TOCTOU)
-        if {![catch {set fh [::open $report.tmp w]}]} {
-            puts $fh $data
-            close $fh
-            catch {file rename -force $report.tmp $report}
+        # doc paths/bodies can hold lone UTF-16 surrogates; strict utf-8 would throw
+        # in puts, leak the channel, and skip swap_shutdown below -> orphaned lock +
+        # swaps -> phantom recovery on the next launch.  Replace-profile + a full
+        # catch + try/finally so the cleanup below always runs (pa-0).
+        catch {
+            set fh [::open $report.tmp w]
+            try {
+                fconfigure $fh -profile replace
+                puts $fh $data
+            } finally { close $fh }
+            file rename -force $report.tmp $report
         }
     }
     catch {els::swap_shutdown}   ;# probe holds a lock + may have written swaps -> clean up
@@ -5707,7 +5714,10 @@ proc els::log {level msg} {
         set ts [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
         set fh [::open $lf a]
         try {
-            fconfigure $fh -encoding utf-8
+            # -profile replace: a $msg from bgerror can embed a lone UTF-16 surrogate
+            # (NTFS names, buffer text); strict would throw mid-puts and leave a
+            # truncated, newline-less line, corrupting the log's format (pa-2)
+            fconfigure $fh -encoding utf-8 -profile replace
             puts $fh "$ts \[$level\] $msg"
         } finally { close $fh }
     }
@@ -5819,8 +5829,14 @@ proc els::selftest_report_path {{requested ""}} {
         lappend dirs [file dirname [info script]]
     }
     if {[info exists ::env(TEMP)] && $::env(TEMP) ne ""} { lappend dirs $::env(TEMP) }
+    # Actually probe writability instead of blindly returning the first candidate:
+    # info nameofexecutable is never empty, so the exe dir always won before — and a
+    # read-only install (Program Files) then left --selftest with no writable report
+    # path and no observable output (a GUI exe discards the stderr fallback) (pa-7).
     foreach d $dirs {
-        if {$d ne ""} { return [file join $d els-selftest.txt] }
+        if {$d eq ""} continue
+        set cand [file join $d els-selftest.txt]
+        if {![catch {set fh [::open $cand w]}]} { close $fh ; return $cand }
     }
     return els-selftest.txt
 }

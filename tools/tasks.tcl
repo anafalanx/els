@@ -187,7 +187,7 @@ proc run_capture {args} {
     set ch [file tempfile tmp]
     set rc [catch {exec {*}$args >@ $ch 2>@ $ch} err opts]
     close $ch
-    set f [open $tmp r] ; set text [read $f] ; close $f
+    set f [open $tmp r] ; fconfigure $f -profile replace ; set text [read $f] ; close $f
     file delete -force $tmp
     if {$rc} {
         set ec [dict get $opts -errorcode]
