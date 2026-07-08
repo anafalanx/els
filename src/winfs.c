@@ -41,7 +41,9 @@ static WCHAR *utf8_to_wide(const char *s, Tcl_Size n) {
      * DEFENSIVE fallback for any caller that hands us an un-normalized long path; it
      * does not fire on the normal save path, and short paths are byte-identical to
      * before.  Only fully-qualified backslash-separated drive/UNC paths qualify. */
-    if (wlen > MAX_PATH &&
+    if (wlen >= MAX_PATH &&        /* >= not > : MAX_PATH (260) counts the NUL, so a
+                                    * path of exactly 260 chars already exceeds the
+                                    * non-prefixed Win32 limit and needs \\?\ (F39) */
         !(w[0] == L'\\' && w[1] == L'\\' && w[2] == L'?' && w[3] == L'\\')) {
         const WCHAR *pfx = nullptr;
         const WCHAR *tail = w;
@@ -106,7 +108,10 @@ static int ReplaceFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
  *   (no live owner -> the session that wrote this lock is dead) or "0" if HELD
  *   (a live instance owns it).  Used by the recovery scan to skip live peers. */
 static HANDLE g_lock = INVALID_HANDLE_VALUE;
-static WCHAR  g_lock_path[MAX_PATH * 2];   /* path the held lock was opened on */
+/* Heap copy (ANY length) of the path the held lock was opened on.  A fixed buffer
+ * truncated \\?\-prefixed long paths, so the idempotent-re-acquire compare below
+ * stopped matching the same path and a second LockFileEx failed as "lock held" (F40). */
+static WCHAR *g_lock_path = nullptr;
 
 static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
                         int objc, Tcl_Obj *const objv[]) {
@@ -118,7 +123,7 @@ static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
      * locks conflict across handles even within one process, so a second open
      * + LockFileEx on the same path would FAIL and look like "another
      * instance owns my lock" */
-    if (g_lock != INVALID_HANDLE_VALUE && _wcsicmp(w, g_lock_path) == 0) {
+    if (g_lock != INVALID_HANDLE_VALUE && g_lock_path != nullptr && _wcsicmp(w, g_lock_path) == 0) {
         Tcl_Free((char *)w);
         Tcl_SetObjResult(ip, Tcl_NewObj());
         return TCL_OK;
@@ -138,7 +143,19 @@ static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
         return TCL_OK;
     }
     OVERLAPPED ov = {0};
-    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+    BOOL locked = LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
+    if (!locked && GetLastError() == ERROR_LOCK_VIOLATION) {
+        /* A peer's win_try_lock briefly HOLDS byte 0 to probe us (TryLock_Cmd locks
+         * then immediately unlocks).  If our own acquire lands inside that window,
+         * LockFileEx fails spuriously with ERROR_LOCK_VIOLATION; without a retry the
+         * session downgrades to the lock-less channel fallback for good, and every
+         * native-probing peer then reads our lock as free = "owner dead".  One retry
+         * after a short pause clears the transient collision (F41). */
+        Sleep(15);
+        OVERLAPPED ovr = {0};
+        locked = LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ovr);
+    }
+    if (!locked) {
         DWORD gle2 = GetLastError();
         CloseHandle(h);
         Tcl_Free((char *)w);
@@ -147,8 +164,10 @@ static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     }
     if (g_lock != INVALID_HANDLE_VALUE) { CloseHandle(g_lock); }  /* replace any prior */
     g_lock = h;
-    wcsncpy(g_lock_path, w, (sizeof g_lock_path / sizeof g_lock_path[0]) - 1);
-    g_lock_path[(sizeof g_lock_path / sizeof g_lock_path[0]) - 1] = L'\0';
+    if (g_lock_path != nullptr) { Tcl_Free((char *)g_lock_path); }
+    size_t wn = wcslen(w) + 1;                            /* full, untruncated copy (F40) */
+    g_lock_path = (WCHAR *)Tcl_Alloc(wn * sizeof(WCHAR));
+    wmemcpy(g_lock_path, w, wn);
     Tcl_Free((char *)w);
     Tcl_SetObjResult(ip, Tcl_NewObj());     /* "" = success, lock held */
     return TCL_OK;
@@ -161,7 +180,7 @@ static int UnlockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
         UnlockFileEx(g_lock, 0, 1, 0, &ov);
         CloseHandle(g_lock);
         g_lock = INVALID_HANDLE_VALUE;
-        g_lock_path[0] = L'\0';
+        if (g_lock_path != nullptr) { Tcl_Free((char *)g_lock_path); g_lock_path = nullptr; }
     }
     Tcl_SetObjResult(ip, Tcl_NewObj());
     return TCL_OK;

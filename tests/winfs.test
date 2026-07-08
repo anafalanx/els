@@ -134,3 +134,34 @@ test winfs-5.3 {write_atomic with durable=1 (the save path) flushes and round-tr
     set residue [glob -nocomplain -directory $::ELS_TMP .els-save-*.tmp]
     list $err $got [llength $residue]
 } -result {{} {new durable content} 0}
+
+# ---- bug-hunt: extended-length (long-path) handling in utf8_to_wide ---------
+# The \\?\ prefix must be added for any path Win32's non-prefixed APIs can't take
+# (>= MAX_PATH, since MAX_PATH counts the NUL), and the held-lock path must be
+# stored WITHOUT truncation so re-acquire stays idempotent at any length.
+
+test winfs-6.1 {win_lock_file works at exactly MAX_PATH=260 chars (off-by-one, F39)} -constraints winfsBuilt -setup {load_winfs} -body {
+    set dir [file nativename $::ELS_TMP]
+    set need [expr {260 - [string length $dir] - 1 - 5}]   ;# 1 separator + ".lock" (5)
+    if {$need < 1} { return {260 {}} }                     ;# ELS_TMP too long to exercise here
+    set lp [file join $::ELS_TMP "[string repeat a $need].lock"]
+    set len [string length [file nativename $lp]]
+    catch {els::win_unlock_file}
+    set r [els::win_lock_file [file nativename $lp]]        ;# pre-fix: "open lock error 3"
+    els::win_unlock_file
+    catch {file delete -force $lp}
+    list $len $r
+} -result {260 {}}
+
+test winfs-6.2 {re-acquiring a >520-char lock path stays idempotent (g_lock_path not truncated, F40)} -constraints winfsBuilt -setup {load_winfs} -body {
+    set top [file join $::ELS_TMP [string repeat p 200]]
+    set d [file join $top [string repeat q 200] [string repeat r 120]]
+    file mkdir $d
+    set lp [file join $d "[string repeat s 120].lock"]
+    catch {els::win_unlock_file}
+    set r1 [els::win_lock_file [file nativename $lp]]
+    set r2 [els::win_lock_file [file nativename $lp]]       ;# SAME long path: pre-fix "lock held (error 33)"
+    els::win_unlock_file
+    catch {file delete -force $top}
+    list [expr {[string length [file nativename $lp]] > 520}] $r1 $r2
+} -result {1 {} {}}
