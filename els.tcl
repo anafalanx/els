@@ -3214,7 +3214,12 @@ proc els::swap_serialize {id sid} {
 # Returns the validated dict, or "" on any corruption.  Never raises.  (No
 # `return` inside the catch -- that makes catch report code 2 and swallow the
 # value; set then return after.)
-proc els::swap_read {file} {
+# swap_frame validates only the OUTER FRAME (magic + length + crc) and returns the
+# decoded payload dict when the bytes are intact -- REGARDLESS of schema.  The
+# sweep keys on this so a validly-framed swap from a NEWER els (a schema this
+# version cannot parse) is never mistaken for corruption and reclaimed: destroying
+# it would lose that version's unsaved work.  Only a torn / bad-crc frame is junk.
+proc els::swap_frame {file} {
     set d ""
     if {[catch {
         set fh [::open $file rb]
@@ -3231,14 +3236,21 @@ proc els::swap_read {file} {
         if {[string length $payload] != $declen} { error bad }
         if {[zlib crc32 $payload] != $declcrc} { error bad }
         set d [encoding convertfrom utf-8 $payload]
-        if {![dict exists $d schema] || [dict get $d schema] != 1} { error bad }
-        # all keys the recovery path consumes must be present: ONE incomplete
-        # (yet validly framed) swap must not throw mid-scan and silently abort
-        # recovery for the whole batch
-        foreach k {sessionId docId path enc bom eol dirty savedSig mtime text} {
-            if {![dict exists $d $k]} { error bad }
-        }
+        if {![string is list $d] || [llength $d] % 2} { error bad }   ;# payload must be a dict
     }]} { return "" }
+    return $d
+}
+# swap_read adds the v1 schema + required-key checks on top of the frame.  The
+# recovery path consumes those keys, so a validly-framed but non-v1 / incomplete
+# swap returns "" here (not recoverable by THIS els) -- but the sweep still keeps
+# it (see swap_frame), never raises.  ONE incomplete swap must not abort the batch.
+proc els::swap_read {file} {
+    set d [els::swap_frame $file]
+    if {$d eq ""} { return "" }
+    if {![dict exists $d schema] || [dict get $d schema] != 1} { return "" }
+    foreach k {sessionId docId path enc bom eol dirty savedSig mtime text} {
+        if {![dict exists $d $k]} { return "" }
+    }
     return $d
 }
 
@@ -3338,13 +3350,18 @@ proc els::sig_content {sig} {
 proc els::swap_flush_doc {id} {
     if {!$::els::swap_enabled || $::els::swap_suspend} { return 0 }
     if {![info exists ::els::docPath($id)]} { return 0 }
-    if {[els::swap_dir] eq ""} { return 0 }
     if {![winfo exists [els::W $id]]} { return 0 }
     if {[info exists ::els::loading($id)]} { return 0 }
     if {![els::doc_dirty $id]} { return 0 }   ;# clean doc: nothing to protect
     if {[els::pristine $id]} { return 0 }
     set done 0 ; set failed 0
-    if {[catch {
+    # An UNCREATABLE swap dir (ACL denial, full disk, removed media) is a genuine
+    # crash-protection failure, not a no-op: route it through the streak below so
+    # the "crash protection is failing" warning still fires (F20).  A blank dir also
+    # makes swap_path a cwd-relative name, so we must NOT fall through to the write.
+    if {[els::swap_dir] eq ""} {
+        set failed 1
+    } elseif {[catch {
         set sig [els::buf_sig $id]
         if {[info exists ::els::swapSig($id)] && $sig eq $::els::swapSig($id)} {
             # content verified unchanged since the last swap: drop the latch so
@@ -3731,12 +3748,14 @@ proc els::swap_sweep {} {
                 catch {file delete -force $f}
             }
         }
-        # genuinely-corrupt swaps: old AND unreadable.  A live session keeps its
-        # swap fresh, so an old+unreadable one is safe to reclaim (a transient lock
-        # on a live peer's swap leaves the mtime recent, so it is never swept here).
+        # genuinely-corrupt swaps: old AND FRAME-corrupt (torn / bad crc).  A live
+        # session keeps its swap fresh, so an old one is safe to reclaim (a transient
+        # lock on a live peer's swap leaves the mtime recent, so it is never swept
+        # here).  Key on the FRAME, not swap_read: a validly-framed swap from a NEWER
+        # els (a schema this version can't parse) is kept, never destroyed (F15).
         foreach f [glob -nocomplain -directory $d swp-*.swp] {
             if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS \
-                    && [els::swap_read $f] eq ""} {
+                    && [els::swap_frame $f] eq ""} {
                 catch {file delete -force $f}
             }
         }
@@ -3824,7 +3843,14 @@ proc els::recover_load {rec branch} {
     set ::els::loading($tid) 1
     $w delete 1.0 end
     $w insert end $body
-    set ::els::docEnc($tid) [dict get $rec enc]
+    # Validate the swap's encoding before adopting it: docEnc is otherwise only
+    # ever set from [encoding names] / detection.  An unknown name (a tampered
+    # swap, or one from a future els using new ICU-style names) would make every
+    # save of this tab throw "unknown encoding" -- silently, since auto-save's
+    # catch swallows it -- so fall back to utf-8 to keep the recovered text saveable.
+    set renc [dict get $rec enc]
+    if {$renc ni [encoding names]} { set renc utf-8 }
+    set ::els::docEnc($tid) $renc
     set ::els::docBom($tid) [dict get $rec bom]
     set ::els::docEol($tid) [dict get $rec eol]
     catch {$w mark set insert [dict get $rec cursor]}

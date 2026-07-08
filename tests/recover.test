@@ -596,3 +596,53 @@ test recover-focus-1.1 {recover_load drops keyboard focus to the toplevel so a s
     # merely that focus happens to differ from the widget.)
     list [expr {[focus] eq "."}] [expr {[focus] ne $w}] [$w get 1.0 "end - 1 char"]
 } -result {1 1 RECOVERED!}
+
+# ---- bug-hunt wave 2: crash-recovery data safety (F15, F16, F20) -----------
+
+# Frame an arbitrary payload dict as a valid ELSSWAP swap (correct len+crc), so a
+# swap with a schema this els does not recognise still passes the frame check.
+proc forge_framed {sid docId d} {
+    set payload [encoding convertto utf-8 $d]
+    set f [file join [els::swap_dir] "swp-$sid-$docId.swp"]
+    raw_write $f "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
+    return $f
+}
+
+test newschema-1.1 {swap_sweep KEEPS a validly-framed swap from a newer els (unknown schema); a torn frame is still reclaimed (F15)} -setup recover_reset -body {
+    set d2 [dict create schema 2 sessionId sFuture docId dF \
+                text "unsaved work from a newer els" future_key 1]
+    set good [forge_framed sFuture dF $d2]           ;# valid frame, schema 2
+    file mtime $good [expr {[clock seconds] - 9999}] ;# older than STALE_SECS
+    set bad [file join [els::swap_dir] swp-sBad-dB.swp]
+    raw_write $bad "ELSSWAP v1\nno trailer here"     ;# frame-corrupt control
+    file mtime $bad [expr {[clock seconds] - 9999}]
+    els::swap_sweep
+    list [file exists $good] [file exists $bad]
+} -result {1 0}
+
+test recover-badenc-1.1 {recover_load falls back to utf-8 for an unknown encoding, keeping the tab saveable (F16)} -setup recover_reset -body {
+    set rec [dict create schema 1 sessionId sE docId dE path "" enc "no-such-encoding-xyz" \
+                 bom 0 eol lf cursor 1.0 dirty 1 savedSig "" mtime [clock seconds] \
+                 host h bodyCrc 0 text "recovered text"]
+    set tid [els::recover_load $rec untitled]
+    set enc $::els::docEnc($tid)
+    set ::els::docPath($tid) [file join $::ELS_TMP badenc_out.txt]
+    set rc [catch {els::save $tid} e]                ;# must NOT throw on the bogus enc
+    list $enc $rc
+} -result {utf-8 0}
+
+test swapdir-fail-1.1 {an uncreatable swap dir surfaces the crash-protection warning (streak still runs) (F20)} \
+        -setup {recover_reset ; rename ::els::status_note ::__real_sn ; proc ::els::status_note {msg} {lappend ::__f20 $msg}} \
+        -cleanup {rename ::els::status_note {} ; rename ::__real_sn ::els::status_note ; catch {file delete -force [file join $::ELS_TMP swap]}} -body {
+    els::swap_stop
+    set sd [file join $::ELS_TMP swap]
+    catch {file delete -force $sd}
+    raw_write $sd "occupy the swap-dir path with a FILE so file mkdir fails"
+    set w [els::T] ; $w insert end "unsaved edits" ; update
+    set id $::els::active
+    set ::els::docPath($id) [file join $::ELS_TMP swapdirfail.txt]
+    set ::__f20 {}
+    for {set i 0} {$i < 3} {incr i} { els::swap_flush_doc $id }
+    list [expr {[info exists ::els::swap_fail_streak($id)] ? $::els::swap_fail_streak($id) : -1}] \
+         [expr {[lsearch -glob $::__f20 "*crash protection is failing*"] >= 0}]
+} -result {3 1}
