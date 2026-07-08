@@ -22,21 +22,15 @@ proc script_root {} {
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-# Discover the project-local toolchain for twapi.
-proc discover_store {root} {
-    set tc [file join $root .toolchain]
-    if {[file exists [file join $tc BUNDLE.manifest]] || [file exists [file join $tc tcl9 bin tclsh90.exe]]} {
-        return $tc
-    }
-    error ".toolchain not found in $root - restore the project-local toolchain"
-}
 set ::SHOT_ROOT [script_root]
+# twapi ships in z's shared payload; tools/tasks.tcl exports Z_TWAPI (the payload dir
+# holding twapi's pkgIndex) and puts it on TCLLIBPATH, so `z shot` already resolves it.
+# Honor ELS_TWAPI_DIR (manual override) then Z_TWAPI for direct invocation too; the
+# project-local .toolchain this used to discover was abolished in the hosted layout (pa-6).
 if {[info exists ::env(ELS_TWAPI_DIR)] && $::env(ELS_TWAPI_DIR) ne ""} {
     lappend auto_path $::env(ELS_TWAPI_DIR)
-} else {
-    if {![catch {discover_store $::SHOT_ROOT} tc]} {
-        lappend auto_path [file join $tc twapi-dl twapi-5.2.0] [file join $tc twapi-dl]
-    }
+} elseif {[info exists ::env(Z_TWAPI)] && $::env(Z_TWAPI) ne ""} {
+    lappend auto_path $::env(Z_TWAPI)
 }
 
 # ---- DIB (CF_DIB / BITMAPINFOHEADER) -> Tk photo ------------------------
