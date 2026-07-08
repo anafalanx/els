@@ -89,6 +89,24 @@ _tWinMain(
     TclZipfs_AppHook(&argc, &argv);
 #endif
 
+    /*
+     * Refuse to run as a Tcl-script host (F42).  If the appended zipfs payload did
+     * NOT mount -- a stripped or corrupt exe, e.g. a PE-resource tool rewrote the
+     * image (see docs/toolchain.md's "PE-resource gotcha") -- TclZipfs_AppHook
+     * registered no startup script, and Tk_Main would then fall back to wish
+     * semantics and SOURCE the first file argument as a Tcl script (Tcl_Main's
+     * "?-encoding name? fileName" rule).  A double-clicked "document" would then
+     * execute arbitrary Tcl/exec.  The intact els.exe always registers
+     * //zipfs:/app/main.tcl at this point, so this only fires on a damaged binary.
+     */
+    if (Tcl_GetStartupScript(NULL) == NULL) {
+        MessageBoxW(NULL,
+            L"els cannot start: its embedded application payload is missing or "
+            L"corrupt (the executable may be damaged). Please reinstall els.",
+            L"els", MB_ICONERROR | MB_OK);
+        return 1;
+    }
+
     Tk_Main(argc, argv, Els_AppInit);
     return 0;                   /* Tk_Main does not return; silences a warning. */
 }

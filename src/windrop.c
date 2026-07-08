@@ -66,10 +66,15 @@ static LRESULT CALLBACK DropSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
             if (len == 0) continue;
             WCHAR *wbuf = (WCHAR *)Tcl_Alloc((size_t)(len + 1) * sizeof(WCHAR));
             if (DragQueryFileW(hDrop, i, wbuf, len + 1) > 0) {
-                int u8 = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0, NULL, NULL);
+                /* WC_ERR_INVALID_CHARS: a dropped NTFS name with an unpaired UTF-16
+                 * surrogate (legal on NTFS) makes this return 0 -> the path is
+                 * SKIPPED, not silently converted with U+FFFD into a DIFFERENT,
+                 * nonexistent path (which drop_open would then quietly ignore).
+                 * Mirrors winfs.c utf8_to_wide's rejection policy (F43). */
+                int u8 = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wbuf, -1, NULL, 0, NULL, NULL);
                 if (u8 > 0) {
                     char *s = (char *)Tcl_Alloc((size_t)u8);
-                    WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, s, u8, NULL, NULL);
+                    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wbuf, -1, s, u8, NULL, NULL);
                     Tcl_ListObjAppendElement(NULL, paths, Tcl_NewStringObj(s, u8 - 1));
                     Tcl_Free(s);
                 }
