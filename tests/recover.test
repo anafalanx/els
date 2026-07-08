@@ -242,6 +242,38 @@ test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies
     list [llength $plans] [expr {[llength $::els::docs] - $before}]
 } -result {3 3}
 
+# ---- F12: the interactive recovery dialog (checkbutton -> Recover/Discard wiring).
+# recover_offer is non-blocking (the buttons drive recover_dialog_apply), so we can
+# build it, toggle the per-row checks, and invoke the buttons directly.  probe_quiet
+# keeps the dialog transparent so nothing flashes on the desktop during the run.
+test recover-dialog-1.1 {Discard checked deletes ONLY the checked swaps; unchecked are left for later (F12)} -setup recover_reset -body {
+    set ::els::probe_quiet 1
+    forge_swap host-a-dead d0 "body-a" "" "" ; forge_lock host-a-dead 0
+    forge_swap host-b-dead d0 "body-b" "" "" ; forge_lock host-b-dead 0
+    set plans [els::recover_scan]
+    set ::els::recover_auto 0
+    els::recover_offer $plans
+    set built [winfo exists .recover]
+    set ::els::_recover_chk(0) 0 ; set ::els::_recover_chk(1) 1   ;# uncheck row 0, keep row 1
+    set f0 [lindex [dict get $::els::_recover_pick 0] 0]
+    set f1 [lindex [dict get $::els::_recover_pick 1] 0]
+    .recover.f.btns.dis invoke                                    ;# Discard checked
+    list $built [file exists $f0] [file exists $f1] [winfo exists .recover]
+} -result {1 1 0 0}
+
+test recover-dialog-1.2 {Recover checked opens the checked swap as a tab and consumes its file (F12)} -setup recover_reset -body {
+    set ::els::probe_quiet 1
+    forge_swap host-a-dead d0 "recovered A" "" "" ; forge_lock host-a-dead 0
+    set plans [els::recover_scan]
+    set ::els::recover_auto 0
+    set before [llength $::els::docs]
+    els::recover_offer $plans
+    set ::els::_recover_chk(0) 1
+    set f0 [lindex [dict get $::els::_recover_pick 0] 0]
+    .recover.f.btns.rec invoke                                    ;# Recover checked
+    list [expr {[llength $::els::docs] - $before}] [file exists $f0]
+} -result {1 0}
+
 # ===== sweep: stale temp/claim litter from dead sessions ===================
 
 # ---- user-issues batch C: single instance + file handoff ------------------

@@ -476,6 +476,26 @@ test lossy-1.8 {close-with-save aborts the close when the guard is cancelled} -s
     list [expr {$id in $::els::docs}] [els::doc_dirty $id]
 } -result {1 1}
 
+# ---- F13: the REAL lossy dialog (stubbed everywhere else).  Drive the modal by
+# auto-clicking each button once it exists so the vwait returns that verdict --
+# proving the dialog builds and every button maps to its answer.  A safety timer
+# turns a build failure into a test failure instead of a hung suite.
+proc lossy_autoclick {btn} {
+    if {[winfo exists .lossy.b.$btn]} { .lossy.b.$btn invoke } \
+    else { after 5 [list lossy_autoclick $btn] }
+}
+test lossy-dialog-1.1 {the real lossy dialog builds and each button returns its verdict (F13)} -setup {els_reset} -body {
+    set ::els::probe_quiet 1                          ;# keep the modal transparent (no flash)
+    set out {}
+    foreach btn {utf8 lossy cancel} {
+        set safety [after 3000 {set ::els::lossy_answer cancel}]   ;# never hang
+        after 0 [list lossy_autoclick $btn]
+        lappend out [els_real_lossy_ask d0 cp1252 1 1 00E9 1]
+        after cancel $safety
+    }
+    set out
+} -result {utf8 lossy cancel}
+
 # ---- Wave 2: lossy-decode notice (surface silent U+FFFD substitutions) -----
 
 test declossy-1.1 {decode flags a lossy substitution (a byte the encoding can't hold)} -body {

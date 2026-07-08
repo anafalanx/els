@@ -103,7 +103,9 @@ proc raw_write {path bytes} { set fh [::open $path wb] ; puts -nonewline $fh $by
 proc raw_read  {path}       { set fh [::open $path rb] ; set d [read $fh] ; close $fh ; return $d }
 
 # Stub the lossy-save dialog (a vwait modal) with a canned answer, recording
-# each call so tests can assert "asked once, with these facts".
+# each call so tests can assert "asked once, with these facts".  Preserve the REAL
+# dialog under ::els_real_lossy_ask so F13's lossy-dialog test can drive it.
+catch {rename ::els::lossy_ask ::els_real_lossy_ask}
 set ::els_test_lossy_answer cancel
 set ::els_test_lossy_calls {}
 proc ::els::lossy_ask {id enc line col uhex count} {
