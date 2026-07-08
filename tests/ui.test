@@ -1237,7 +1237,7 @@ test geo-clamp-2.1 {a huge positive origin (resolution change / corrupt config) 
     els::clamp_geometry 900x620+99999+99999 0 0 1920 1080
 } -result 900x620+60+60
 
-test geo-clamp-2.2 {a far-negative origin (disconnected left/top monitor) is reset} -body {
+test geo-clamp-2.2 {a from-right/from-bottom position that lands far off the screen is reset} -body {
     els::clamp_geometry 900x620-5000-5000 0 0 1920 1080
 } -result 900x620+60+60
 
@@ -1245,8 +1245,9 @@ test geo-clamp-2.3 {a normal on-screen position is left untouched} -body {
     els::clamp_geometry 900x620+100+80 0 0 1920 1080
 } -result 900x620+100+80
 
-test geo-clamp-2.4 {a legitimate negative coord on a connected LEFT monitor is kept} -body {
-    # virtual desktop spans [-1920, 1920]: -1900 is a window on the left monitor
+test geo-clamp-2.4 {a from-right position that lands on-screen on a multi-monitor desktop is kept} -body {
+    # desktop spans [-1920, 1920]: `-1900` anchors the window's RIGHT edge 1900px
+    # from the desktop's right edge (1920) -> left edge -880, on-screen -> kept
     els::clamp_geometry 900x620-1900+100 -1920 0 3840 1080
 } -result 900x620-1900+100
 
@@ -1256,6 +1257,13 @@ test geo-clamp-2.4b {a window on a connected RIGHT/below secondary monitor is ke
     list [els::clamp_geometry 900x620+2000+100 0 0 3840 1080] \
          [els::clamp_geometry 900x620+400+1300 0 0 1920 2160]
 } -result {900x620+2000+100 900x620+400+1300}
+
+test geo-clamp-2.5 {a from-right `-N` on-screen by Tk's right-edge anchoring is kept, not misread as x=-N (mat-1)} -body {
+    # `-1000`: right edge 1000px from the screen's right edge (1920) -> right edge
+    # 920, left edge 20 -> on-screen.  Misread as an absolute x=-1000 it would be
+    # off-screen-left and wrongly reset.
+    els::clamp_geometry 900x620-1000+100 0 0 1920 1080
+} -result 900x620-1000+100
 
 test geo-clamp-2.5 {a size-only geometry (no offset) passes through unchanged} -body {
     els::clamp_geometry 900x620 0 0 1920 1080

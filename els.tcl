@@ -401,13 +401,15 @@ proc els::virtual_screen {} {
 # "...+-137+60"); the regexp accepts the optional sign after the +/- separator,
 # and `expr` reads "+-137" as -137, so the arithmetic below is correct.
 proc els::clamp_geometry {g vx vy vw vh} {
-    if {[regexp {^([0-9]+)x([0-9]+)([+-]-?[0-9]+)([+-]-?[0-9]+)$} $g -> W H X Y]} {
-        # "+-137" (the negative-origin form) is not a canonical number to `expr`
-        # as a substituted string operand, so strip the leading "+" separator:
-        # "+-137"->"-137", "+100"->"100", "-137" unchanged.  ($g is returned
-        # verbatim when kept — the Tk setter accepts the "+-N" form.)
-        set X [string trimleft $X +]
-        set Y [string trimleft $Y +]
+    if {[regexp {^([0-9]+)x([0-9]+)([+-])(-?[0-9]+)([+-])(-?[0-9]+)$} $g -> W H sepX X sepY Y]} {
+        # Tk geometry offsets: `+N` is N px from the left/top; `-N` anchors the
+        # window's FAR edge N px from the screen's far edge (from-right/from-bottom).
+        # Convert a from-far form to an absolute left/top before the on-screen check,
+        # so a hand-edited `-N` isn't misread as an absolute negative coordinate
+        # (mat-1).  Tk itself reports a negative origin as `+-N`, whose signed number
+        # the capture above already carries (e.g. "+-137" -> X = -137), so no trimleft.
+        if {$sepX eq "-"} { set X [expr {$vx + $vw - $X - $W}] }
+        if {$sepY eq "-"} { set Y [expr {$vy + $vh - $Y - $H}] }
         set m 90   ;# min grabbable title-bar presence on the desktop
         # the title bar's top edge must sit within the desktop vertically, and the
         # window must overlap it horizontally by at least m px
