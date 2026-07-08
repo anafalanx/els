@@ -4635,7 +4635,12 @@ proc els::build_findbar {} {
     grid columnconfigure .find 0 -weight 1
 
     bind .find.fr.q <KeyRelease> {
-        if {"%K" ni {Up Down}} { set ::els::find_hidx -1 ; els::find_schedule }
+        # Return/KP_Enter already did their work in the <Return> KeyPress binding
+        # (step + the "(wrapped)" announcement); excluding them here stops the
+        # release from arming the 130 ms incremental-search debounce, whose
+        # find_update would rewrite the count and erase "(wrapped)" (and re-scan
+        # the whole buffer redundantly).  Up/Down are history recall.
+        if {"%K" ni {Up Down Return KP_Enter}} { set ::els::find_hidx -1 ; els::find_schedule }
     }
     bind .find.fr.q <Return>       { els::find_history_push $::els::find_q
                                      els::find_step 1  ; break }
@@ -4944,10 +4949,21 @@ proc els::find_spec {} {
     set pat $find_q
     if {$find_word} {
         set useRegex 1
-        if {$find_regex} { set p $find_q } else { set p [els::re_escape $find_q] }
-        # group the pattern so the word boundaries bind the WHOLE pattern, not
-        # just the first/last alternative of an alternation like foo|bar
-        set pat "\\m(?:$p)\\M"
+        if {$find_regex} {
+            # group so the boundaries bind the WHOLE pattern, not just the
+            # first/last alternative of an alternation like foo|bar
+            set pat "\\m(?:$find_q)\\M"
+        } else {
+            set p [els::re_escape $find_q]
+            # A word character is alnum-or-underscore, and \m/\M only match at a
+            # word char edge, so an operator query ("++", "->", "foo)") with a
+            # non-word first/last char would be unsatisfiable.  Assert the
+            # boundary only where the query edge IS a word char (VS Code /
+            # Notepad++ behaviour): "++" is then findable as a delimited token.
+            set L ""; if {[regexp {^[[:alnum:]_]} $find_q]} { set L {\m} }
+            set R ""; if {[regexp {[[:alnum:]_]$} $find_q]} { set R {\M} }
+            set pat "${L}(?:$p)${R}"   ;# ${L} not $L: $L(...) would parse as an array ref
+        }
     }
     set sargs {-all}
     if {$useRegex}   { lappend sargs -regexp }
@@ -5110,9 +5126,13 @@ proc els::adapt_case {match repl} {
     # [[:alpha:]] not [A-Za-z]: toupper/tolower/totitle below are Unicode-aware,
     # so an all-Cyrillic/Greek match must not be skipped by an ASCII-only guard
     if {!$::els::find_adapt || $match eq "" || ![regexp {[[:alpha:]]} $match]} { return $repl }
-    if {$match eq [string toupper $match]} { return [string toupper $repl] }
+    # Title BEFORE upper: a single capital ('I', a sentence-opening 'A') satisfies
+    # BOTH templates, and Title is the natural (quieter) reading — checking upper
+    # first upcased the whole replacement ('I' -> 'WE').  Lower stays first so a
+    # non-letter-led lowercase run ("1cat") still reads as lower, not Title.
     if {$match eq [string tolower $match]} { return [string tolower $repl] }
     if {$match eq [string totitle $match]} { return [string totitle $repl] }
+    if {$match eq [string toupper $match]} { return [string toupper $repl] }
     return $repl
 }
 # The replacement text for the match at s..e: expands regex backreferences
@@ -5180,7 +5200,13 @@ proc els::find_replace_all {} {
     set n 0
     foreach m [lreverse $scan] {
         lassign $m s e
-        $w replace $s $e [els::repl_for $w $s $e]
+        set repl [els::repl_for $w $s $e]
+        # repl_for degrades to the original text when its re-match fails (e.g. a
+        # lookahead whose context a later reverse-order rewrite already destroyed);
+        # skip those spans so an identity write never dirties the undo stack or
+        # inflates the "Replaced N" count.
+        if {$repl eq [$w get $s $e]} { continue }
+        $w replace $s $e $repl
         incr n
     }
     $w edit separator

@@ -368,3 +368,72 @@ test replline-5.7 {negated classes stop at newlines like the widget search} -set
     els::find_update ; els::find_replace_all
     list [string map [list \n |] [$w get 1.0 "end - 1 char"]] $::els::find_count
 } -result {Z|cb {Replaced 1}}
+
+# ---- bug-hunt wave 2: find/replace polish (F27, F29, F30) ------------------
+
+test replcount-6.1 {Replace All counts only spans it actually changed (a degraded re-match is not "Replaced")} -setup {find_reset} -body {
+    # reverse-order rewrite of the 2nd "foo" destroys the 1st's lookahead context,
+    # so repl_for degrades the 1st span to the original text -> only 1 real change
+    set w [els::T] ; $w insert end "foofoofoo"
+    set ::els::find_regex 1 ; set ::els::find_q {foo(?=foo)} ; set ::els::find_r X
+    els::find_update ; els::find_replace_all
+    list [$w get 1.0 "end - 1 char"] $::els::find_count
+} -result {fooXfoo {Replaced 1}}
+
+test replcount-6.2 {replacing text with itself writes nothing, does not dirty, counts 0} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo foo" ; $w edit modified 0
+    set ::els::find_q foo ; set ::els::find_r foo
+    els::find_update ; els::find_replace_all
+    list [$w get 1.0 "end - 1 char"] $::els::find_count [$w edit modified]
+} -result {{foo foo} {Replaced 0} 0}
+
+test adaptcase-6.1 {a single capital reads as Title case, not ALL-CAPS} \
+        -setup {find_reset ; set ::els::find_adapt 1} -body {
+    list [els::adapt_case I we] [els::adapt_case A hello] [els::adapt_case i we] \
+         [els::adapt_case 1cat DOG]
+} -result {We Hello we dog}
+
+test adaptcase-6.2 {whole-word Replace "I"->"we" with Adapt on yields "We", not "WE"} \
+        -setup {find_reset ; set ::els::find_adapt 1} -body {
+    set w [els::T] ; $w insert end "and I said"
+    set ::els::find_q I ; set ::els::find_r we ; set ::els::find_word 1
+    els::find_update ; els::find_replace_all
+    $w get 1.0 "end - 1 char"
+} -result {and We said}
+
+test wholeword-6.1 {Whole Word finds an operator token whose edges are non-word chars} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a ++ b"
+    set ::els::find_q ++ ; set ::els::find_word 1 ; els::find_update
+    llength $::els::find_matches
+} -result 1
+
+test wholeword-6.2 {Whole Word: non-word edges drop the boundary there; word edges keep it} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "call foo) and p -> q and food"
+    set r {}
+    foreach q {foo) -> foo} {
+        set ::els::find_q $q ; set ::els::find_word 1 ; els::find_update
+        lappend r [llength $::els::find_matches]
+    }
+    set r   ;# foo) -> once, -> once, foo once (in "foo)", NOT in "food")
+} -result {1 1 1}
+
+test wholeword-6.3 {Whole Word still rejects substrings for an ordinary word query} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo food foofoo foo"
+    set ::els::find_q foo ; set ::els::find_word 1 ; els::find_update
+    llength $::els::find_matches
+} -result 2
+
+test wrapkeep-6.1 {Enter-stepping keeps the "(wrapped)" indicator: its KeyRelease no longer arms the debounce} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "x x"
+    set ::els::find_q x
+    els::find_show find                                 ;# grid the bar so .find.fr.q is focusable
+    focus -force .find.fr.q ; update                    ;# "1 of 2", current = 0
+    foreach _ {1 2} {                                   ;# 0->1, then 1->0 (wrap)
+        event generate .find.fr.q <KeyPress-Return>
+        event generate .find.fr.q <KeyRelease-Return>
+        update
+    }
+    set armed [expr {$::els::find_after ne ""}]         ;# debounce must NOT be armed
+    after 250 {set ::__w28 1} ; vwait ::__w28           ;# let any debounce fire; must NOT erase
+    list [string match "*(wrapped)*" $::els::find_count] $armed
+} -cleanup {catch {els::find_hide}} -result {1 0}
