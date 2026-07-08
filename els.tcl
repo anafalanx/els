@@ -2351,10 +2351,12 @@ proc els::scroll {args} {
 proc els::wheel {delta} {
     set w [els::T]
     if {$w eq ""} { return }
-    # float division like Tk's own tk::MouseWheel: integer / floors toward
-    # -inf, so +40 scrolled one unit while -40 scrolled none (asymmetric for
-    # any delta that isn't a multiple of 120)
-    $w yview scroll [expr {-$delta / 120.0}] units
+    # scroll EXACTLY as the text widget's own <MouseWheel> class binding does
+    # (tk::MouseWheel + tk::ScaleNum applies the display scaling), so one notch
+    # moves the view the same amount whether the pointer is over the gutter or the
+    # text — the old "1 line per notch" units drifted from the text on a scaled
+    # display and the rate jumped as the pointer crossed the boundary (G-View mat-5)
+    tk::MouseWheel $w y [tk::ScaleNum $delta] -4.0 pixels
     els::sync_scroll
 }
 # Precision-touchpad scrolling (Tk 9 delivers it as <TouchpadScroll>, which the
@@ -2362,9 +2364,12 @@ proc els::wheel {delta} {
 proc els::touchpad_scroll {D} {
     set w [els::T]
     if {$w eq ""} { return }
+    # tk::ScaleNum matches the text widget's own <TouchpadScroll> class binding, so
+    # a precision-touchpad pan moves the view the same amount over the gutter as
+    # over the text on a scaled display (G-View mat-5)
     lassign [tk::PreciseScrollDeltas $D] dx dy
-    if {$dy != 0} { $w yview scroll [expr {-$dy}] pixels ; els::sync_scroll }
-    if {$dx != 0} { $w xview scroll [expr {-$dx}] pixels }
+    if {$dy != 0} { $w yview scroll [tk::ScaleNum [expr {-$dy}]] pixels ; els::sync_scroll }
+    if {$dx != 0} { $w xview scroll [tk::ScaleNum [expr {-$dx}]] pixels }
 }
 # Ctrl+touchpad-scroll = zoom (matching Ctrl+MouseWheel): without these
 # bindings the gesture fell through to the plain TouchpadScroll handler and

@@ -428,3 +428,15 @@ test tipclamp-3.1 {tooltips clamp against the virtual desktop, not the primary m
     lassign [els::tip_clamp 3600 100 400 30 0 0 3840 1080] rx2 ry2
     list $rx1 [expr {$rx2 == 3840 - 400 - 4}]
 } -result {2500 1}
+
+test gutterscroll-3.1 {a gutter wheel notch scrolls the text by the SAME amount as the text's own binding (G-View mat-5)} -setup {els_reset} -body {
+    set w [els::T]
+    $w insert end [string repeat "line\n" 500] ; update
+    $w yview moveto 0.5 ; update ; set y0 [lindex [$w yview] 0]
+    els::wheel -120                                       ;# gutter path, one notch down
+    update ; set viaGutter [lindex [$w yview] 0]
+    $w yview moveto 0.5 ; update
+    tk::MouseWheel $w y [tk::ScaleNum -120] -4.0 pixels    ;# the text's own class-binding path
+    update ; set viaText [lindex [$w yview] 0]
+    list [expr {$viaGutter != $y0}] [expr {abs($viaGutter - $viaText) < 1e-9}]
+} -result {1 1}
