@@ -4030,19 +4030,32 @@ proc els::recover_dialog_apply {top decision} {
 # UTF-8 (keeps everything), save anyway with replacement characters (latched
 # per document for the session), or cancel (nothing is written).
 
-# First unencodable character, located by binary search on prefix length.
-# We deliberately do NOT use the -failindex VALUE as a position: in Tcl 9.0.3
-# it is a character index for some encodings but a byte index into the
-# internal UTF-8 representation for others (e.g. gb2312-raw), contradicting
-# encoding(n).  Only its sign ("did it fail") is trustworthy.
+# True iff $text saves FAITHFULLY in $enc: it encodes AND decodes back to the
+# identical characters.  A plain -failindex check only sees the first case (an
+# unencodable character); it is blind to the cp932/euc-jp "duplicate mapping"
+# case where a character encodes to bytes that decode as a DIFFERENT character
+# (U+2212 MINUS -> the bytes for U+FF0D, etc.), so reopening would silently show
+# text the user never wrote.  This round-trips instead, catching both.
+proc els::enc_faithful {enc text} {
+    if {[catch {encoding convertto -profile strict $enc $text} b]} { return 0 }
+    return [expr {[encoding convertfrom $enc $b] eq $text}]
+}
+# First character index that would NOT save faithfully (see enc_faithful), by
+# binary search on the longest faithful prefix.  We deliberately do NOT use the
+# -failindex VALUE as a position: in Tcl 9.0.3 it is a character index for some
+# encodings but a byte index into the internal UTF-8 representation for others
+# (e.g. gb2312-raw), contradicting encoding(n) — and it cannot see round-trip
+# loss at all.  Called only when the whole text is already known to be lossy.
 proc els::lossy_first {enc text} {
     set lo 0 ; set hi [string length $text]
-    # invariant: the prefix of length lo encodes cleanly, the one of hi fails
+    # invariant: the prefix of length lo is faithful, the one of hi is not
     while {$lo + 1 < $hi} {
         set mid [expr {($lo + $hi) / 2}]
-        encoding convertto -profile strict -failindex f $enc \
-            [string range $text 0 [expr {$mid - 1}]]
-        if {$f < 0} { set lo $mid } else { set hi $mid }
+        if {[els::enc_faithful $enc [string range $text 0 [expr {$mid - 1}]]]} {
+            set lo $mid
+        } else {
+            set hi $mid
+        }
     }
     return [expr {$hi - 1}]
 }
@@ -4061,8 +4074,7 @@ proc els::lossy_describe {enc text} {
     set n [string length $text]
     set stop [expr {min($n, $fi + 10000)}]
     for {set i $fi} {$i < $stop && $count < 100} {incr i} {
-        encoding convertto -profile strict -failindex f $enc [string index $text $i]
-        if {$f >= 0} { incr count }
+        if {![els::enc_faithful $enc [string index $text $i]]} { incr count }
     }
     return [list $line $col $uhex $count]
 }
@@ -4324,6 +4336,13 @@ proc els::save {{id ""} {quiet 0}} {
     set enc $::els::docEnc($id)
     # only the SIGN of -failindex is trusted (see lossy_first for why)
     set bytes [encoding convertto -profile strict -failindex fi $enc $text]
+    # Lossy when a character cannot be saved FAITHFULLY: it does not encode
+    # (fi>=0), OR it encodes but decodes back as a DIFFERENT character (cp932/
+    # euc-jp duplicate mappings — reopening would show text the user never wrote).
+    # The whole-buffer round-trip compare runs only when the buffer fully encoded
+    # ($bytes complete): the braced `&&` short-circuits it away when fi>=0 (where
+    # $bytes is only the partial prefix).  set fi 0 routes it to the lossy path.
+    if {$fi < 0 && [encoding convertfrom $enc $bytes] ne $text} { set fi 0 }
     if {$fi >= 0} {
         if {[info exists ::els::docLossyOk($id)]} {
             set bytes [encoding convertto -profile replace $enc $text]

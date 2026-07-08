@@ -668,3 +668,37 @@ test reopen-recovered-6.1 {Reopen with Encoding STILL refuses a recovered-but-un
 test lossy-utf8-6.1 {the lossy dialog omits the pointless "Save as UTF-8" action when the target is already utf-8 (F22)} -body {
     list [els::lossy_actions utf-8] [els::lossy_actions cp1252] [els::lossy_actions shiftjis]
 } -result {{lossy cancel} {utf8 lossy cancel} {utf8 lossy cancel}}
+
+# ---- bug-hunt wave 2: cp932/euc-jp round-trip loss (F17) -------------------
+# Some cp932/euc-jp characters ENCODE cleanly but decode back as a DIFFERENT
+# character (U+2212 MINUS -> the bytes for U+FF0D), so a plain encodability
+# check saved them silently; the lossy guard now round-trips.
+
+test lossyrt-7.1 {enc_faithful catches a cp932 round-trip loss, passes clean text (F17)} -body {
+    list [els::enc_faithful cp932 "abc"] [els::enc_faithful cp932 "あ"] \
+         [els::enc_faithful cp932 "−"] [els::enc_faithful utf-8 "−"] \
+         [els::enc_faithful cp1252 "café"]
+} -result {1 1 0 1 1}
+
+test lossyrt-7.2 {saving a cp932 doc with a non-round-tripping char prompts, not silent (F17)} -setup {els_reset} -body {
+    set w [els::T] ; $w insert end "price − 5"       ;# U+2212 encodes but round-trips to U+FF0D
+    set id $::els::active
+    set ::els::docEnc($id) cp932
+    set ::els::docPath($id) [file join $::ELS_TMP rt7a.txt]
+    set ::els_test_lossy_calls {} ; set ::els_test_lossy_answer cancel
+    set rc [els::save $id]
+    catch {file delete -force $::els::docPath($id)}
+    list $rc [llength $::els_test_lossy_calls] [lindex $::els_test_lossy_calls 0]
+} -result {0 1 {cp932 1 7 2212 1}}
+
+test lossyrt-7.3 {ordinary cp932 text saves with no false lossy prompt (regression)} -setup {els_reset} -body {
+    set w [els::T] ; $w insert end "あいう test 123"   ;# clean hiragana + ASCII
+    set id $::els::active
+    set ::els::docEnc($id) cp932
+    set ::els::docPath($id) [file join $::ELS_TMP rt7b.txt]
+    set ::els_test_lossy_calls {}
+    set rc [els::save $id]
+    set exists [file exists $::els::docPath($id)]
+    catch {file delete -force $::els::docPath($id)}
+    list $rc [llength $::els_test_lossy_calls] $exists
+} -result {1 0 1}
