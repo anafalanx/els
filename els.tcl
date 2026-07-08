@@ -1502,7 +1502,7 @@ proc els::build {} {
     bind elsText <Control-k> break
     bind elsText <Control-t> break
 
-    # text-transform shortcuts (the Edit-menu commands).  Ctrl+D used to be a
+    # text-transform shortcuts (the Buffer-menu commands).  Ctrl+D used to be a
     # neutralized Text default (delete-next-char); it is now Duplicate Line.
     bind elsText <Control-d>        { els::xform::duplicate;   break }
     bind elsText <Control-j>        { els::xform::join_lines;  break }
@@ -1939,7 +1939,7 @@ proc els::menu_redo {} {
 }
 proc els::menu_event {ev} { set w [els::T] ; if {$w ne ""} { event generate $w $ev } }
 
-# ---- text transforms (Edit menu) ------------------------------------------
+# ---- text transforms (Buffer menu) ----------------------------------------
 # A curated, opinionated set of buffer transforms.  Each is undo-atomic (one
 # separator-bracketed edit == one undo) and routes through swap_touch + a view
 # refresh so crash protection and the gutter/whitespace stay in sync, exactly
@@ -4879,7 +4879,7 @@ proc els::entry_clear {entry var} {
     els::find_update
 }
 
-# ---- find-bar polish: tooltips, flash, regex help, history --------------
+# ---- find-bar polish: tooltips, count-label feedback, regex help, history
 proc els::tooltip {w text} {
     bind $w <Enter>      [list els::tip_schedule $w $text]
     bind $w <Leave>      els::tip_cancel

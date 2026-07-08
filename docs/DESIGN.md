@@ -54,14 +54,14 @@ what Tk 9 can actually render well.
   copy-paste-portable app), Segoe UI 9pt for chrome. Fonts are sized in
   **points** so they scale correctly on HiDPI.
 - **Leading ≈ 1.34×** is the single biggest "calm" lever. Applied via the Text
-  widget's `-spacing1`/`-spacing3`, computed as `round(linespace × 0.17)` so it
+  widget's `-spacing1`/`-spacing3`, computed as `int(linespace × 0.17)` so it
   tracks DPI. The gutter mirrors it so line numbers stay aligned.
 - **Text inset:** `-padx 14` so glyphs never touch the frame.
 - **Spacing grid:** chrome paddings follow a ~4px quantum.
 
 ### The caret
 
-A **steady** 2px red bar (`-insertwidth 2 -insertofftime 0`). A blinking cursor
+A **steady** 4px red bar (`-insertwidth 4 -insertofftime 0`). A blinking cursor
 is a documented distraction; a solid red caret is calmer *and* more distinctive.
 It is els's signature.
 
@@ -85,10 +85,11 @@ compatibility but they are untested. See the README for the user-facing version.
 
 The native Windows `vista` ttk theme cannot be recoloured or flattened, so the
 chrome is based on **`clam`** with custom flat, borderless styles
-(`els::init_style`): flat entries with a hairline border and a red insert caret;
-flat buttons; find toggles as grey "on" chips (neutral, since red stays the caret's);
-slate text; hairlines above the status and find bars. The vertical **scrollbar
-is slim and arrow-less, and auto-hides when the document fits**. Chrome appears
+(`els::init_style`): flat entries with a hairline border and an ink insert caret
+(red is reserved for the document); flat buttons; find toggles as grey "on" chips
+(neutral, since red stays the caret's); slate text; a hairline above the status
+bar and below the find bar. The vertical **scrollbar is a traditional arrowed bar
+(clam's default layout), and auto-hides when the document fits**. Chrome appears
 only when needed.
 
 ## Find & replace
@@ -98,11 +99,11 @@ A docked bar (Ctrl+F / Ctrl+H), the lessons distilled from EditPad Pro
 
 - **Incremental** highlight of all matches with a live `N of M` count; Enter /
   Shift+Enter step and wrap.
-- **Flash, never popup.** No-match, bad-pattern and wrap-around flash the field
-  red, never a dialog.
+- **Inline, never popup.** No-match, bad-pattern and wrap-around show as text in
+  the count label, never a dialog.
 - **Match Case / Whole Word / Regex** toggles (Tcl ARE), plus **Adapt case**:
   the replacement follows each match's case (`cat→dog`, `CAT→DOG`, `Cat→Dog`).
-- **Regex reference:** a `?` button, greyed until Regex is on, opens a compact
+- **Regex reference:** a `?` button opens a compact
   Tcl ARE cheat-sheet: a static reference, not a builder or debugger (even
   Goyvaerts kept the heavy regex tooling in a separate program).
 - **Backreferences** (`\1`, `\2`) expand in the replacement.
