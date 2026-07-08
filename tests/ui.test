@@ -1282,6 +1282,29 @@ test geo-clamp-2.8 {load_geometry seeds geom_normal from the applied rect so a z
     set ::els::geom_normal
 } -result {800x600+120+90}
 
+# bug-hunt wave 2 (F08): Windows Tk renders a negative window origin in the "+-N"
+# form (a window at x=-137 reads back "900x620+-137+60").  Both regexps rejected
+# it, so window position on a monitor left of / above the primary was silently
+# never restored (opened at the built-in default every launch) and the off-screen
+# guard never applied.  x=-137 is barely off-screen so the real virtual desktop
+# always covers it -> load restores it verbatim.
+test geo-clamp-2.9 {load_geometry accepts the Windows "+-N" negative-origin form (was silently dropped)} -setup {ui_reset} -body {
+    set f $::els::config_path
+    set fh [open $f w] ; puts $fh {geometry 900x620+-137+60} ; close $fh
+    set ::els::geom_normal ""
+    els::load_geometry
+    catch {file delete -force $f}
+    set ::els::geom_normal
+} -result {900x620+-137+60}
+
+test geo-clamp-2.10 {clamp now evaluates "+-N": a far-off-screen negative window IS reset} -body {
+    els::clamp_geometry 900x620+-5000+100 0 0 1920 1080
+} -result 900x620+60+60
+
+test geo-clamp-2.11 {clamp keeps a "+-N" window a connected left monitor covers} -body {
+    els::clamp_geometry 900x620+-1900+100 -1920 0 3840 1080
+} -result 900x620+-1900+100
+
 test cfg-2.3 {LOCALAPPDATA-unset fallback resolves a real home dir (no literal ~)} -setup {ui_reset} -body {
     set saved $::env(LOCALAPPDATA)
     unset ::env(LOCALAPPDATA)
@@ -1289,6 +1312,23 @@ test cfg-2.3 {LOCALAPPDATA-unset fallback resolves a real home dir (no literal ~
     set ::env(LOCALAPPDATA) $saved
     list [string match "*~*" $appdata] [string match -nocase "*AppData*" $appdata]
 } -result {0 1}
+
+# bug-hunt wave 2 (F09): the portable ("next to the program") config dir must
+# come from the boot script captured at source time, not `info script`.  The
+# first-run dialog runs from an `after` callback where `info script` is "", which
+# normalized to "." and made the portable path the cwd-relative "./els.conf" —
+# settings written into the launch folder, and the choice never sticking.
+test cfg-2.6 {config_roots derives the portable dir from boot_script, not (callback-empty) info script} \
+        -setup {ui_reset ; set ::__saved_bs $::els::boot_script} \
+        -cleanup {set ::els::boot_script $::__saved_bs ; unset -nocomplain ::__saved_bs} -body {
+    set fake [file normalize [file join $::ELS_TMP fakeapp els.tcl]]
+    set ::els::boot_script $fake
+    lassign [els::config_roots] progdir appdata
+    # progdir must be fakeapp/ (from boot_script), never a relative "." or the
+    # tests dir (which `info script` would yield here)
+    list [file pathtype $progdir] \
+         [expr {[file normalize $progdir] eq [file normalize [file dirname $fake]]}]
+} -result {absolute 1}
 
 test session-4.1 {an explicit-file-arg launch does not destroy the stored session} -setup {ui_reset} -body {
     set ::els::session_files [list C:/saved/a.txt C:/saved/b.txt]

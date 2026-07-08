@@ -249,10 +249,17 @@ proc els::load_icon {} {
 proc els::config_roots {} {
     # "next to the program" = the exe's folder when packaged, the script's
     # folder (the repo) in a dev run.
-    if {[string match "//zipfs:*" [info script]]} {
+    # Use the boot script captured at load time, NOT `info script`: config_roots
+    # runs from the first-run `after` callback where `info script` is "" — which
+    # missed the zipfs branch AND normalized "" to ".", making the portable
+    # candidate the cwd-relative "./els.conf" (settings written into whatever
+    # folder the launch happened from, and the choice never sticking).  Same fix
+    # association_exe already carries.
+    set bs $::els::boot_script
+    if {[string match "//zipfs:*" $bs]} {
         set progdir [file dirname [info nameofexecutable]]
     } else {
-        set progdir [file dirname [file normalize [info script]]]
+        set progdir [file dirname [file normalize $bs]]
     }
     if {[info exists ::env(LOCALAPPDATA)] && $::env(LOCALAPPDATA) ne ""} {
         set la $::env(LOCALAPPDATA)
@@ -390,8 +397,17 @@ proc els::virtual_screen {} {
 # when the title bar has no reachable presence on any monitor.  A window on a
 # monitor left/above (negative coords) or right/below the primary is KEPT because
 # the real virtual rect covers it.  A size-only geometry is returned unchanged.
+# A negative origin reads back from Windows Tk in the "+-N" form (e.g. x=-137 ->
+# "...+-137+60"); the regexp accepts the optional sign after the +/- separator,
+# and `expr` reads "+-137" as -137, so the arithmetic below is correct.
 proc els::clamp_geometry {g vx vy vw vh} {
-    if {[regexp {^([0-9]+)x([0-9]+)([+-][0-9]+)([+-][0-9]+)$} $g -> W H X Y]} {
+    if {[regexp {^([0-9]+)x([0-9]+)([+-]-?[0-9]+)([+-]-?[0-9]+)$} $g -> W H X Y]} {
+        # "+-137" (the negative-origin form) is not a canonical number to `expr`
+        # as a substituted string operand, so strip the leading "+" separator:
+        # "+-137"->"-137", "+100"->"100", "-137" unchanged.  ($g is returned
+        # verbatim when kept — the Tk setter accepts the "+-N" form.)
+        set X [string trimleft $X +]
+        set Y [string trimleft $Y +]
         set m 90   ;# min grabbable title-bar presence on the desktop
         # the title bar's top edge must sit within the desktop vertically, and the
         # window must overlap it horizontally by at least m px
@@ -419,7 +435,7 @@ proc els::load_geometry {} {
     # throw out of build before any widget existed — els could not start again
     # until the user found and deleted the config.  Readers tolerate anything.
     if {![catch {dict get $data geometry} g] && \
-        [regexp {^[0-9]+x[0-9]+([+-][0-9]+[+-][0-9]+)?$} $g]} {
+        [regexp {^[0-9]+x[0-9]+([+-]-?[0-9]+[+-]-?[0-9]+)?$} $g]} {
         set cg [els::clamp_geometry $g {*}[els::virtual_screen]]
         catch {wm geometry . $cg}
         # seed the normal-geometry baseline NOW, before any zoom: the <Configure>
