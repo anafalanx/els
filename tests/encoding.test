@@ -542,7 +542,7 @@ test declossy-1.5 {reload_from_disk refreshes the decode-lossy marker (no reload
 
 # emoji, CJK Ext-B, math-bold, a ZWJ family (U+200D joins), emoji + VS16 (U+FE0F),
 # and a skin-tone modifier (U+1F3FD):
-set ::ASTRAL "grin \U0001F600 extB \U00020000 math \U0001D400 fam \U0001F468‍\U0001F469‍\U0001F467‍\U0001F466 heart ❤️ thumb \U0001F44D\U0001F3FD\n"
+set ::ASTRAL "grin \U0001F600 extB \U00020000 math \U0001D400 fam \U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466 heart \u2764\uFE0F thumb \U0001F44D\U0001F3FD\n"
 
 test astral-1.1 {UTF-8 astral content round-trips byte-for-byte through open + save} -setup {els_reset} -body {
     set bytes [encoding convertto utf-8 $::ASTRAL]

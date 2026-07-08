@@ -3,15 +3,19 @@ source [file join [file dirname [info script]] helpers.tcl]
 namespace import ::tcltest::test
 
 proc startup_bundle {} {
-    set tc [file join $::ELS_ROOT .toolchain]
-    if {[file exists [file join $tc tcl9 bin wish90.exe]]} { return $tc }
-    if {[file exists [file join $tc BUNDLE.manifest]]} { return $tc }
+    # Hosted layout: wish ships in z's shared Tcl/Tk payload (Z_TCLTK, exported by
+    # tools/tasks.tcl); the old project-local <repo>/.toolchain was removed in the
+    # hosted migration, so probe the payload root instead (F76).
+    if {[info exists ::env(Z_TCLTK)] && $::env(Z_TCLTK) ne ""} {
+        set tc $::env(Z_TCLTK)
+        if {[file exists [file join $tc tcl9 bin wish90.exe]]} { return $tc }
+    }
     return ""
 }
 
 # Locate a wish to drive the process-level probes.  Prefer one sitting next to
 # the interpreter that is actually running the suite (portable to any layout),
-# then fall back to the project-local toolchain path; return "" if none is found so
+# then fall back to z's shared Tcl/Tk payload (Z_TCLTK); return "" if none is found so
 # the tests SKIP (constraint below) instead of hard-failing the whole suite on a
 # machine without the project-local wish.
 proc startup_wish {} {
