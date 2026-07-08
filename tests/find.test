@@ -437,3 +437,17 @@ test wrapkeep-6.1 {Enter-stepping keeps the "(wrapped)" indicator: its KeyReleas
     after 250 {set ::__w28 1} ; vwait ::__w28           ;# let any debounce fire; must NOT erase
     list [string match "*(wrapped)*" $::els::find_count] $armed
 } -cleanup {catch {els::find_hide}} -result {1 0}
+
+# bug-hunt wave 2 (F32): in regex replace `&` is the whole match and `\&` a
+# literal & (regsub subSpec).  This pins that behaviour, now documented in the
+# quickref; it is unchanged by the fix (which was the doc), so it is a guard.
+test regexamp-6.1 {regex replace: & is the whole match, \& is a literal & (F32)} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a12b"
+    set ::els::find_regex 1 ; set ::els::find_q {\d+} ; set ::els::find_r {[&]}
+    els::find_update ; els::find_replace_all
+    set expanded [$w get 1.0 "end - 1 char"]
+    $w delete 1.0 end ; $w insert end "a12b"
+    set ::els::find_q {\d+} ; set ::els::find_r {[\&]}
+    els::find_update ; els::find_replace_all
+    list $expanded [$w get 1.0 "end - 1 char"]
+} -result {{a[12]b} {a[&]b}}

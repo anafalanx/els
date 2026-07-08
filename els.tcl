@@ -649,7 +649,13 @@ proc els::session_set_restore {} {
 proc els::recent_sanitize {list} {
     set out {}
     foreach p $list {
-        if {$p eq "" || $p in $out} { continue }
+        if {$p eq ""} { continue }
+        # dedupe case-insensitively (els::same_path), like the rest of the module
+        # (open/save-as/session): else a differently-cased spelling of one file
+        # would occupy two recent slots (F33)
+        set dup 0
+        foreach q $out { if {[els::same_path $p $q]} { set dup 1 ; break } }
+        if {$dup} { continue }
         lappend out $p
         if {[llength $out] >= $::els::recent_cap} { break }
     }
@@ -658,7 +664,10 @@ proc els::recent_sanitize {list} {
 proc els::recent_add {p} {
     if {$p eq ""} { return }
     set p [file normalize $p]
-    set rest [lsearch -all -inline -not -exact $::els::recent $p]
+    # drop any prior entry for the SAME file (same_path, not exact spelling), so
+    # re-opening it under a different case moves the one entry to the top (F33)
+    set rest {}
+    foreach q $::els::recent { if {![els::same_path $p $q]} { lappend rest $q } }
     set ::els::recent [els::recent_sanitize [linsert $rest 0 $p]]
     els::recent_rebuild
     els::save_geometry
@@ -669,7 +678,11 @@ proc els::recent_add {p} {
     els::recent_manage_refresh
 }
 proc els::recent_remove {p} {
-    set ::els::recent [lsearch -all -inline -not -exact $::els::recent $p]
+    # remove every entry for the same file (same_path), so Remove clears a file
+    # even if it lingered under two case spellings (F33)
+    set out {}
+    foreach q $::els::recent { if {![els::same_path $p $q]} { lappend out $q } }
+    set ::els::recent $out
     els::recent_rebuild
     els::save_geometry
     els::recent_manage_refresh
@@ -1318,7 +1331,7 @@ proc els::build {} {
     .menu.buffer add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
     .menu.buffer add command -label "Delete Line"     -accelerator Ctrl+Shift+K -command els::xform::delete_line
     .menu.buffer add command -label "Join Lines"      -accelerator Ctrl+J       -command els::xform::join_lines
-    .menu.buffer add command -label "Indent"          -accelerator Tab          -command els::xform::indent
+    .menu.buffer add command -label "Indent"                                    -command els::xform::indent
     .menu.buffer add command -label "Dedent"          -accelerator Shift+Tab    -command els::xform::dedent
     .menu.buffer add separator
     .menu.buffer add command -label "Sort Lines"             -command {els::xform::sort 1}
@@ -2964,7 +2977,7 @@ proc els::filetypes {} {
 proc els::new {} {
     els::new_doc
 }
-proc els::open {{p ""} {quiet 0}} {
+proc els::open {{p ""} {quiet 0} {noRecent 0}} {
     if {$p eq ""} {
         set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
         if {$p eq ""} { return }
@@ -2975,7 +2988,7 @@ proc els::open {{p ""} {quiet 0}} {
     foreach id $::els::docs {
         if {[info exists docPath($id)] && [els::same_path $docPath($id) $p]} {
             els::switch_to $id
-            els::recent_add $p
+            if {!$noRecent} { els::recent_add $p }
             return $id
         }
     }
@@ -3065,7 +3078,7 @@ proc els::open {{p ""} {quiet 0}} {
     els::update_tab $id
     els::settitle
     els::refresh_view
-    els::recent_add $p
+    if {!$noRecent} { els::recent_add $p }
     return $id
 }
 # Emit the bytes to the (temp) save channel.  A one-line seam so a test can force
@@ -4450,7 +4463,10 @@ proc els::session_restore {} {
         # is NOT dropped from the session — it is remembered as pending so the next
         # save_geometry keeps it and the next launch retries it
         if {![file exists $p]} { lappend ::els::session_pending $p ; continue }
-        set id [els::open $p 1]
+        # noRecent=1: restoring the saved session must not push every restored tab
+        # to the top of Open Recent (it would evict the user's genuine recents on
+        # a plain restart) — a recent entry is earned by opening, not by restore (F38)
+        set id [els::open $p 1 1]
         if {$id ne ""} { lappend restored [list $p $id] } else { lappend ::els::session_pending $p }
     }
     if {![llength $restored]} { return 0 }
@@ -4942,6 +4958,7 @@ proc els::regex_help {} {
         {\w \d \s}    {word character / digit / whitespace}
         {( ... )}     {capture group}
         {\1 \2}       {backreference (use in Replace)}
+        {&}           {whole match (in Replace; \& for a literal &)}
         {a|b}         {a or b}
         {\\}          {a literal backslash}
     }

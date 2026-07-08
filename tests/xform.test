@@ -303,3 +303,21 @@ test xform-nl-2.13 {Select-All indent does not turn the phantom line into a real
     set w [xf_fill "a\nb\n"] ; xf_sel 1.0 end
     els::xform::indent ; xf_body
 } -result "\ta\n\tb\n"
+
+# bug-hunt wave 2 (F69): the Buffer > Indent item dropped its "Tab" accelerator —
+# Tab only indents with a selection (no selection inserts a literal tab, by
+# design), so the unconditional accelerator over-claimed.  Dedent keeps Shift+Tab
+# (it always dedents).
+test xform-menu-1.2 {Indent has no over-claimed Tab accelerator; Dedent keeps Shift+Tab (F69)} -setup {els_reset} -body {
+    set bm .menu.buffer ; set got {}
+    foreach want {Indent Dedent} {
+        set acc MISSING
+        for {set i 0} {$i <= [$bm index end]} {incr i} {
+            if {[$bm type $i] eq "command" && ![catch {$bm entrycget $i -label} l] && $l eq $want} {
+                set acc [$bm entrycget $i -accelerator] ; break
+            }
+        }
+        lappend got $acc
+    }
+    set got
+} -result {{} Shift+Tab}

@@ -726,6 +726,15 @@ test recent-1.3 {the recent list is capped at recent_cap} -setup {ui_reset} -bod
     expr {[llength $::els::recent] == $::els::recent_cap}
 } -result 1
 
+test recent-1.9 {Open Recent dedupes and removes case-insensitively, like same_path (F33)} -setup {ui_reset} -body {
+    set ::els::recent {}
+    els::recent_add "C:/Proj/Notes.txt"
+    els::recent_add "c:/proj/notes.txt"        ;# same file, different case -> one entry
+    set n1 [llength $::els::recent]
+    els::recent_remove "C:/PROJ/NOTES.TXT"     ;# any case clears it
+    list $n1 [llength $::els::recent]
+} -result {1 0}
+
 test recent-1.4 {opening a file records it and fills the Open Recent menu} -setup {ui_reset} -body {
     set ::els::recent {}
     set p [els_tmpfile recent_hit.txt "hi\n"]
@@ -1450,6 +1459,14 @@ test session-4.2 {a session-owning run persists its open docs as the session} -s
     set fh [open $::els::config_path r] ; set data [read $fh] ; close $fh
     expr {[dict get $data session_files] eq [list [file normalize $p]]}
 } -result 1
+
+test session-4.3 {session restore does not push restored tabs into Open Recent (F38)} -setup {ui_reset} -body {
+    set a [els_tmpfile srr_a.txt "a\n"] ; set b [els_tmpfile srr_b.txt "b\n"]
+    set ::els::recent [list C:/old/one.txt C:/old/two.txt]   ;# genuine, unrelated recents
+    set ::els::session_files [list $a $b] ; set ::els::restore_session 1
+    els::session_restore                                     ;# opens $a/$b as restored tabs
+    lmap p $::els::recent {file tail $p}                     ;# recents must be untouched
+} -result {one.txt two.txt}
 
 # ---- user-issues batch A ---------------------------------------------------
 
