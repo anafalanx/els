@@ -422,14 +422,29 @@ proc els::clamp_geometry {g vx vy vw vh} {
 
 # els persists a tiny config dict (geometry + recent).  Readers/writers tolerate
 # an empty/unset path, a missing file, or missing keys (forward/back compat).
-proc els::load_geometry {} {
+# Read els.conf into its raw dict, tolerating a partially-corrupt file: the
+# channel uses -profile replace, so ONE invalid byte (a hand-edit in an ANSI
+# editor, sync corruption) degrades to U+FFFD in that value instead of throwing
+# EILSEQ and discarding EVERY setting -- and leaking the open channel, which then
+# blocked all future saves.  "" when there is no readable config.
+proc els::config_read {} {
     set f [els::config_file]
-    if {$f eq "" || ![file exists $f]} { return }
+    if {$f eq "" || ![file exists $f] || [file isdirectory $f]} { return "" }
+    set data ""
     if {[catch {
         set fh [::open $f r]
+        fconfigure $fh -encoding utf-8 -profile replace
         set data [read $fh]
         close $fh
-    }]} { return }
+    }]} {
+        catch {close $fh}
+        return ""
+    }
+    return $data
+}
+proc els::load_geometry {} {
+    set data [els::config_read]
+    if {$data eq ""} { return }
     # Per-VALUE validation, not just per-key fetch guards: els.conf is a plain
     # text file (hand-editable, sync-corruptible), and an invalid value used to
     # throw out of build before any widget existed — els could not start again
@@ -538,18 +553,22 @@ proc els::save_geometry {} {
         } else {
             set geo [wm geometry .]
         }
-        set payload [dict create geometry $geo zoomed $zoomed \
-                         recent $::els::recent word_wrap $::els::word_wrap \
-                         show_whitespace $::els::show_ws \
-                         focus_mode $::els::focus_mode \
-                         line_numbers $::els::show_linenos \
-                         autosave $::els::autosave \
-                         backups $::els::backups \
-                         always_on_top $::els::always_on_top \
-                         font_size $::els::font_size \
-                         restore_session $::els::restore_session \
-                         session_files $sf \
-                         session_active $sa]
+        # Merge the known keys OVER the existing conf dict rather than rebuilding
+        # from scratch, so a key a NEWER els version added is preserved instead of
+        # erased on the first save (every zoom notch / recent-open / quit) -- the
+        # forward-compat the reader already promises (F57).
+        set payload [els::config_read]
+        if {![string is list $payload] || [llength $payload] % 2} { set payload "" }
+        foreach {k v} [list \
+                geometry $geo zoomed $zoomed recent $::els::recent \
+                word_wrap $::els::word_wrap show_whitespace $::els::show_ws \
+                focus_mode $::els::focus_mode line_numbers $::els::show_linenos \
+                autosave $::els::autosave backups $::els::backups \
+                always_on_top $::els::always_on_top font_size $::els::font_size \
+                restore_session $::els::restore_session \
+                session_files $sf session_active $sa] {
+            dict set payload $k $v
+        }
     }]} { return }
     # Write to a temp file then atomically rename, so a crash mid-write cannot
     # corrupt the existing config either.  pid-tagged temp: concurrent els
@@ -557,6 +576,10 @@ proc els::save_geometry {} {
     # half-written file through a fixed temp name.
     set tmp "$f.[pid].tmp"
     if {[catch {
+        # `file rename -force` onto an existing DIRECTORY moves the temp INTO it
+        # (silent non-persist), so refuse a directory config path outright -- fall
+        # to the visible-failure handler below instead of pretending success (F55).
+        if {[file isdirectory $f]} { error "the settings path is a directory, not a file" }
         file mkdir [file dirname $f]
         set fh [::open $tmp w]
         try { puts $fh $payload } finally { close $fh }
@@ -1066,9 +1089,13 @@ proc els::assoc_registered {} {
     if {$exe eq ""} { return 0 }
     set appExe [file tail [file normalize $exe]]
     set cmd [els::reg_value "HKCU\\Software\\Classes\\Applications\\$appExe\\shell\\open\\command" ""]
-    # locale-proof decision: registered means OUR exe appears in the command
-    # (a localized unset-sentinel from a non-English reg.exe is never a match)
-    return [string match -nocase "*${appExe}*" $cmd]
+    # registered == the command points at THIS exe's FULL path (not merely a file
+    # named els.exe): after els.exe moves, the stale registration still holds the
+    # OLD absolute path, so it now reads as not-registered and the dialog offers a
+    # Repair instead of falsely reporting healthy.  string first (literal), not
+    # string match, so backslashes in the path aren't treated as glob escapes.
+    set want [string tolower [file nativename $exe]]
+    return [expr {$want ne "" && [string first $want [string tolower $cmd]] >= 0}]
 }
 proc els::open_default_apps {} {
     set cmd [els::system32 cmd.exe]   ;# absolute path: never a planted cmd.exe (CWD planting)

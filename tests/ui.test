@@ -1330,6 +1330,65 @@ test cfg-2.6 {config_roots derives the portable dir from boot_script, not (callb
          [expr {[file normalize $progdir] eq [file normalize [file dirname $fake]]}]
 } -result {absolute 1}
 
+# ---- bug-hunt wave 2: config persistence robustness (F54, F55, F57, F56) ----
+
+test cfg-badbyte-1.1 {one invalid UTF-8 byte in els.conf degrades that value, keeps the rest, leaks no channel (F54)} \
+        -setup {ui_reset} \
+        -cleanup {catch {file delete -force $::__bbconf} ; set ::els::config_path [file join $::ELS_TMP els.conf]} -body {
+    # own config file: the UNFIXED code leaks an open channel on the bad read, so
+    # keep that off the shared config_path where it would block later tests
+    set ::__bbconf [file join $::ELS_TMP badbyte.conf]
+    set ::els::config_path $::__bbconf
+    # a valid dict whose `recent` value carries a raw 0xE9 (ANSI-editor hand-edit)
+    raw_write $::__bbconf "backups 1 restore_session 0 recent {C:/caf\xE9.txt}\n"
+    set ::els::backups 0 ; set ::els::restore_session 1
+    set chans_before [llength [chan names]]
+    els::load_geometry
+    set chans_after [llength [chan names]]
+    list $::els::backups $::els::restore_session [expr {$chans_after <= $chans_before}]
+} -result {1 0 1}
+
+test cfg-dir-1.1 {save_geometry surfaces a failure (not silent success) when the config path is a directory (F55)} \
+        -setup {ui_reset ; rename ::els::status_note ::__real_sn ; proc ::els::status_note {msg} {lappend ::__f55 $msg}} \
+        -cleanup {rename ::els::status_note {} ; rename ::__real_sn ::els::status_note ; catch {file delete -force $::els::config_path}} -body {
+    set f $::els::config_path
+    catch {file delete -force $f}
+    file mkdir $f                              ;# occupy the config path with a DIRECTORY
+    set ::els::geom_save_warned 0 ; set ::__f55 {}
+    els::save_geometry
+    # nothing moved INTO the dir, the failure was logged + noted once
+    list [file isdirectory $f] [llength [glob -nocomplain -directory $f *]] \
+         $::els::geom_save_warned [expr {[lsearch -glob $::__f55 "*could not be saved*"] >= 0}]
+} -result {1 0 1 1}
+
+test cfg-unknown-1.1 {save_geometry preserves an unknown key written by a newer els (F57)} -setup {ui_reset} -body {
+    set f $::els::config_path
+    catch {file delete -force $f}
+    raw_write $f "geometry 800x600+40+40 fancy_new_option 42\n"
+    els::load_geometry                         ;# tolerates the unknown key
+    els::save_geometry                         ;# must NOT drop it
+    set conf [raw_read $f]
+    catch {file delete -force $f}
+    list [dict exists $conf fancy_new_option] \
+         [expr {[dict exists $conf fancy_new_option] ? [dict get $conf fancy_new_option] : "GONE"}]
+} -result {1 42}
+
+test assoc-3.6 {assoc_registered is FALSE for a stale registration pointing at a moved els.exe (F56)} -setup {
+    ui_reset
+    rename ::els::association_exe ::els::association_exe_real
+    rename ::els::reg_value ::els::reg_value_real
+    proc ::els::association_exe {} { return "C:/NewPath/els.exe" }
+} -cleanup {
+    rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
+    rename ::els::reg_value {} ; rename ::els::reg_value_real ::els::reg_value
+} -body {
+    proc ::els::reg_value {key def} { return {"C:\OldPath\els.exe" "%1"} }   ;# moved: stale path
+    set stale [els::assoc_registered]
+    proc ::els::reg_value {key def} { return {"C:\NewPath\els.exe" "%1"} }   ;# points at us
+    set healthy [els::assoc_registered]
+    list $stale $healthy
+} -result {0 1}
+
 test session-4.1 {an explicit-file-arg launch does not destroy the stored session} -setup {ui_reset} -body {
     set ::els::session_files [list C:/saved/a.txt C:/saved/b.txt]
     set ::els::session_active C:/saved/a.txt
