@@ -660,3 +660,47 @@ test swapdir-fail-1.1 {an uncreatable swap dir surfaces the crash-protection war
     list [expr {[info exists ::els::swap_fail_streak($id)] ? $::els::swap_fail_streak($id) : -1}] \
          [expr {[lsearch -glob $::__f20 "*crash protection is failing*"] >= 0}]
 } -result {3 1}
+
+# ---- F11: the crash-protection TIMER path (never fired by any other test) ----
+# Every other swap test drives flushes by DIRECT calls; these prove the real
+# self-rescheduling `after` loop actually fires, writes, reschedules, and debounces
+# (a scheduling regression would otherwise silently disable continuous protection).
+
+test swaptick-1.1 {swap_start's periodic tick fires on a real timer, writes the swap, and reschedules (F11)} -setup recover_reset -body {
+    set ::els::swap_interval 20                       ;# fast tick for the test
+    set id [els::open [els_tmpfile swaptick.txt "base\n"]]
+    [els::W $id] insert end "dirty"                   ;# dirty, but NO direct flush
+    els::swap_start
+    set armed [expr {$::els::swap_after ne ""}]       ;# a tick is scheduled
+    set c0 $::els::swap_tick_count
+    set before [file exists [els::swap_path [els::session_id] $id]]
+    set done 0 ; after 90 {set done 1} ; vwait done   ;# let real ticks fire (~4x at 20ms)
+    set rearmed [expr {$::els::swap_after ne ""}]      ;# still self-rescheduling
+    els::swap_stop
+    list $armed $before [expr {$::els::swap_tick_count > $c0}] \
+         [file exists [els::swap_path [els::session_id] $id]] $rearmed
+} -result {1 0 1 1 1}
+
+test swapsoon-1.1 {swap_flush_soon debounces an edit and the delayed flush writes the swap (F11)} -setup recover_reset -body {
+    set ::els::swap_debounce 20
+    set id [els::open [els_tmpfile swapsoon.txt "base\n"]]
+    [els::W $id] insert end "dirty"
+    els::swap_flush_soon
+    set armed [expr {$::els::swap_touch_after ne ""}]
+    set before [file exists [els::swap_path [els::session_id] $id]]
+    set done 0 ; after 70 {set done 1} ; vwait done
+    els::swap_stop
+    list $armed $before \
+         [file exists [els::swap_path [els::session_id] $id]] \
+         [expr {$::els::swap_touch_after eq ""}]
+} -result {1 0 1 1}
+
+test swapsoon-1.2 {a second swap_flush_soon cancels + reschedules the pending debounce (coalesces a typing burst) (F11)} -setup recover_reset -body {
+    set ::els::swap_debounce 60
+    set id [els::open [els_tmpfile swapsoon2.txt "base\n"]]
+    [els::W $id] insert end "x"
+    els::swap_flush_soon ; set first $::els::swap_touch_after
+    els::swap_flush_soon ; set second $::els::swap_touch_after   ;# cancels $first, arms anew
+    els::swap_stop
+    list [expr {$first ne ""}] [expr {$second ne ""}] [expr {$first ne $second}]
+} -result {1 1 1}
