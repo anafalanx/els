@@ -14,6 +14,11 @@ namespace import ::tcltest::test
 # Tell encoding_stress.tcl it is being sourced (not run as `z stress`), so it
 # defines els_stress_run without auto-running + exiting.
 set ::els_stress_sourced 1
+# encoding_stress.tcl redefines ::els::lossy_ask at source time (auto-consent to
+# lossy saves).  Save the helpers recording stub first, then restore it after the
+# run (below), so the test files sorted after this one keep the recording contract
+# instead of silently inheriting the stress override (F10).
+rename ::els::lossy_ask ::_helpers_lossy_ask_saved
 source [file join [file dirname [info script]] encoding_stress.tcl]
 
 # Gate the slow run on the `stress` constraint (run.tcl sets it: ON normally,
@@ -26,3 +31,8 @@ test stress-1.1 {UI-driven encoding stress: ~800 ops, no hang/crash/corruption, 
         -constraints stress -body {
     els_stress_run   ;# returns the list of failures — empty == all good
 } -result {}
+
+# Restore the helpers recording lossy stub that encoding_stress.tcl replaced at
+# source time, so ui/units/view/winfs/xform (sorted after stress) keep it (F10).
+rename ::els::lossy_ask {}
+rename ::_helpers_lossy_ask_saved ::els::lossy_ask

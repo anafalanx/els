@@ -45,3 +45,14 @@ test harness-1.4 {els_reset restores dialog stub defaults} -setup {
 } -body {
     list $::els_test_mbanswer $::els_test_savefile $::els_test_popup_args
 } -result {yes {} {}}
+
+# find.test leaves a live search (find_mode="find", find_q set); without els_reset
+# clearing it, every later file's switch_to runs find_update and moves the caret.
+test harness-1.5 {els_reset clears leaked find + recent state so no file inherits a live search (F58)} -body {
+    set ::els::find_mode find ; set ::els::find_q "leak"
+    set ::els::find_matches {{1.0 1.1}} ; set ::els::find_history {a b}
+    set ::els::recent {C:/x.txt}
+    els_reset
+    list $::els::find_mode $::els::find_q $::els::find_matches \
+         $::els::find_history $::els::recent
+} -result {{} {} {} {} {}}

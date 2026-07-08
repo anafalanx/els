@@ -5,6 +5,10 @@
 source [file join [file dirname [info script]] helpers.tcl]
 namespace import ::tcltest::test
 
+# reg-5.2 gates on the `detect` constraint; define it HERE (not only in
+# encoding.test) so running ui.test standalone doesn't silently skip it (F64).
+::tcltest::testConstraint detect $::els::have_detect
+
 proc ui_reset {} {
     els_reset
     set ::els::find_q "" ; set ::els::find_r ""

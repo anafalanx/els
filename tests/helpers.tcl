@@ -172,6 +172,14 @@ proc els_reset {} {
         set ::els::$v ""
     }
     catch {els::tip_cancel}
+    # Find display state leaks across test FILES: find.test leaves find_mode="find"
+    # and find_q set, so every later els::switch_to runs a live search (find_update
+    # moves the caret to the first match and scrolls).  Clear it, plus the recent
+    # list, so no file inherits a stray search (F58).
+    set ::els::find_mode "" ; set ::els::find_q "" ; set ::els::find_r ""
+    set ::els::find_matches {} ; set ::els::find_current -1
+    set ::els::find_history {} ; set ::els::find_hidx -1
+    set ::els::recent {}
     # And as the final backstop, cancel EVERY pending after (e.g. the
     # `after idle recover_boot` scheduled by config_apply_choice in cfg-1.3,
     # which otherwise fired mid-suite and could deiconify a REAL recovery
