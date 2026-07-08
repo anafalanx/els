@@ -14,7 +14,7 @@
 package require Tk
 
 namespace eval els {
-    variable version "0.91"      ;# fix: Tab with a selection no longer deletes the selected text
+    variable version "0.92"      ;# 0.92: 0.91 bug-hunt hardening — data-safety, encoding, long-path, single-instance
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
