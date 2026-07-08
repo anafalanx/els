@@ -5881,7 +5881,13 @@ proc els::selftest {tf {report ""}} {
     # this headless selftest hung behind a background-error dialog.  On failure,
     # fall back to stderr (still visible to whoever launched --selftest).
     catch {file mkdir [file dirname $report]}
-    if {[catch {set out [::open $report w] ; puts -nonewline $out $txt ; close $out} err]} {
+    # temp+rename (the same discipline as the startup-probe report) so a reader
+    # polling the report can never observe a half-written file (pa-4)
+    if {[catch {
+        set out [::open $report.tmp w]
+        try { puts -nonewline $out $txt } finally { close $out }
+        file rename -force $report.tmp $report
+    } err]} {
         catch {puts stderr "selftest: could not write $report: $err"}
         catch {puts -nonewline stderr $txt}
     }

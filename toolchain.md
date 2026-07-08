@@ -87,6 +87,7 @@ z icon [size]        regenerate resources/icon.png
 z shot <out> [file]  screenshot the editor via twapi + PrintWindow
 z readme-shots       regenerate README screenshots
 z build [out]        build the native exe -> dist/els.exe
+z sign [exe]         code-sign the release exe (Certum/SimplySign) + re-probe + verify
 z probe-exe [exe]    verify fused exe startup/session/recovery behavior
 z build-ext          compile src/*.c C23 extensions -> build/*.dll
 z check [--deep]     check z's runtime payloads
@@ -154,8 +155,10 @@ z probe-exe
 z shot --selftest
 ```
 
-`els.exe --selftest [report.txt]` is a headless mode that boots the full app,
-writes a result file, and exits. Because the release exe is a GUI-subsystem
+`els.exe --selftest [open-file [report.txt]]` is a headless mode that boots the full
+app, writes a result file, and exits. The report goes to `<exe-dir>\els-selftest.txt`
+unless a path is given as the SECOND argument (the first argument, if any, is a
+document to open during the check). Because the release exe is a GUI-subsystem
 program, do not debug failures by launching it and waiting for stderr; use the
 selftest report or build a console-subsystem twin for investigation.
 

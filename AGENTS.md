@@ -48,8 +48,10 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
 - The architecture, the proven static-link recipe, and the pitfalls are in
   `docs/native-port-study.md`; a robustness audit and hardening roadmap is in
   `docs/robustness-hardening-study.md`.
-- Verify the exe headlessly: `els.exe --selftest [report.txt]` writes a report
-  file (GUI subsystem means no stderr); `z probe-exe` checks first-run/session
+- Verify the exe headlessly: `els.exe --selftest` writes a report file — to
+  `<exe-dir>\els-selftest.txt` by default, or to a path given as the SECOND argument
+  (the first argument, if any, is a document to open during the check), GUI subsystem
+  means no stderr; `z probe-exe` checks first-run/session
   behavior; `z test` runs the packaging-independent suite. Never debug a GUI
   build by running it on a failure and waiting for stderr; read the selftest
   report, or build a console-subsystem twin.
