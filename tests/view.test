@@ -322,7 +322,10 @@ test tabreorder-b.1 {dragging a tab past a neighbour's midpoint reorders docs an
     els::tab_drag $a $beyond
     els::tab_drag $a $beyond                    ;# second motion: past C too
     set order $::els::docs
-    set packed [pack slaves .tabs]
+    set packed [lmap w [pack slaves .tabs] {
+        if {$w eq ".tabs.more"} continue
+        set w
+    }]
     list [expr {$order eq [list $b $c $a]}] \
          [expr {$packed eq [list [els::tabW $b] [els::tabW $c] [els::tabW $a]]}]
 } -result {1 1}

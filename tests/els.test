@@ -88,7 +88,7 @@ test dirty-1.1 {an edit marks the document dirty and bullets the tab} -setup {el
     set clean [els::doc_dirty $::els::active]
     [els::T] insert end "x"
     list $clean [els::doc_dirty $::els::active] [els::tab_text $::els::active]
-} -result {0 1 {• untitled}}
+} -result {0 1 {• untitled 1}}
 
 # ---- user-issues batch A ---------------------------------------------------
 
@@ -307,6 +307,113 @@ test saveas-1.3 {Save As write failure keeps the old path and does not add a rec
          [els::doc_dirty $d] [expr {$::els::recent eq $beforeRecent}] \
          [file exists $bad]
 } -result {0 1 1 1 0}
+
+test saveas-1.4 {Save As keeps the invoking document when nested dialog events switch tabs} -setup {
+    els_reset
+    rename ::tk_getSaveFile ::_els_real_getsave
+} -cleanup {
+    catch {rename ::tk_getSaveFile {}}
+    if {[llength [info commands ::_els_real_getsave]]} { rename ::_els_real_getsave ::tk_getSaveFile }
+} -body {
+    set a $::els::active
+    [els::W $a] insert end "CONTENT FROM A"
+    set b [els::new_doc]
+    [els::W $b] insert end "CONTENT FROM B"
+    set target [file join $::ELS_TMP saveas_nested.txt]
+    set ::_els_nested_b $b
+    set ::_els_nested_target $target
+    proc ::tk_getSaveFile {args} {
+        set ::_els_nested_suspended $::els::swap_suspend
+        els::switch_to $::_els_nested_b
+        return $::_els_nested_target
+    }
+    els::switch_to $a
+    set rc [els::saveas]
+    list $rc [raw_read $target] \
+         [els::same_path $::els::docPath($a) $target] [els::doc_dirty $a] \
+         $::els::docPath($b) [els::doc_dirty $b] [els_text $b] $::_els_nested_suspended
+} -result {1 {CONTENT FROM A} 1 0 {} 1 {CONTENT FROM B} 1}
+
+test saveas-1.5 {failed Save As restores format, recovery, and lossy-consent metadata} -setup {els_reset} -body {
+    set old [els_tmpfile saveas_meta_old.txt "plain\n"]
+    els::open $old ; set id $::els::active
+    set ::els::docEnc($id) ascii
+    [els::W $id] insert end "caf\u00E9"
+    set ::els::docDecodeLossy($id) 1
+    set ::els::docRecovered($id) 1
+    set ::els::docFormatPending($id) 1
+    set ::els::docLossyPause($id) 1
+    set ::els::docExtModPause($id) 1
+    set fields {docEnc docBom docEol docRaw savedSig savedSigPath docExtModPause \
+                docDecodeLossy docLossyOk docLossyPause docFormatPending docRecovered}
+    set before [lmap name $fields {
+        set slot "::els::${name}($id)"
+        if {[info exists $slot]} { list 1 [set $slot] } else { list 0 "" }
+    }]
+    set bad [file join $::ELS_TMP saveas-meta-missing out.txt]
+    catch {file delete -force [file dirname $bad]}
+    set ::els_test_savefile $bad
+    set ::els_test_mbanswer yes
+    set ::els_test_lossy_answer utf8
+    set utf8rc [els::saveas]
+    set afterUtf8 [lmap name $fields {
+        set slot "::els::${name}($id)"
+        if {[info exists $slot]} { list 1 [set $slot] } else { list 0 "" }
+    }]
+    set ::els_test_lossy_answer lossy
+    set lossyrc [els::saveas]
+    set afterLossy [lmap name $fields {
+        set slot "::els::${name}($id)"
+        if {[info exists $slot]} { list 1 [set $slot] } else { list 0 "" }
+    }]
+    list $utf8rc $lossyrc [expr {$before eq $afterUtf8}] [expr {$before eq $afterLossy}] \
+         [els::same_path $::els::docPath($id) $old] [llength $::els_test_lossy_calls]
+} -result {0 0 1 1 1 2}
+
+test saveas-1.6 {a throwing save restores the complete Save As snapshot before rethrowing} -setup {
+    els_reset
+    rename ::els::save ::els::_saveas_real_save
+} -cleanup {
+    catch {rename ::els::save {}}
+    if {[llength [info commands ::els::_saveas_real_save]]} {
+        rename ::els::_saveas_real_save ::els::save
+    }
+} -body {
+    set old [els_tmpfile saveas_throw_old.txt "old\n"]
+    els::open $old ; set id $::els::active
+    [els::W $id] insert end "dirty"
+    set ::els::docRecovered($id) 1
+    set ::els::docLossyPause($id) 1
+    set ::els::dirtySince($id) 1
+    set fields {docEnc docBom docEol docRaw savedSig savedSigPath \
+                docExtModPause docDecodeLossy docLossyOk docLossyPause \
+                docFormatPending docRecovered swapSig dirtySince swap_fail_streak}
+    set before [lmap name $fields {
+        set slot "::els::${name}($id)"
+        if {[info exists $slot]} { list 1 [set $slot] } else { list 0 "" }
+    }]
+    set recentBefore $::els::recent
+    set target [file join $::ELS_TMP saveas_throw_new.txt]
+    set ::els_test_savefile $target
+    proc ::els::save {id args} {
+        foreach name {docEnc docBom docEol docRaw savedSig savedSigPath \
+                      docExtModPause docDecodeLossy docLossyOk docLossyPause \
+                      docFormatPending docRecovered swapSig dirtySince swap_fail_streak} {
+            set ::els::${name}($id) CORRUPTED
+        }
+        [els::W $id] edit modified 0
+        error "injected throwing save"
+    }
+    set code [catch {els::saveas} err]
+    set after [lmap name $fields {
+        set slot "::els::${name}($id)"
+        if {[info exists $slot]} { list 1 [set $slot] } else { list 0 "" }
+    }]
+    list $code $err [els::same_path $::els::docPath($id) $old] \
+         [expr {$before eq $after}] [els::doc_dirty $id] \
+         [expr {$::els::recent eq $recentBefore}] $::els::swap_suspend \
+         [file exists $target]
+} -result {1 {injected throwing save} 1 1 1 1 0 0}
 
 # save_with only changes the encoding + marks dirty; the next save writes the
 # bytes.  Pick UTF-16LE+BOM on a utf-8 doc, then save, and check the file bytes.
@@ -584,7 +691,7 @@ test bk-1.13 {els ships with backups ON by default (the previous-versions safety
     set ::els_shipped_backups
 } -result 1
 
-test bk-1.10 {menu carries Keep Backups and Open Backups Folder} -setup {els_reset} -body {
+test bk-1.14 {menu carries Keep Backups and Open Backups Folder} -setup {els_reset} -body {
     set cb 0 ; set cmd 0
     for {set i 0} {$i <= [.menu.file index end]} {incr i} {
         set t [.menu.file type $i]
@@ -598,7 +705,7 @@ test bk-1.10 {menu carries Keep Backups and Open Backups Folder} -setup {els_res
     list $cb $cmd
 } -result {1 1}
 
-test bk-1.11 {same-named files in different folders keep separate rings} -setup {els_reset} -body {
+test bk-1.15 {same-named files in different folders keep separate rings} -setup {els_reset} -body {
     set ::els::backups 1 ; set ::els::BK_MININT 0
     file mkdir [file join $::ELS_TMP bkA] [file join $::ELS_TMP bkB]
     set pa [file join $::ELS_TMP bkA same.txt] ; raw_write $pa "AAA\n"
@@ -707,38 +814,90 @@ test extmod-1.9 {a byte-identical external rewrite (mtime-only bump) does NOT pr
     list $rc $::els_test_mbcount [info exists ::els::docExtModPause($id)]
 } -result {1 0 0}
 
-# ---- bug-hunt wave 2: the >CRC-cap external-change blind spot (F05) ---------
-# Above SWAP_FILE_CRC_CAP a file signature's crc is SAMPLED (first + last 64 KiB),
-# so a size-preserving rewrite of the MIDDLE leaves size+crc identical.  mtime,
-# dropped from the content key for exact (<=cap) sigs to avoid byte-identical
-# false positives, is the only remaining signal there — sig_content must keep it
-# above the cap, or a manual save silently clobbers the external change.
+test extstate-1.1 {a removed target pauses autosave and requires an explicit manual recreate} -setup {els_reset} -body {
+    set p [els_tmpfile removed-target.txt "disk version\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] delete 1.0 end ; [els::W $id] insert end "buffer version"
+    file delete -force $p
+    set ::els_test_mbcount 0
+    set quiet [els::save $id 1]
+    set paused [info exists ::els::docExtModPause($id)]
+    set ::els_test_mbanswer no
+    set declined [els::save $id]
+    set safe [expr {![file exists $p] && [els::doc_dirty $id]}]
+    set ::els_test_mbanswer yes
+    set accepted [els::save $id]
+    list $quiet $paused $declined $safe $accepted [raw_read $p] \
+         [els::doc_dirty $id] $::els_test_mbcount
+} -result {0 1 0 1 1 {buffer version} 0 2}
 
-test extmod-1.10 {sig_content keeps mtime above the cap, drops it at/under (unit)} -body {
+test extstate-1.2 {an unreadable target pauses quiet save and needs explicit manual overwrite} -setup {
+    els_reset
+    rename els::file_sig_probe _els_real_file_sig_probe
+    proc els::file_sig_probe {path} { return [dict create state unreadable error "sharing violation"] }
+} -cleanup {
+    catch {rename els::file_sig_probe {}}
+    if {[llength [info commands _els_real_file_sig_probe]]} { rename _els_real_file_sig_probe els::file_sig_probe }
+} -body {
+    set p [els_tmpfile unreadable-target.txt "disk version\n"]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "local"
+    set ::els_test_mbcount 0
+    set quiet [els::save $id 1]
+    set paused [info exists ::els::docExtModPause($id)]
+    set ::els_test_mbanswer no
+    set declined [els::save $id]
+    set unchanged [expr {[raw_read $p] eq "disk version\n"}]
+    set ::els_test_mbanswer yes
+    set accepted [els::save $id]
+    list $quiet $paused $declined $unchanged $accepted [raw_read $p] \
+         [els::doc_dirty $id] $::els_test_mbcount
+} -result [list 0 1 0 1 1 "disk version\nlocal" 0 2]
+
+# ---- full-content external-change signatures -----------------------------
+# Authoritative signatures hash every byte at every size.  Their content key
+# therefore always drops volatile mtime without a middle-write blind spot.
+
+test extmod-1.10 {sig_content drops mtime at every size now that every CRC is full-content} -body {
     set cap $::els::SWAP_FILE_CRC_CAP
     list [els::sig_content "1000:111:222"] \
          [els::sig_content "[expr {$cap + 1}]:111:222"] \
          [expr {[els::sig_content "[expr {$cap+1}]:111:222"] ne \
                 [els::sig_content "[expr {$cap+1}]:999:222"]}] \
          [expr {[els::sig_content "1000:111:222"] eq [els::sig_content "1000:999:222"]}]
-} -result {1000:222 16777217:111:222 1 1}
+} -result {1000:222 16777217:222 0 1}
 
-test extmod-1.11 {a same-size middle rewrite of a >cap file PROMPTS (no silent clobber)} \
+test extmod-1.11 {a same-size middle rewrite with restored mtime PROMPTS (no silent clobber)} \
         -setup {els_reset} -cleanup {set ::els::SWAP_FILE_CRC_CAP 16777216} -body {
-    # 200 KB file so head[0:64K]+tail[end-64K:] leave a genuine unsampled middle;
-    # lower the cap so this modest fixture takes the sampled path.
+    # Keep the old cap low to prove it no longer changes authoritative hashing.
     set ::els::SWAP_FILE_CRC_CAP 100000
     set base [string repeat A 200000]
     set p [els_tmpfile big_mid.txt $base]
     els::open $p ; set id $::els::active
+    set originalMtime [file mtime $p]
     [els::W $id] insert end "local edit"
     # external program rewrites 20 bytes at the true middle, size preserved
-    raw_write $p [string replace $base 100000 100019 [string repeat B 20]]
-    file mtime $p [expr {[file mtime $p] + 5}]
+    set external [string replace $base 100000 100019 [string repeat B 20]]
+    raw_write $p $external
+    file mtime $p $originalMtime
     set ::els_test_mbcount 0 ; set ::els_test_mbanswer cancel
     set rc [els::save $id]
-    list $rc $::els_test_mbcount
-} -result {0 1}
+    list $rc $::els_test_mbcount [expr {[raw_read $p] eq $external}]
+} -result {0 1 1}
+
+test extmod-1.13 {quiet save pauses on a same-size same-mtime middle rewrite} \
+        -setup {els_reset} -body {
+    set base [string repeat A 200000]
+    set p [els_tmpfile big_mid_quiet.txt $base]
+    els::open $p ; set id $::els::active ; set mt [file mtime $p]
+    [els::W $id] insert end "local edit"
+    set external [string replace $base 99990 100009 [string repeat Z 20]]
+    raw_write $p $external ; file mtime $p $mt
+    set ::els_test_mbcount 0
+    set rc [els::save $id 1]
+    list $rc [info exists ::els::docExtModPause($id)] \
+         [expr {[raw_read $p] eq $external}] $::els_test_mbcount [els::doc_dirty $id]
+} -result {0 1 1 0 1}
 
 test extmod-1.12 {a head-window rewrite of a >cap file still PROMPTS (control: crc-visible)} \
         -setup {els_reset} -cleanup {set ::els::SWAP_FILE_CRC_CAP 16777216} -body {
@@ -753,6 +912,264 @@ test extmod-1.12 {a head-window rewrite of a >cap file still PROMPTS (control: c
     els::save $id
     set ::els_test_mbcount
 } -result 1
+
+# ---- active-document disk-state visibility ------------------------------
+
+test diskstate-1.1 {disk observer distinguishes untitled, normal, changed, missing, and unavailable without reload/modal} \
+        -setup {els_reset} -cleanup {
+            catch {rename ::els::disk_stat_probe {}}
+            if {[llength [info commands ::els::disk_stat_probe_real]]} {
+                rename ::els::disk_stat_probe_real ::els::disk_stat_probe
+            }
+        } -body {
+    set untitled [els::disk_probe]
+    set p [els_tmpfile diskstate_transitions.txt "alpha\n"]
+    set id [els::open $p]
+    set normal $::els::docDiskState($id)
+    set before [[els::W $id] get 1.0 "end - 1 char"]
+    raw_write $p "omega\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set ::els_test_mbcount 0
+    set changed [els::disk_probe $id]
+    set after [[els::W $id] get 1.0 "end - 1 char"]
+    file delete -force $p
+    set missing [els::disk_probe $id]
+    rename ::els::disk_stat_probe ::els::disk_stat_probe_real
+    proc ::els::disk_stat_probe {path} {
+        return [dict create state unavailable error "injected sharing denial"]
+    }
+    set unavailable [els::disk_probe $id]
+    list $untitled $normal $changed $missing $unavailable \
+         [expr {$before eq $after}] $::els_test_mbcount \
+         [info exists ::els::docExtModPause($id)]
+} -result {untitled normal changed missing unavailable 1 0 0}
+
+test diskstate-1.2 {read-only changes are reflected conservatively without content reads} \
+        -setup {els_reset} -cleanup {
+            if {[info exists p] && [file exists $p]} { catch {file attributes $p -readonly 0} }
+        } -body {
+    set p [els_tmpfile diskstate_readonly.txt "read me\n"]
+    set id [els::open $p]
+    file attributes $p -readonly 1
+    set ro [els::disk_probe $id]
+    file attributes $p -readonly 0
+    set normal [els::disk_probe $id]
+    list $ro $normal
+} -result {readonly normal}
+
+test diskstate-1.3 {forced checks hash each new metadata observation and back off repeats} \
+        -setup {
+            els_reset
+            set p [els_tmpfile diskstate_cache.txt "alpha\n"]
+            set id [els::open $p]
+            rename ::els::file_sig_probe ::els::file_sig_probe_real
+            set ::disk_deep_calls 0
+            proc ::els::file_sig_probe {path} {
+                incr ::disk_deep_calls
+                tailcall ::els::file_sig_probe_real $path
+            }
+        } -cleanup {
+            catch {rename ::els::file_sig_probe {}}
+            if {[llength [info commands ::els::file_sig_probe_real]]} {
+                rename ::els::file_sig_probe_real ::els::file_sig_probe
+            }
+            unset -nocomplain ::disk_deep_calls
+        } -body {
+    els::disk_probe $id
+    els::disk_probe $id
+    set unchangedCalls $::disk_deep_calls
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set same1 [els::disk_probe $id]
+    set sameCalls1 $::disk_deep_calls
+    set same2 [els::disk_probe $id]
+    set sameCalls2 $::disk_deep_calls
+    set priorMtime [file mtime $p]
+    raw_write $p "omega\n"
+    file mtime $p [expr {$priorMtime + 5}]
+    set changed1 [els::disk_probe $id]
+    set changedCalls1 $::disk_deep_calls
+    set changed2 [els::disk_probe $id]
+    list $unchangedCalls $same1 $sameCalls1 $same2 $sameCalls2 \
+         $changed1 $changedCalls1 $changed2 $::disk_deep_calls
+} -result {1 normal 2 normal 2 changed 3 changed 3}
+
+test diskstate-1.4 {a metadata-changed large file takes the cheap observer path and is never deep-read} \
+        -setup {
+            els_reset
+            set ::els::DISK_DEEP_PROBE_CAP 32
+            set p [els_tmpfile diskstate_large.txt [string repeat A 200]]
+            set id [els::open $p]
+            rename ::els::file_sig_probe ::els::file_sig_probe_real
+            set ::disk_deep_calls 0
+            proc ::els::file_sig_probe {path} {
+                incr ::disk_deep_calls
+                error "large-file observer must not read a signature"
+            }
+        } -cleanup {
+            set ::els::DISK_DEEP_PROBE_CAP 16777216
+            catch {rename ::els::file_sig_probe {}}
+            if {[llength [info commands ::els::file_sig_probe_real]]} {
+                rename ::els::file_sig_probe_real ::els::file_sig_probe
+            }
+            unset -nocomplain ::disk_deep_calls
+        } -body {
+    raw_write $p "[string repeat A 99]B[string repeat A 100]"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set a [els::disk_probe $id]
+    set b [els::disk_probe $id]
+    list $a $b $::disk_deep_calls
+} -result {changed changed 0}
+
+test diskstate-1.8 {forced activation detects a same-size same-mtime small-file rewrite} \
+        -setup {els_reset} -body {
+    set p [els_tmpfile diskstate_same_meta.txt "alpha\n"]
+    set id [els::open $p] ; set mt [file mtime $p]
+    raw_write $p "omega\n" ; file mtime $p $mt
+    list [els::disk_probe $id forced] $::els::docDiskState($id)
+} -result {changed changed}
+
+test diskstate-1.9 {repeated forced checks back off deep I/O and timer polling never deep-reads} \
+        -setup {
+            els_reset
+            set p [els_tmpfile diskstate_backoff.txt "alpha\n"]
+            set id [els::open $p]
+            rename ::els::file_sig_probe ::els::file_sig_probe_real
+            set ::disk_deep_calls 0
+            proc ::els::file_sig_probe {path} {
+                incr ::disk_deep_calls
+                tailcall ::els::file_sig_probe_real $path
+            }
+            set ::els::DISK_DEEP_BACKOFF_MS 60000
+        } -cleanup {
+            els::disk_watch_deactivate
+            catch {rename ::els::file_sig_probe {}}
+            if {[llength [info commands ::els::file_sig_probe_real]]} {
+                rename ::els::file_sig_probe_real ::els::file_sig_probe
+            }
+            unset -nocomplain ::disk_deep_calls ::disk_timer_fired
+        } -body {
+    els::disk_probe $id forced
+    els::disk_probe $id forced
+    set forcedCalls $::disk_deep_calls
+    set ::disk_timer_fired 0 ; after 0 {set ::disk_timer_fired 1}
+    set ::els::disk_watch_active 1
+    els::disk_watch_tick
+    update
+    list $forcedCalls $::disk_deep_calls $::disk_timer_fired
+} -result {1 1 1}
+
+test diskstate-1.10 {all automatic observer modes skip obvious UNC paths without stat or hash I/O} \
+        -setup {
+            els_reset
+            rename ::els::disk_stat_probe ::els::disk_stat_probe_real
+            set ::disk_stat_calls 0
+            proc ::els::disk_stat_probe {path} { incr ::disk_stat_calls ; error "must not poll UNC" }
+            rename ::els::file_sig_probe ::els::file_sig_probe_real
+            set ::disk_hash_calls 0
+            proc ::els::file_sig_probe {path} { incr ::disk_hash_calls ; error "must not hash UNC" }
+        } -cleanup {
+            catch {rename ::els::disk_stat_probe {}}
+            if {[llength [info commands ::els::disk_stat_probe_real]]} {
+                rename ::els::disk_stat_probe_real ::els::disk_stat_probe
+            }
+            catch {rename ::els::file_sig_probe {}}
+            if {[llength [info commands ::els::file_sig_probe_real]]} {
+                rename ::els::file_sig_probe_real ::els::file_sig_probe
+            }
+            unset -nocomplain ::disk_stat_calls ::disk_hash_calls
+        } -body {
+    set id $::els::active
+    set ::els::docPath($id) {//offline/share/file.txt}
+    set forced [els::disk_probe $id forced]
+    set timer [els::disk_probe $id timer]
+    list $forced $timer $::disk_stat_calls $::disk_hash_calls
+} -result {unavailable unavailable 0 0}
+
+test diskstate-1.11 {remote detector distinguishes ordinary and extended UNC from local device paths} \
+        -setup {els_reset} -body {
+    list [els::remote_path {//server/share/file.txt}] \
+         [els::remote_path {\\server\share\file.txt}] \
+         [els::remote_path {//?/UNC/server/share/file.txt}] \
+         [els::remote_path {\\?\UNC\server\share\file.txt}] \
+         [els::remote_path {//?/C:/local/file.txt}] \
+         [els::remote_path {\\?\C:\local\file.txt}] \
+         [els::remote_path {//./pipe/name}] \
+         [els::remote_path {\\.\pipe\name}]
+} -result {1 1 1 1 0 0 0 0}
+
+test diskstate-1.5 {tab switches probe immediately; the timer runs only while the app is active} \
+        -setup {
+            els_reset
+            set p1 [els_tmpfile diskstate_watch1.txt "one\n"]
+            set p2 [els_tmpfile diskstate_watch2.txt "two\n"]
+            set id1 [els::open $p1]
+            set id2 [els::open $p2]
+            els::disk_watch_deactivate
+            rename ::els::disk_stat_probe ::els::disk_stat_probe_real
+            set ::disk_stat_calls 0
+            proc ::els::disk_stat_probe {path} {
+                incr ::disk_stat_calls
+                tailcall ::els::disk_stat_probe_real $path
+            }
+            set ::els::DISK_WATCH_MS 15
+        } -cleanup {
+            els::disk_watch_deactivate
+            set ::els::DISK_WATCH_MS 5000
+            catch {rename ::els::disk_stat_probe {}}
+            if {[llength [info commands ::els::disk_stat_probe_real]]} {
+                rename ::els::disk_stat_probe_real ::els::disk_stat_probe
+            }
+            unset -nocomplain ::disk_stat_calls ::disk_wait
+        } -body {
+    els::switch_to $id1
+    els::switch_to $id2
+    set switchCalls $::disk_stat_calls
+    set ::disk_wait 0 ; after 45 {set ::disk_wait 1} ; vwait ::disk_wait
+    set inactiveCalls $::disk_stat_calls
+    els::disk_watch_activate
+    set activationCalls $::disk_stat_calls
+    set ::disk_wait 0 ; after 55 {set ::disk_wait 1} ; vwait ::disk_wait
+    set activeCalls $::disk_stat_calls
+    els::disk_watch_deactivate
+    set stoppedAt $::disk_stat_calls
+    set ::disk_wait 0 ; after 40 {set ::disk_wait 1} ; vwait ::disk_wait
+    list $switchCalls $inactiveCalls [expr {$activationCalls == $inactiveCalls + 1}] \
+         [expr {$activeCalls > $activationCalls}] \
+         [expr {$::disk_stat_calls == $stoppedAt}] \
+         $::els::disk_watch_after
+} -result {2 2 1 1 1 {}}
+
+test diskstate-1.6 {successful save and reload immediately rebase the visible disk state} \
+        -setup {els_reset} -body {
+    set p [els_tmpfile diskstate_save_reload.txt "one\n"]
+    set id [els::open $p]
+    raw_write $p "two\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set changed1 [els::disk_probe $id]
+    set w [els::W $id]
+    $w delete 1.0 end ; $w insert end "mine\n"
+    set ::els_test_mbanswer yes ; set ::els_test_mbcount 0
+    set saved [els::save $id]
+    set afterSave $::els::docDiskState($id)
+    raw_write $p "disk\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set changed2 [els::disk_probe $id]
+    set reloaded [els::reload_from_disk $id]
+    list $changed1 $saved $afterSave $::els_test_mbcount $changed2 $reloaded \
+         $::els::docDiskState($id) [$w get 1.0 1.end]
+} -result {changed 1 normal 1 changed 1 normal disk}
+
+test diskstate-1.7 {Save As moves an untitled document to the normal on-disk state} \
+        -setup {els_reset} -body {
+    set id $::els::active
+    [els::W $id] insert end "first save"
+    set before [els::disk_probe $id]
+    set ::els_test_savefile [file join $::ELS_TMP diskstate_saveas.txt]
+    set saved [els::saveas]
+    list $before $saved $::els::docDiskState($id) \
+         [els::same_path $::els::docPath($id) $::els_test_savefile] \
+         [.sb.disk cget -text]
+} -result {untitled 1 normal 1 {On disk}}
 
 # ---- P2-c: large-file open guard + bounded undo (Wave 2) -------------------
 # The threshold is lowered per-test (a real 25 MB fixture would be slow + litter);
@@ -772,17 +1189,28 @@ test bigfile-1.2 {accepting the large-file prompt opens the file} -setup {els_re
         -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
     set p [els_tmpfile big2.txt "large content here\n"]
     set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbanswer yes
+    els::deferred_add $p
     set id [els::open $p]
-    list [expr {$id ne ""}] [els::same_path $::els::docPath($id) $p]
-} -result {1 1}
+    list [expr {$id ne ""}] [els::same_path $::els::docPath($id) $p] \
+         [llength $::els::deferred_files]
+} -result {1 1 0}
 
-test bigfile-1.3 {the quiet path (session restore / recovery) opens a large file WITHOUT prompting} -setup {els_reset} \
+test bigfile-1.3 {a quiet large-file open is persisted and deduplicated without prompting or loading} -setup {els_reset} \
         -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
     set p [els_tmpfile big3.txt "restored large file\n"]
     set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbcount 0
-    set id [els::open $p 1]                 ;# quiet=1
-    list [expr {$id ne ""}] $::els_test_mbcount
-} -result {1 0}
+    set before [llength $::els::docs]
+    set id1 [els::open $p 1]
+    set id2 [els::open $p 1]
+    set stored [raw_read [els::deferred_path]]
+    set ::els::deferred_files {}
+    els::deferred_load
+    list $id1 $id2 $::els_test_mbcount \
+         [expr {[llength $::els::docs] == $before}] \
+         [llength $::els::deferred_files] \
+         [els::same_path [lindex $::els::deferred_files 0] $p] \
+         [dict get $stored schema]
+} -result {{} {} 0 1 1 1 1}
 
 test bigfile-1.4 {a normal (under-threshold) open never prompts} -setup {els_reset} -body {
     set p [els_tmpfile smallish.txt "small\n"]
@@ -807,6 +1235,423 @@ test bigfile-1.6 {a throw during decode/insert (e.g. OOM) restores the busy curs
     catch {. configure -cursor ""}
 } -result {{} {}}
 
+test bigfile-1.7 {explicit deferred-open consent has no second prompt or absolute ceiling} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile big7.txt [string repeat x 5000]]
+    set ::els::OPEN_WARN_SIZE 1
+    els::deferred_add $p
+    set ::els_test_mbcount 0
+    set id [els::open $p 0 0 1]
+    list [expr {$id ne ""}] $::els_test_mbcount \
+         [llength $::els::deferred_files] \
+         [[els::W $id] count -chars 1.0 "end - 1 char"]
+} -result {1 0 0 5000}
+
+test bigfile-1.8 {session restore defers a large file without duplicating it as pending} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile big8.txt "large restored body\n"]
+    set ::els::OPEN_WARN_SIZE 5
+    set ::els::session_files [list $p]
+    set ::els_test_mbcount 0
+    set restored [els::session_restore]
+    list $restored $::els_test_mbcount [llength $::els::session_pending] \
+         [llength $::els::deferred_files] [els::deferred_contains $p]
+} -result {0 0 0 1 1}
+
+test bigfile-1.9 {timer-driven handoff consumes its spool but defers a large file without a modal} \
+        -setup {els_reset} -cleanup {
+            set ::els::OPEN_WARN_SIZE 26214400
+            catch {file delete -force [file join $::ELS_TMP handoff]}
+        } -body {
+    set p [els_tmpfile big9.txt "large handoff body\n"]
+    set ::els::OPEN_WARN_SIZE 5
+    els::handoff_send $::els::config_path [list $p]
+    set hd [file join $::ELS_TMP handoff]
+    set ::els_test_mbcount 0
+    els::handoff_drain
+    list $::els_test_mbcount [llength [glob -nocomplain -directory $hd *.open]] \
+         [els::deferred_contains $p] \
+         [expr {[lsearch -exact [lmap id $::els::docs {set ::els::docPath($id)}] [file normalize $p]] < 0}]
+} -result {0 0 1 1}
+
+test bigfile-1.10 {a deferred-add write failure rolls memory back and reports failure} -setup {
+    els_reset
+    set p1 [els_tmpfile defer_txn_keep.txt "keep\n"]
+    set p2 [els_tmpfile defer_txn_add.txt "add\n"]
+    els::deferred_add $p1
+    set ::els::OPEN_WARN_SIZE 1
+    set beforeDisk [raw_read [els::deferred_path]]
+    rename ::els::write_atomic ::els::write_atomic_real
+    set ::deferred_write_calls 0
+    proc ::els::write_atomic {args} { incr ::deferred_write_calls ; return "injected queue write failure" }
+} -cleanup {
+    set ::els::OPEN_WARN_SIZE 26214400
+    catch {rename ::els::write_atomic {}}
+    if {[llength [info commands ::els::write_atomic_real]]} {
+        rename ::els::write_atomic_real ::els::write_atomic
+    }
+    unset -nocomplain ::deferred_write_calls
+} -body {
+    set rc [els::deferred_add $p2]
+    set beforeDocs [llength $::els::docs]
+    set quietRc [els::open $p2 1]
+    list $rc $quietRc $::deferred_write_calls [llength $::els::deferred_files] \
+         [els::deferred_contains $p1] [els::deferred_contains $p2] \
+         [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
+         [expr {[llength $::els::docs] == $beforeDocs}] \
+         [string match "*not opened*" [.sb.name cget -text]]
+} -result {0 {} 2 1 1 0 1 1 1}
+
+test bigfile-1.11 {a deferred-remove write failure retains the durable entry even after a successful open} -setup {
+    els_reset
+    set p [els_tmpfile defer_txn_remove.txt "large queued body\n"]
+    set ::els::OPEN_WARN_SIZE 1
+    els::deferred_add $p
+    rename ::els::write_atomic ::els::write_atomic_real
+    set ::deferred_write_calls 0
+    proc ::els::write_atomic {args} { incr ::deferred_write_calls ; return "injected queue write failure" }
+} -cleanup {
+    set ::els::OPEN_WARN_SIZE 26214400
+    catch {rename ::els::write_atomic {}}
+    if {[llength [info commands ::els::write_atomic_real]]} {
+        rename ::els::write_atomic_real ::els::write_atomic
+    }
+    unset -nocomplain ::deferred_write_calls
+} -body {
+    set removeRc [els::deferred_remove_many [list $p]]
+    set id [els::open $p 0 0 1]
+    set disk [raw_read [els::deferred_path]]
+    list $removeRc [expr {$id ne ""}] $::deferred_write_calls \
+         [els::deferred_contains $p] \
+         [els::same_path [lindex [dict get $disk files] 0] $p]
+} -result {0 1 2 1 1}
+
+test bigfile-1.14 {multi-entry deferred removal rolls memory and disk back on write failure} -setup {
+    els_reset
+    set p1 [els_tmpfile defer_many_1.txt "one\n"]
+    set p2 [els_tmpfile defer_many_2.txt "two\n"]
+    set p3 [els_tmpfile defer_many_3.txt "three\n"]
+    foreach p [list $p1 $p2 $p3] { els::deferred_add $p }
+    set beforeMem $::els::deferred_files
+    set beforeDisk [raw_read [els::deferred_path]]
+    rename ::els::write_atomic ::els::write_atomic_real
+    proc ::els::write_atomic {args} { return "injected multi-remove failure" }
+} -cleanup {
+    catch {rename ::els::write_atomic {}}
+    if {[llength [info commands ::els::write_atomic_real]]} {
+        rename ::els::write_atomic_real ::els::write_atomic
+    }
+} -body {
+    set rc [els::deferred_remove_many [list $p1 $p2]]
+    list $rc [expr {$::els::deferred_files eq $beforeMem}] \
+         [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
+         [lmap p [list $p1 $p2 $p3] {els::deferred_contains $p}]
+} -result {0 1 1 {1 1 1}}
+
+test deferred-state-1.1 {invalid UTF-8, schema, and exact parse are quarantined and reported} \
+        -setup {els_reset} -body {
+    set path [els::deferred_path]
+    set outcomes {}
+    foreach payload [list "\xff" \
+            [encoding convertto utf-8 [dict create schema 2 files {}]] \
+            [encoding convertto utf-8 [dict create schema 1 files {} extra x]] \
+            [encoding convertto utf-8 {schema 1 files \{}]] {
+        raw_write $path $payload
+        els::deferred_load
+        lappend outcomes [list [file exists $path] $::els::deferred_blocked \
+            [llength $::els::deferred_files] [expr {$::els::deferred_notice ne ""}]]
+    }
+    list $outcomes [llength [glob -nocomplain "$path.corrupt-*"]]
+} -result {{{0 0 0 1} {0 0 0 1} {0 0 0 1} {0 0 0 1}} 4}
+
+test deferred-state-1.2 {failed corruption quarantine blocks every overwrite of the evidence} \
+        -setup {
+            els_reset
+            set path [els::deferred_path]
+            raw_write $path "\xffbroken"
+            set before [raw_read $path]
+            rename ::els::deferred_quarantine ::els::deferred_quarantine_real
+            proc ::els::deferred_quarantine {path} { error "injected rename denial" }
+        } -cleanup {
+            catch {rename ::els::deferred_quarantine {}}
+            if {[llength [info commands ::els::deferred_quarantine_real]]} {
+                rename ::els::deferred_quarantine_real ::els::deferred_quarantine
+            }
+        } -body {
+    els::deferred_load
+    set add [els::deferred_add [els_tmpfile blocked_deferred.txt "body\n"]]
+    list $::els::deferred_blocked $add [expr {[raw_read $path] eq $before}] \
+         [llength $::els::deferred_files]
+} -result {1 0 1 0}
+
+test deferred-state-1.3 {a directory at the state-file path is corrupt state and is quarantined intact} \
+        -setup {els_reset} -body {
+    set path [els::deferred_path]
+    file mkdir $path
+    raw_write [file join $path evidence.txt] "preserve me"
+    els::deferred_load
+    set quarantined [glob -nocomplain "$path.corrupt-*"]
+    list [file exists $path] $::els::deferred_blocked \
+         [expr {$::els::deferred_notice ne ""}] [llength $quarantined] \
+         [expr {[llength $quarantined] == 1 &&
+                [file isdirectory [lindex $quarantined 0]] &&
+                [raw_read [file join [lindex $quarantined 0] evidence.txt]] eq "preserve me"}]
+} -result {0 0 1 1 1}
+
+test deferred-state-1.4 {an unpaired surrogate cannot be lossy-encoded and add rolls memory and disk back} \
+        -setup {els_reset} -body {
+    set keep [els_tmpfile deferred_encoding_keep.txt "keep\n"]
+    els::deferred_add $keep
+    set beforeMem $::els::deferred_files
+    set beforeDisk [raw_read [els::deferred_path]]
+    # A lexical UNC spelling keeps this deliberately malformed Tcl string away
+    # from filesystem normalization; strict UTF-8 must reject it, never replace it.
+    set malformed "//offline/share/[format %c 0xD800].txt"
+    set added [els::deferred_add $malformed]
+    list $added [expr {$::els::deferred_files eq $beforeMem}] \
+         [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
+         [els::deferred_contains $keep]
+} -result {0 1 1 1}
+
+test quiet-open-1.1 {quiet startup-style open failure is logged, nonmodal, and not counted as opened} \
+        -setup {els_reset} -body {
+    set missing [file join $::ELS_TMP definitely-missing-open.txt]
+    catch {file delete -force $missing}
+    set ::els_test_mbcount 0
+    set rc [els::open $missing 1]
+    set log [file join [file dirname $::els::config_path] els.log]
+    list $rc $::els::last_open_outcome $::els_test_mbcount \
+         [string match "*not opened*" [.sb.name cget -text]] \
+         [expr {[file exists $log] && [string match "*quiet open failed*" [raw_read $log]]}]
+} -result {{} failed 0 1 1}
+
+test quiet-open-1.2 {quiet extended-UNC open defers durably before every document stat or read seam} \
+        -setup {
+            els_reset
+            rename ::els::read_preflight_size ::els::read_preflight_size_real
+            rename ::els::_read_binary_prefix ::els::_read_binary_prefix_real
+            set ::unc_preflight_calls 0
+            set ::unc_read_calls 0
+            proc ::els::read_preflight_size {path} { incr ::unc_preflight_calls ; error "must not stat UNC" }
+            proc ::els::_read_binary_prefix {fh limit} { incr ::unc_read_calls ; error "must not read UNC" }
+        } -cleanup {
+            catch {rename ::els::read_preflight_size {}}
+            if {[llength [info commands ::els::read_preflight_size_real]]} {
+                rename ::els::read_preflight_size_real ::els::read_preflight_size
+            }
+            catch {rename ::els::_read_binary_prefix {}}
+            if {[llength [info commands ::els::_read_binary_prefix_real]]} {
+                rename ::els::_read_binary_prefix_real ::els::_read_binary_prefix
+            }
+            unset -nocomplain ::unc_preflight_calls ::unc_read_calls
+        } -body {
+    set p {\\?\UNC\offline\share\quiet.txt}
+    set rc [els::open $p 1]
+    list $rc $::els::last_open_outcome [els::deferred_contains $p] \
+         [file exists [els::deferred_path]] $::unc_preflight_calls $::unc_read_calls \
+         $::els_test_mbcount
+} -result {{} deferred 1 1 0 0 0}
+
+test quiet-open-1.3 {session restore and handoff both route UNC paths to the same zero-probe durable queue} \
+        -setup {
+            els_reset
+            rename ::els::read_preflight_size ::els::read_preflight_size_real
+            rename ::els::_read_binary_prefix ::els::_read_binary_prefix_real
+            set ::unc_preflight_calls 0
+            set ::unc_read_calls 0
+            proc ::els::read_preflight_size {path} { incr ::unc_preflight_calls ; error "must not stat UNC" }
+            proc ::els::_read_binary_prefix {fh limit} { incr ::unc_read_calls ; error "must not read UNC" }
+        } -cleanup {
+            catch {rename ::els::read_preflight_size {}}
+            if {[llength [info commands ::els::read_preflight_size_real]]} {
+                rename ::els::read_preflight_size_real ::els::read_preflight_size
+            }
+            catch {rename ::els::_read_binary_prefix {}}
+            if {[llength [info commands ::els::_read_binary_prefix_real]]} {
+                rename ::els::_read_binary_prefix_real ::els::_read_binary_prefix
+            }
+            catch {file delete -force [file join $::ELS_TMP handoff]}
+            unset -nocomplain ::unc_preflight_calls ::unc_read_calls
+        } -body {
+    set fromSession {//offline/share/session.txt}
+    set fromHandoff {\\?\UNC\offline\share\handoff.txt}
+    set ::els::session_files [list $fromSession]
+    set ::els::restore_session 1
+    set restored [els::session_restore]
+    set sent [els::handoff_send $::els::config_path [list $fromHandoff]]
+    els::handoff_drain
+    list $restored $sent [els::deferred_contains $fromSession] \
+         [els::deferred_contains $fromHandoff] $::unc_preflight_calls \
+         $::unc_read_calls $::els_test_mbcount \
+         [llength [glob -nocomplain -directory [file join $::ELS_TMP handoff] *.open]]
+} -result {0 1 1 1 0 0 0 0}
+
+test bounded-read-1.1 {post-stat growth is caught by threshold+1 and durably deferred when quiet} \
+        -setup {
+            els_reset
+            set ::els::OPEN_WARN_SIZE 5
+            set p [els_tmpfile bounded_growth.txt "0123456789abcdef"]
+            rename ::els::read_preflight_size ::els::read_preflight_size_real
+            proc ::els::read_preflight_size {path} { return 0 }
+        } -cleanup {
+            set ::els::OPEN_WARN_SIZE 26214400
+            catch {rename ::els::read_preflight_size {}}
+            if {[llength [info commands ::els::read_preflight_size_real]]} {
+                rename ::els::read_preflight_size_real ::els::read_preflight_size
+            }
+        } -body {
+    set ::els_test_mbcount 0
+    set rc [els::open $p 1]
+    list $rc $::els::last_open_outcome [els::deferred_contains $p] \
+         $::els_test_mbcount [expr {[llength $::els::docs] == 1 && $::els::docPath($::els::active) eq ""}]
+} -result {{} deferred 1 0 1}
+
+test bounded-read-1.2 {foreground post-stat growth prompts once, then consent has no second cap} \
+        -setup {
+            els_reset
+            set ::els::OPEN_WARN_SIZE 5 ; set ::els::IO_CHUNK 4
+            set p [els_tmpfile bounded_accept.txt "0123456789abcdef"]
+            rename ::els::read_preflight_size ::els::read_preflight_size_real
+            proc ::els::read_preflight_size {path} { return 0 }
+        } -cleanup {
+            set ::els::OPEN_WARN_SIZE 26214400 ; set ::els::IO_CHUNK 1048576
+            catch {rename ::els::read_preflight_size {}}
+            if {[llength [info commands ::els::read_preflight_size_real]]} {
+                rename ::els::read_preflight_size_real ::els::read_preflight_size
+            }
+        } -body {
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer yes
+    set id [els::open $p]
+    list [expr {$id ne ""}] $::els_test_mbcount [els_text $id] $::els::last_open_outcome
+} -result {1 1 0123456789abcdef opened}
+
+test bounded-read-1.3 {all physical document reads are chunk-bounded even after unlimited consent} \
+        -setup {
+            els_reset
+            set ::els::OPEN_WARN_SIZE 5 ; set ::els::IO_CHUNK 4
+            set p [els_tmpfile bounded_chunks.txt "0123456789abcdef"]
+            rename ::els::read_preflight_size ::els::read_preflight_size_real
+            proc ::els::read_preflight_size {path} { return 0 }
+            rename ::read ::_els_real_read
+            set ::bounded_read_sizes {}
+            proc ::read {fh args} {
+                lappend ::bounded_read_sizes $args
+                tailcall ::_els_real_read $fh {*}$args
+            }
+        } -cleanup {
+            catch {rename ::read {}}
+            if {[llength [info commands ::_els_real_read]]} { rename ::_els_real_read ::read }
+            catch {rename ::els::read_preflight_size {}}
+            if {[llength [info commands ::els::read_preflight_size_real]]} {
+                rename ::els::read_preflight_size_real ::els::read_preflight_size
+            }
+            set ::els::OPEN_WARN_SIZE 26214400 ; set ::els::IO_CHUNK 1048576
+            unset -nocomplain ::bounded_read_sizes
+        } -body {
+    set ::els_test_mbanswer yes
+    set id [els::open $p]
+    set bounded 1
+    foreach args $::bounded_read_sizes {
+        if {[llength $args] != 1 || [lindex $args 0] > 4} { set bounded 0 }
+    }
+    list [expr {$id ne ""}] $bounded [expr {[llength $::bounded_read_sizes] > 1}]
+} -result {1 1 1}
+
+test bounded-read-1.4 {large reload decline preserves buffer, raw bytes, signature, and dirty state; accept is uncapped} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile bounded_reload.txt "small"]
+    set id [els::open $p] ; set w [els::W $id]
+    $w insert end " local"
+    set before [list [els_text $id] $::els::docRaw($id) $::els::savedSig($id) [els::doc_dirty $id]]
+    raw_write $p "a much larger external replacement"
+    set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbcount 0 ; set ::els_test_mbanswer no
+    set declined [els::reload_from_disk $id]
+    set afterDecline [list [els_text $id] $::els::docRaw($id) $::els::savedSig($id) [els::doc_dirty $id]]
+    set ::els_test_mbanswer yes
+    set accepted [els::reload_from_disk $id]
+    list $declined [expr {$before eq $afterDecline}] $accepted \
+         [els_text $id] $::els_test_mbcount [els::doc_dirty $id]
+} -result {0 1 1 {a much larger external replacement} 2 0}
+
+test bounded-read-1.5 {queued duplicate only activates an open dirty document and never discards edits} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+    set p [els_tmpfile bounded_reload_deferred.txt "old"]
+    set id [els::open $p] ; [els::W $id] insert end " local edits"
+    raw_write $p "a much larger replacement"
+    set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbcount 0
+    set quiet [els::reload_from_disk $id 1]
+    set queued [els::deferred_contains $p]
+    set before [els_text $id]
+    set opened [els::open $p 0 0 1]
+    list $quiet $queued [expr {$opened eq $id}] [expr {[els_text $id] eq $before}] \
+         [els::doc_dirty $id] [els::deferred_contains $p] $::els_test_mbcount
+} -result {0 1 1 1 1 0 0}
+
+test channel-close-1.1 {open closes its channel when binary configuration/read throws} -setup {
+    els_reset
+    rename ::els::_read_binary_prefix ::els::_read_binary_prefix_real
+    proc ::els::_read_binary_prefix {fh limit} {
+        set ::_els_injected_channel $fh
+        error "injected document read failure"
+    }
+} -cleanup {
+    catch {rename ::els::_read_binary_prefix {}}
+    if {[llength [info commands ::els::_read_binary_prefix_real]]} {
+        rename ::els::_read_binary_prefix_real ::els::_read_binary_prefix
+    }
+    unset -nocomplain ::_els_injected_channel
+} -body {
+    set p [els_tmpfile channel_open.txt "content\n"]
+    set rc [els::open $p]
+    list $rc [expr {$::_els_injected_channel ni [chan names]}] \
+         [string match "*injected document read failure*" \
+              [dict get $::els_test_mbargs -message]]
+} -result {{} 1 1}
+
+test channel-close-1.2 {reload closes its channel on a read failure and leaves the buffer intact} -setup {
+    els_reset
+    set ::_els_reload_path [els_tmpfile channel_reload.txt "original\n"]
+    set ::_els_reload_id [els::open $::_els_reload_path]
+    rename ::els::_read_binary_prefix ::els::_read_binary_prefix_real
+    proc ::els::_read_binary_prefix {fh limit} {
+        set ::_els_injected_channel $fh
+        error "injected reload read failure"
+    }
+} -cleanup {
+    catch {rename ::els::_read_binary_prefix {}}
+    if {[llength [info commands ::els::_read_binary_prefix_real]]} {
+        rename ::els::_read_binary_prefix_real ::els::_read_binary_prefix
+    }
+    unset -nocomplain ::_els_injected_channel ::_els_reload_path ::_els_reload_id
+} -body {
+    set before [els_text $::_els_reload_id]
+    set rc [els::reload_from_disk $::_els_reload_id]
+    list $rc [expr {$::_els_injected_channel ni [chan names]}] \
+         [expr {[els_text $::_els_reload_id] eq $before}]
+} -result {0 1 1}
+
+test channel-close-1.3 {backup_keep closes its source channel when the read throws} -setup {
+    els_reset
+    set ::els::backups 1 ; set ::els::BK_MININT 0
+    set ::_els_backup_path [els_tmpfile channel_backup.txt "original\n"]
+    rename ::els::_read_binary_channel ::els::_read_binary_channel_real
+    proc ::els::_read_binary_channel {fh} {
+        set ::_els_injected_channel $fh
+        error "injected backup read failure"
+    }
+} -cleanup {
+    set ::els::backups 0 ; set ::els::BK_MININT 60
+    catch {rename ::els::_read_binary_channel {}}
+    if {[llength [info commands ::els::_read_binary_channel_real]]} {
+        rename ::els::_read_binary_channel_real ::els::_read_binary_channel
+    }
+    unset -nocomplain ::_els_injected_channel ::_els_backup_path
+} -body {
+    els::backup_keep $::_els_backup_path
+    set backups [glob -nocomplain -directory [els::backup_dir] *.bak]
+    list [expr {$::_els_injected_channel ni [chan names]}] [llength $backups]
+} -result {1 0}
+
 # ---- Wave 2: atomic-save-chain hardening (backup-ring glob escape) ---------
 # (the temp-rescue-on-fallback-failure path needs a locked target -> winfs.test)
 
@@ -824,3 +1669,45 @@ test bkglob-1.2 {a glob-metachar filename's backup ring is FOUND (freshness-skip
     set dir [els::backup_dir]
     llength [glob -nocomplain -directory $dir "[els::glob_escape [els::backup_stem $p]].*.bak"]
 } -result 1
+
+test atomic-1.1 {failed atomic operations retain the complete temp and never call the TRUNC fallback} -setup {
+    els_reset
+    rename els::_write_inplace _els_real_write_inplace
+    rename els::_atomic_rename _els_real_atomic_rename
+    proc els::_atomic_rename {args} { error "simulated atomic rename failure" }
+    if {[llength [info commands els::win_replace_file]]} { rename els::win_replace_file _els_real_win_replace }
+    set ::_els_inplace_calls 0
+    proc els::_write_inplace {args} { incr ::_els_inplace_calls ; return "must not run" }
+} -cleanup {
+    catch {rename els::_write_inplace {}}
+    if {[llength [info commands _els_real_write_inplace]]} { rename _els_real_write_inplace els::_write_inplace }
+    catch {rename els::_atomic_rename {}}
+    if {[llength [info commands _els_real_atomic_rename]]} { rename _els_real_atomic_rename els::_atomic_rename }
+    if {[llength [info commands _els_real_win_replace]]} { rename _els_real_win_replace els::win_replace_file }
+    catch {file delete -force [file join $::ELS_TMP atomic-target.txt]}
+    catch {file delete -force [file join $::ELS_TMP .atomic-rescue.tmp]}
+} -body {
+    set target [file join $::ELS_TMP atomic-target.txt]
+    raw_write $target "original survives"
+    set tmp [file join $::ELS_TMP .atomic-rescue.tmp]
+    file delete -force $tmp
+    set err [els::write_atomic $target "complete new bytes" [file tail $tmp]]
+    list $::_els_inplace_calls [raw_read $target] [file exists $tmp] \
+         [raw_read $tmp] [expr {[string first $tmp $err] >= 0}]
+} -result {0 {original survives} 1 {complete new bytes} 1}
+
+test atomic-1.2 {write_atomic rejects an existing directory for durable and nondurable writes} -setup {
+    els_reset
+} -body {
+    set target [file join $::ELS_TMP atomic-directory-target]
+    catch {file delete -force $target}
+    file mkdir $target
+    set e0 [els::write_atomic $target "payload zero" .dir-target-0.tmp 0]
+    set e1 [els::write_atomic $target "payload one"  .dir-target-1.tmp 1]
+    list [file isdirectory $target] \
+         [string match "*directory*" $e0] [string match "*directory*" $e1] \
+         [file exists [file join $target .dir-target-0.tmp]] \
+         [file exists [file join $target .dir-target-1.tmp]] \
+         [file exists [file join $::ELS_TMP .dir-target-0.tmp]] \
+         [file exists [file join $::ELS_TMP .dir-target-1.tmp]]
+} -result {1 1 1 0 0 0 0}

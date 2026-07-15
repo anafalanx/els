@@ -15,8 +15,8 @@ self-contained native **`els.exe`** (~5.1 MB, zero non-system dependencies): a
 real Windows executable with Tcl/Tk 9 and its C23 extensions compiled in.
 
 The design is opinionated to the point of having few knobs: settings exist only
-where they protect flow, such as wrap, recents, session restore, and where to
-keep `els.conf`. The full rationale (palette, typography, the find/replace
+where they protect flow, such as wrap, recents, and session restore. The full
+rationale (palette, typography, the find/replace
 design, explicit non-goals) is in
 [`docs/DESIGN.md`](docs/DESIGN.md), drawn from a study of EditPad Pro, Sublime
 Text, Zed and iA Writer.
@@ -27,6 +27,12 @@ Grab the latest **`els.exe`** from the [Releases](../../releases) page. It's one
 file, nothing to install. Releases are **code-signed** ("Open Source Developer
 Vincent Vercauteren", via Certum); Windows SmartScreen may still warn on first
 launch until that signature builds reputation — choose **More info → Run anyway**.
+
+els keeps all of its application-managed runtime state beside the executable. Put `els.exe` in a
+directory you can write to and keep its adjacent files and folders with it when
+you move it. It never falls back to the user profile and deliberately ignores
+old profile-stored els state. The complete inventory is under
+[Data safety](#data-safety).
 
 To make els open `.txt` and other plain-text files, open **Help > File
 Associations...** and click **Register els with Windows**. That puts els in
@@ -48,13 +54,24 @@ in **Settings > Default apps**.
   preserves its previous version in a bounded `backups` folder next to
   `els.conf` (a burst of rapid saves keeps one pre-burst copy, not every save).
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
-  state under a flat tab strip; drag a tab to reorder.
+  state under a flat tab strip; drag a tab to reorder. Same-named files gain the
+  shortest distinguishing parent path, untitled documents are numbered, and
+  compact marks show dirty (`•`), recovered (`↺`) and decode-lossy (`�`) state.
+  The active tab always remains visible; the **Tabs** menu and right-hand
+  overflow button expose every open document.
 - **Drag and drop**: drop files from Explorer onto the text area to open each in
   its own tab.
 - **Find & replace** (Ctrl+F / Ctrl+H): Tcl ARE regex with live match
   highlighting, Match Case / Whole Word / Regex, backreferences, an adapt-case
   replace, search history, a wrapped-search indicator, and a built-in regex
-  reference.
+  reference. Work runs in a cancellable isolated process: the first 5,000
+  matches are highlighted, navigation continues through the global result index
+  (up to its 1,000,000-match safety ceiling), zero-width matches are supported,
+  and Replace All commits atomically as one undo step.
+- **Large-file guard**: an interactive open or reload asks before reading more
+  than 25 MiB. Large files encountered by startup, session restore or handoff
+  are durably queued instead of loaded in the background; inspect them with
+  **File > Deferred Opens...**.
 - **Text commands** (Buffer menu): a curated, undo-atomic set — move lines up/down
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
   dedent (Tab / Shift+Tab), sort / sort-descending / reverse / remove-duplicate
@@ -87,30 +104,64 @@ in **Settings > Default apps**.
 - **Right-click menus**: a context menu on the text (Undo/Cut/Copy/Paste/Select
   All, plus Find, Go to Line, Reload from Disk, Copy Full Path and Open Containing
   Folder) and on tabs (Close, Copy Full Path, Open Containing Folder).
+- **On-disk state**: the status bar distinguishes Not on disk, On disk, Changed
+  on disk, Missing, Unavailable and Read-only. This is an early warning; every
+  save still performs the authoritative conflict check.
 - **Go to line**, **Reload from Disk**, **Always on Top**, window- and zoom-level
-  persistence, portable/profile `els.conf`, the els look and the awl icon.
+  persistence, executable-adjacent `els.conf`, the els look and the awl icon.
 
 ## Data safety
 
 A text editor's one unforgivable failure is losing text. els defends against
-that with a set of mechanisms that work together. They arm as soon as els has a
-place to keep its settings — chosen once, the first time you run it — and need no
-further setup; none of them ever writes into your files on its own.
+that with a set of mechanisms that work together. They arm immediately using
+the writable state directory beside `els.exe`; there is no location chooser or
+profile fallback. Crash snapshots and backups are sidecars, not writes into the
+open document. Automatic document writes happen only when you explicitly turn
+on **File > Auto-save**.
 
-**Atomic save.** els avoids overwriting a file in place. A save first writes the
-complete new content to a temporary file in the same folder; only when every
-byte is on disk does it swap the temporary file over the original, in one
-atomic step (Windows' `ReplaceFileW`, which also carries over the file's
-permissions, alternate data streams such as the mark-of-the-web, and creation
-time). The old in-place style of saving has a failure window: if the process
-dies or the disk fills after a file has been truncated but before the new
-content lands, the file is simply gone. With atomic save that window does not
-exist. A save either fully succeeds or leaves the original exactly as it was;
-the worst a crash mid-save can cost you is that one save attempt. The lone
-exception is a target els cannot atomically replace — a path over 260
-characters, or a file another program holds locked open — where it falls back
-to a direct in-place write, keeping the temporary copy as a rescue until that
-write finishes.
+**Adjacent state inventory.** In a packaged run the directory containing
+`els.exe` is the one and only state directory; a source run uses the directory
+containing `els.tcl` instead.
+
+- `els.conf` stores settings, window state, recents and session paths.
+- `els.deferred` is the durable queue for large or network files that a quiet
+  startup, restore or handoff refused to read without foreground consent.
+- `swap\` holds crash-recovery snapshots plus short-lived session locks,
+  listening markers and recovery claims.
+- `backups\` holds the bounded previous-version ring when backups are enabled.
+- `handoff\` holds durable open requests while one running window receives work
+  from another launch.
+- `els.log` and its one rotated generation, `els.log.1`, hold diagnostics.
+- `.els-find\` is transient scratch for immutable find snapshots, isolated
+  worker jobs, result indexes and staged replacements.
+
+There is no profile fallback, migration or deletion. If `els.conf` does not yet
+exist but an old **adjacent** `config.tcl` does, els makes a one-time copy to
+`els.conf` and leaves the old file alone; this is the only legacy-state bridge.
+Invalid `els.deferred` data is preserved under a `.corrupt-*` name when it can
+be quarantined, rather than silently overwritten. Atomic writers also create
+short-lived temporary sidecars, and a failed document replacement deliberately
+retains the complete rescue copy beside that document and names it in the error.
+
+**Atomic, durable save.** els never truncates the real file in place. A save
+first writes the complete new content to a temporary file in the same folder,
+then atomically replaces the target. For an existing file the packaged build
+uses Windows' `ReplaceFileW`, which also preserves permissions, alternate data
+streams such as the mark-of-the-web, and creation time when Windows can merge
+them. Metadata-merge errors do not make the atomic replacement itself unsafe,
+so in that rare case the new content wins but some metadata may not carry over.
+A same-directory atomic rename covers a newly created target and the development
+fallback. Only after replacement does els call `FlushFileBuffers` on the final
+target, and it reports the save successful only when that durability check
+succeeds.
+
+If writing the temporary file or replacing the target fails, the original is
+never opened for truncation. A complete temporary copy is retained and named in
+the error when replacement itself fails. A durability error is necessarily
+later: the target may already contain the new bytes, but els still reports the
+save as failed, keeps the tab dirty, and retains its recovery snapshot until a
+retry is confirmed. Thus a lock, long-path edge case, full disk, or device error
+fails safely instead of falling back to a risky direct write.
 
 **Crash recovery.** Between saves, your unsaved changes exist only in memory,
 which is exactly what a crash, a forced reboot, or a power cut destroys. So
@@ -118,14 +169,16 @@ while you edit, els continuously snapshots every modified document into a
 small swap file (in a `swap` folder next to `els.conf`): a snapshot is taken
 about every two seconds, and shortly after each pause in typing. Documents
 with nothing unsaved have no swap file; saving or closing a document removes
-its snapshot, because the file on disk is then the truth. If els ends
+its snapshot only after a confirmed save or an explicit discard, because the
+file on disk is then the truth. If els ends
 abnormally, those snapshots survive. The next start detects them, checks each
 against the current file on disk, and offers everything in one dialog. Each
-item you choose to recover opens as an ordinary unsaved tab, marked
-"(recovered)", for you to inspect and then save or discard. Recovery never
-touches the files themselves; it only brings text back into the editor, and it
-tells you when a file changed on disk since the snapshot so you can decide
-which version wins. Untitled notes that were never saved anywhere are
+item you choose to recover loads into a dirty tab, reusing a matching clean
+session-restored tab where possible, and is marked "(recovered)". Recovered
+content is excluded from auto-save until a foreground save succeeds. Recovery
+never touches the files themselves; it only brings text back into the editor,
+and it tells you when a file changed on disk since the snapshot so you can
+decide which version wins. Untitled notes that were never saved anywhere are
 protected the same way. Snapshots are also crash-consistent themselves: they
 are written atomically and verified with a checksum, so a half-written
 snapshot is discarded rather than trusted.
@@ -143,24 +196,51 @@ instance keeps its own protected snapshots (a live instance's snapshots are
 guarded by a lock that Windows releases only when that process is truly
 gone, so one instance can never "recover" another's open work).
 
+**Large and network files wait for you.** An interactive open or reload asks
+before reading a file larger than 25 MiB; for an open, the decision comes before
+a tab is created. Startup
+arguments, session restore and handoff are deliberately quiet: if they encounter
+a large file—or an obvious UNC/network path that could stall Tk's single UI
+thread—they durably add its path to `els.deferred`. **File > Deferred Opens...**
+shows the full paths and lets you explicitly open or forget selected entries.
+Only an opened/already-open file or a successfully persisted deferred entry
+counts as delivered by the handoff machinery.
+
 **No save is silently lossy.** A document's encoding is preserved on save,
 and some encodings cannot represent every character you can type. When that
-happens, els stops and asks: switch the document to UTF-8 (keeps every
-character), save anyway with substitute characters (your choice is remembered
-for that document until you pick another encoding), or cancel. The dialog
-names the first offending character and where it is.
+happens, els stops and asks: switch a non-UTF-8 document to UTF-8 (which keeps
+all valid Unicode text), save anyway with substitute characters (your choice
+is remembered for that document until you pick another encoding), or cancel.
+If the document is already UTF-8, only substitution or cancellation can handle
+an invalid internal character. The dialog names the first offending character
+and where it is. A clean Save is a true byte-preserving no-op. If opening with
+the wrong encoding already introduced replacement characters and you then edit
+the document, saving requires a separate explicit confirmation; auto-save
+pauses instead.
 
-**Changed on disk.** If another program rewrites a file while you have it open
-— a branch switch, a formatter, a sync client — saving would otherwise quietly
-overwrite that change. els notices before it writes: a manual save stops and
-offers to overwrite, reload the file, or cancel, and auto-save pauses that
-document (with a quiet statusbar note) until you decide. **File > Reload from
-Disk** re-reads the current file from disk at any time.
+**Changed, missing, or unavailable on disk.** The active document's status-bar
+indicator reports **Not on disk**, **On disk**, **Changed on disk**, **Missing**,
+**Unavailable**, or **Read-only**. It is a quiet early-warning observer, not the
+save authority: it never reloads, writes, pauses auto-save or asks a question.
+Automatic observation also performs no I/O against obvious UNC/network paths,
+where an offline server could freeze the UI; explicit open, reload and save are
+the deliberate I/O points.
+
+If another program rewrites or
+removes a file while you have it open — a branch switch, formatter, sync client,
+or disconnected drive — saving would otherwise quietly destroy or recreate
+external state. Every save performs a fresh, full conflict check regardless of
+what the early-warning label currently says. A changed file offers overwrite,
+reload, or cancel; a missing or unreadable target requires explicit confirmation
+before els attempts to recreate or overwrite it. Auto-save never prompts: it
+pauses that document with a quiet statusbar note until a manual save settles the
+conflict. A read-only or locked target fails safely and stays dirty. **File >
+Reload from Disk** re-reads the current file from disk at any time.
 
 **Previous versions (backups).** Saving is the one moment els overwrites
 your data with new content, so a save that replaces an existing file
 first preserves what the file held, as a plain copy in a `backups` folder
-next to `els.conf` (for a portable install that is right next to `els.exe`).
+next to `els.conf`, and therefore next to `els.exe` in a packaged run.
 The folder is bounded, not an archive: a handful of versions per file, a
 burst of rapid saves keeps the version from before the burst rather than
 churning, very large files are skipped, and copies age out after about a
@@ -178,7 +258,8 @@ after you begin editing, when you switch tabs, when the els window loses focus,
 and when you close a file or exit, always through the same atomic save.
 Untitled notes are never auto-saved (no filename is invented; crash recovery
 protects them), a save that would lose characters pauses auto-saving for that
-document until one manual save settles the question, and a failing auto-save
+document until one manual save settles the question, recovered documents and
+disk-state conflicts likewise wait for a manual save, and a failing auto-save
 shows a quiet statusbar note instead of a dialog. With auto-save on, the file
 on disk follows the buffer, so closing without saving stops being a way to
 discard an editing accident; the backups folder above is what makes such an
@@ -198,21 +279,25 @@ Stated plainly so you know before you rely on it:
   manifest still lists Windows 7/8.1 for compatibility and els may launch there,
   but those are untested and path handling degrades without the UTF-8 code page.
   There is no 32-bit build.
+- **A writable directory for `els.exe`.** Settings, the deferred-open queue,
+  recovery, backups, handoff state, find-worker scratch and diagnostics are
+  intentionally stored beside the executable, never in the user profile. A
+  read-only application directory prevents those facilities from persisting;
+  move els and its adjacent state to a writable directory.
 - **Not accessible to screen readers.** els draws its own text surface on Tk,
   which does not expose UI Automation to assistive technology, so Narrator, NVDA
   and JAWS cannot read or navigate a document's text. If you rely on a screen
   reader, els is not a usable editor for you today, and that is an honest gap
-  rather than a setting to find. Text zoom (Ctrl `+` / `-` / `0`) and a fixed
-  high-legibility theme with a non-blinking caret are what els does offer.
+  rather than a setting to find. els does not add an assistive-technology layer.
 - **Single, fixed appearance.** No settings UI: colours, fonts and the caret are
   not configurable by design (see [docs/DESIGN.md](docs/DESIGN.md)). No syntax
   highlighting and no minimap.
 
 ## Toolchain & tasks
 
-`els` is hosted under `C:\z\_els`. z is the public front door: the
+`els` is hosted under `C:\dev\_els`. z is the public front door: the
 committed `z.json` drives `tools/tasks.tcl` with z's `tclsh90`, and els builds
-against z's shared runtime payloads under `<z>/r` — it carries no
+against z's shared runtime payloads under `<z>/.z/r` — it carries no
 project-local toolchain. No project-local launcher script is tracked.
 
 ```
@@ -221,35 +306,62 @@ z run [file...]   # launch the editor
 z test            # in-process test suite (tcltest + Tk event generate)
 z shot out.png    # screenshot the editor (twapi, all-Tcl, no AutoIt)
 z readme-shots    # regenerate the README screenshots
-z probe-exe       # process-level startup checks for the built exe (dist/els.exe)
-z build           # build the native exe -> dist/els.exe
-z build-ext       # compile src/*.c C23 extensions -> build/*.dll
+z probe-exe [exe] # process-level startup checks (defaults to released dist/els.exe)
+z build [out]     # development build -> build/els-dev.exe (or another build/*.exe)
+z release-check   # fail-closed clean build/test/probe -> dist/els-unsigned.exe
+z sign            # verify, sign, re-probe and promote -> dist/els.exe
+z pecheck         # verify PE/manifest/mitigation/certificate-table policy
+                  # (z sign separately verifies Authenticode identity + timestamp)
+z build-ext       # compile the five loadable C23 modules -> build/*.dll
+z native-startup-check # prove native initialization failures stop before Tcl UI
 z check           # check z's runtime payloads (--deep runs functional probes)
 z tasks env       # show the resolved payload roots
 ```
 
 From the z workspace root, use `z in els <command>`, for example `z in els test`.
 
-`z build` produces one self-contained native exe (~5.1 MB, zero non-system
+`z build` produces one self-contained native development exe (~5.1 MB, zero non-system
 DLLs): a real Windows PE with our own C23 `WinMain`, Tcl + Tk + the charset
 detector statically linked in, and `els.tcl` + the Tcl/Tk script libraries riding
 inside an appended `zipfs` image (`els.tcl` itself is unchanged). The PE icon,
 manifest, and version info are baked in via `windres`.
 
-Build artifacts have exactly one home: **`dist/els.exe`** is the final exe (the
-one you run, and the one a release ships), while `build/` holds compiler
-intermediates only and the repo root holds no binaries. A rebuild stages the new
-exe and swaps it into place, so it works even while `dist/els.exe` is running
-(the old copy is parked as `els.exe.old` until the next build; restart els to
-pick up the new one). Users only need the released `els.exe`; developers need
-the repo plus a hydrated z workspace tree (`<z>/r`).
+Development and release artifacts are deliberately separate. `z build` writes
+`build/els-dev.exe` by default; an optional output must still be an `.exe` below
+`build/`. **`dist/els.exe` is release-only** and is written solely by the signing
+gate. A rebuild stages the new development exe before replacing it and preserves
+the previous one if replacement fails. Users only need the released `els.exe`;
+developers need the repo plus a hydrated z workspace tree (`<z>/.z/r`).
+
+Release artifacts do not come directly from that development build. A clean
+`z release-check` runs the complete no-skip test suite, native checks, packaging
+and process probes, a forced native-initialization failure check, PE policy
+checks, byte-exact embedded source/runtime/license verification, and a
+source-state consistency check before publishing the fixed
+`dist/els-unsigned.exe` set with `.sha256` and `.provenance.txt` sidecars. The
+provenance is re-read and recomputed from the artifact, clean Git tree, compiler
+and header trees, exact linker map and link inputs, packaging tools, and notice
+sources before promotion. `z sign`
+accepts only that verified set (or its `build/release-check` no-promotion twin),
+performs a clean rebuild and requires its unsigned executable and recorded link
+evidence to reproduce exactly before any signing operation,
+requires the source-pinned publisher
+**Open Source Developer Vincent Vercauteren** (optionally tightened with
+`ELS_SIGN_CERT_SHA1`), requires a verified RFC 3161 timestamp, re-runs PE and
+process checks on the signed candidate, then promotes and post-verifies the
+executable and both sidecars at the fixed `dist/els.exe` path. Publication is
+sidecars-first and executable-last, with an on-disk journal that restores the
+previous release-set state after an interrupted process or reconciles a completed
+publication on the next attempt. The executable
+embeds the els MIT license plus the applicable Tcl, Tk, MinGW-w64 runtime, GCC
+GPLv3/runtime-exception, zlib, and LibTomMath notices verbatim from their source files.
 
 The project uses **only C and Tcl 9** for durable tooling. Avoid adding bash,
 PowerShell, Python, `.bat`, `.cmd`, or `.ps1` glue; use `z` commands
 instead. See
 [`toolchain.md`](toolchain.md) for the full setup.
 
-z's shared runtime (`<z>/r`) provides Tcl/Tk 9, the UCRT64 gcc/C23, twapi,
+z's shared runtime (`<z>/.z/r`) provides Tcl/Tk 9, the UCRT64 gcc/C23, twapi,
 the static Tcl/Tk libraries, the packaging script libraries, and the Tcl/Tk 9
 manual. `z check` reports the components els uses; `z check --deep` runs
 functional checks. There are no project-local fetch/prep tasks.
@@ -257,9 +369,13 @@ functional checks. There are no project-local fetch/prep tasks.
 ## C extensions (C23)
 
 els can drop into **C23** for hot paths or to bind a C library, exposed to Tcl
-as ordinary commands. The native `els.exe` **statically links its extension in**
-(via the `Tcl_AppInit` in `src/els_main.c`); in development each `src/*.c` also
-builds as a stubs `.dll` (`z build-ext`; see `src/elsx.c`). A real example,
+as ordinary commands. The product build compiles `src/icudet.c`, `src/winfs.c`,
+and `src/windrop.c` as ordinary static objects and registers them from the
+`Tcl_AppInit` in `src/els_main.c`; `src/els_main.c` is the executable entry point,
+not a loadable module. For development and tests, `z build-ext` separately builds
+the five loadable modules (`cap`, `elsx`, `icudet`, `winfs`, and `windrop`) as Tcl
+stubs DLLs under `build/`. `cap` and `elsx` are development/test helpers and are
+not linked into the product. A real product example,
 **`src/icudet.c`**, dynamically loads the Windows system ICU (`icu.dll`) to expose
 its charset detector to Tcl (the basis of els's encoding auto-detection); it is
 compiled into the shipped exe together with **`src/winfs.c`**, the Win32 helper
@@ -273,7 +389,11 @@ the Explorer drag-and-drop handler. Tests live in `tests/elsx.test` and
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.92**: a complete editor, polishing toward 1.0.
+it, or build it yourself. Currently **v0.93**: a complete editor, polishing toward 1.0.
 
-Built on **Tcl/Tk 9.0.3**. © 2026 Vincent Vercauteren. **MIT** licensed; see
-[`LICENSE`](LICENSE).
+Built on **Tcl/Tk 9.0.3**. The About dialog acknowledges Tcl/Tk 9, MinGW-w64,
+GCC, zlib and LibTomMath, with thanks to their maintainers and communities.
+© 2026 Vincent Vercauteren. **MIT** licensed; see [`LICENSE`](LICENSE).
+Released executables keep the full legal text in embedded `LICENSE.txt` and
+`THIRD-PARTY-NOTICES.txt`, including the verbatim Tcl, Tk, MinGW-w64 runtime,
+GCC GPLv3/runtime-exception, zlib, and LibTomMath terms.

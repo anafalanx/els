@@ -161,14 +161,64 @@ test recover-apply-1.1 {recover loads a dirty buffer, applies record metadata, n
     set p [file join $::ELS_TMP doc.txt] ; raw_write $p "ON DISK\n"
     set sig [els::file_sig $p]
     set f [forge_swap "host-9-dead" d0 "RECOVERED BODY" $p $sig cp1252 crlf]
-    els::recover_apply [list $f [els::swap_read $f] match] recover
+    set rc [els::recover_apply [list $f [els::swap_read $f] match] recover]
     set id ""
     foreach d $::els::docs {
         if {[info exists ::els::docPath($d)] && [els::same_path $::els::docPath($d) $p]} { set id $d }
     }
-    list [els::doc_dirty $id] [els_text $id] [raw_read $p] \
-         [file exists $f] $::els::docEnc($id) $::els::docEol($id)
-} -result [list 1 {RECOVERED BODY} "ON DISK\n" 0 cp1252 crlf]
+    set replacement [els::swap_path [els::session_id] $id]
+    list $rc [els::doc_dirty $id] [els_text $id] [raw_read $p] \
+         [file exists $f] [file exists $replacement] \
+         [els::recover_replacement_valid $id] \
+         [info exists ::els::docRecoverySource($id)] \
+         $::els::docEnc($id) $::els::docEol($id)
+} -result [list 1 1 {RECOVERED BODY} "ON DISK\n" 0 1 1 0 cp1252 crlf]
+
+test recover-apply-1.1a {a failed replacement swap retains the orphan until a later verified retry} -setup {
+    recover_reset
+    rename ::els::write_atomic ::els::_recover_real_write_atomic
+    set ::_els_fail_replacement 1
+    proc ::els::write_atomic {path args} {
+        if {$::_els_fail_replacement && \
+                [string match "swp-[els::session_id]-*.swp" [file tail $path]]} {
+            return "forced replacement-swap failure"
+        }
+        return [::els::_recover_real_write_atomic $path {*}$args]
+    }
+} -cleanup {
+    catch {rename ::els::write_atomic {}}
+    if {[llength [info commands ::els::_recover_real_write_atomic]]} {
+        rename ::els::_recover_real_write_atomic ::els::write_atomic
+    }
+    unset -nocomplain ::_els_fail_replacement
+} -body {
+    set f [forge_swap host-replacement-dead d0 "irreplaceable recovered text"]
+    set rc [els::recover_apply [list $f [els::swap_read $f] untitled] recover]
+    set id [lindex [array names ::els::docRecoverySource] 0]
+    set replacement [els::swap_path [els::session_id] $id]
+    set retained [list $rc [file exists $f] [file exists $replacement] \
+        [info exists ::els::docRecoverySource($id)] $::els::swap_suspend \
+        [els::doc_dirty $id] [els_text $id]]
+    set ::_els_fail_replacement 0
+    set retry [els::swap_flush_doc $id]
+    list $retained $retry [file exists $f] [file exists $replacement] \
+         [els::recover_replacement_valid $id] \
+         [info exists ::els::docRecoverySource($id)]
+} -result [list [list 0 1 0 1 0 1 {irreplaceable recovered text}] 1 0 1 1 0]
+
+test recover-apply-1.1b {recovery restores a pre-existing suspend state and retains the orphan while suspended} \
+        -setup recover_reset -body {
+    set f [forge_swap host-suspended-dead d0 "suspended recovery"]
+    set ::els::swap_suspend 1
+    set rc [els::recover_apply [list $f [els::swap_read $f] untitled] recover]
+    set id [lindex [array names ::els::docRecoverySource] 0]
+    set replacement [els::swap_path [els::session_id] $id]
+    set held [list $rc $::els::swap_suspend [file exists $f] \
+        [file exists $replacement] [info exists ::els::docRecoverySource($id)]]
+    set ::els::swap_suspend 0
+    set retry [els::swap_flush_doc $id]
+    list $held $retry [file exists $f] [els::recover_replacement_valid $id]
+} -result {{0 1 1 0 1} 1 0 1}
 
 test recover-apply-1.2 {discard deletes the swap, opens no tab, leaves disk intact} -setup recover_reset -body {
     set p [file join $::ELS_TMP doc2.txt] ; raw_write $p "DISK\n"
@@ -242,11 +292,9 @@ test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies
     list [llength $plans] [expr {[llength $::els::docs] - $before}]
 } -result {3 3}
 
-# ---- F12: the interactive recovery dialog (checkbutton -> Recover/Discard wiring).
-# recover_offer is non-blocking (the buttons drive recover_dialog_apply), so we can
-# build it, toggle the per-row checks, and invoke the buttons directly.  probe_quiet
-# keeps the dialog transparent so nothing flashes on the desktop during the run.
-test recover-dialog-1.1 {Discard checked deletes ONLY the checked swaps; unchecked are left for later (F12)} -setup recover_reset -body {
+# ---- interactive recovery dialog (bounded treeview + selected-item actions).
+# recover_offer is non-blocking, and probe_quiet keeps it transparent throughout.
+test recover-dialog-1.1 {Delete discards ONLY selected swaps; unselected are left for later} -setup recover_reset -body {
     set ::els::probe_quiet 1
     forge_swap host-a-dead d0 "body-a" "" "" ; forge_lock host-a-dead 0
     forge_swap host-b-dead d0 "body-b" "" "" ; forge_lock host-b-dead 0
@@ -254,76 +302,128 @@ test recover-dialog-1.1 {Discard checked deletes ONLY the checked swaps; uncheck
     set ::els::recover_auto 0
     els::recover_offer $plans
     set built [winfo exists .recover]
-    set ::els::_recover_chk(0) 0 ; set ::els::_recover_chk(1) 1   ;# uncheck row 0, keep row 1
-    set f0 [lindex [dict get $::els::_recover_pick 0] 0]
-    set f1 [lindex [dict get $::els::_recover_pick 1] 0]
-    .recover.f.btns.dis invoke                                    ;# Discard checked
+    set tree .recover.f.list.tree
+    $tree selection set r1
+    set f0 [lindex [dict get $::els::_recover_pick r0] 0]
+    set f1 [lindex [dict get $::els::_recover_pick r1] 0]
+    focus -force $tree
+    update
+    event generate $tree <KeyPress-Delete> -when now ; update
     list $built [file exists $f0] [file exists $f1] [winfo exists .recover]
 } -result {1 1 0 0}
 
-test recover-dialog-1.2 {Recover checked opens the checked swap as a tab and consumes its file (F12)} -setup recover_reset -body {
+test recover-dialog-1.2 {Return recovers the selected swap as a tab and consumes its file} -setup recover_reset -body {
     set ::els::probe_quiet 1
     forge_swap host-a-dead d0 "recovered A" "" "" ; forge_lock host-a-dead 0
     set plans [els::recover_scan]
     set ::els::recover_auto 0
     set before [llength $::els::docs]
     els::recover_offer $plans
-    set ::els::_recover_chk(0) 1
-    set f0 [lindex [dict get $::els::_recover_pick 0] 0]
-    .recover.f.btns.rec invoke                                    ;# Recover checked
+    set tree .recover.f.list.tree
+    $tree selection set r0
+    set f0 [lindex [dict get $::els::_recover_pick r0] 0]
+    focus -force $tree
+    update
+    event generate $tree <KeyPress-Return> -when now ; update
     list [expr {[llength $::els::docs] - $before}] [file exists $f0]
 } -result {1 0}
+
+test recover-dialog-1.3 {100 recoveries stay in an eight-row scrollable fixed-height tree} -setup recover_reset -body {
+    set ::els::probe_quiet 1
+    set plans {}
+    for {set i 0} {$i < 100} {incr i} {
+        set branch [expr {$i % 10 == 0 ? "missing" : "untitled"}]
+        if {$i == 1} {
+            set path C:/projects/one/report.txt
+        } elseif {$i == 2} {
+            set path C:/projects/two/report.txt
+        } else {
+            set path ""
+        }
+        set rec [dict create path $path mtime [expr {1700000000 + $i}]]
+        lappend plans [list [file join $::ELS_TMP "fake-$i.swp"] $rec $branch]
+    }
+    set ::els::recover_auto 0
+    els::recover_offer $plans
+    set tree .recover.f.list.tree
+    set result [list [winfo class $tree] [$tree cget -height] \
+        [llength [$tree children {}]] [llength [$tree selection]] \
+        [winfo class .recover.f.list.vs] [wm resizable .recover] \
+        [expr {[lindex [$tree item r1 -values] 0] ne [lindex [$tree item r2 -values] 0]}] \
+        [expr {[string first one [lindex [$tree item r1 -values] 0]] >= 0 \
+            && [string first two [lindex [$tree item r2 -values] 0]] >= 0}]]
+    els::recover_dialog_close .recover
+    set result
+} -result {Treeview 8 100 90 TScrollbar {1 0} 1 1}
+
+test recover-dialog-1.4 {Ctrl+A selects all, KP_Enter is bound, and Escape leaves every swap for later} -setup recover_reset -body {
+    set ::els::probe_quiet 1
+    set plans {}
+    foreach i {0 1 2} {
+        set rec [dict create path "" mtime [expr {1700000100 + $i}]]
+        lappend plans [list [file join $::ELS_TMP "later-$i.swp"] $rec missing]
+    }
+    set ::els::recover_auto 0
+    els::recover_offer $plans
+    set tree .recover.f.list.tree
+    set before [llength [$tree selection]]
+    focus -force $tree
+    update
+    event generate $tree <Control-KeyPress-a> -when now ; update
+    set after [llength [$tree selection]]
+    set kp [expr {[bind ElsRecoveryTree <KeyPress-KP_Enter>] ne "" \
+                  && {ElsRecoveryTree} in [bindtags $tree]}]
+    event generate $tree <Escape> ; update
+    list $before $after $kp [winfo exists .recover]
+} -result {0 3 1 0}
 
 # ===== sweep: stale temp/claim litter from dead sessions ===================
 
 # ---- user-issues batch C: single instance + file handoff ------------------
 
-# primary_running resolves config via config_candidates (it runs BEFORE
-# config_path is set), so set up under the pinned LOCALAPPDATA candidate.
-proc single_setup_primary {} {
-    lassign [els::config_candidates] near appdata
-    if {[file exists $near]} { return "" }     ;# a portable config is present: not testable here
-    file mkdir [file dirname $appdata]
-    raw_write $appdata "geometry 800x600"
-    set swapd [file join [file dirname $appdata] swap] ; file mkdir $swapd
+# primary_running resolves the one adjacent config directory before config_path
+# is set.  Point boot_script at a hermetic fake app directory for these tests.
+proc single_setup_primary {{listen 1}} {
+    set root [file join $::ELS_TMP single-primary]
+    catch {file delete -force $root}
+    file mkdir $root
+    set ::els::boot_script [file join $root els.tcl]
+    set cfg [lindex [els::config_candidates] 0]
+    raw_write $cfg "geometry 800x600"
+    set swapd [file join $root swap] ; file mkdir $swapd
     set lp [file join $swapd host-prim-live.lock]
     raw_write $lp "pid 0"
     file mtime $lp [clock seconds]             ;# fresh -> live under the mtime path
-    raw_write [file join $swapd host-prim-live.listen] ""  ;# a LISTENING primary (F34)
-    return $appdata
+    if {$listen} { raw_write [file join $swapd host-prim-live.listen] "" }
+    return $cfg
 }
 
-test single-c.1 {a live session lock in the config dir means a primary is running} -setup recover_reset -body {
-    set appdata [single_setup_primary]
-    if {$appdata eq ""} { return {1 0} }
+test single-c.1 {a live session lock in the adjacent config dir means a primary is running} \
+        -setup {recover_reset ; set ::__single_bs $::els::boot_script} \
+        -cleanup {set ::els::boot_script $::__single_bs ; catch {file delete -force [file join $::ELS_TMP single-primary]}} -body {
+    set cfg [single_setup_primary]
     set live [els::primary_running]
-    file delete -force [file dirname $appdata]
+    file delete -force [file dirname $cfg]
     set none [els::primary_running]
     list $live $none
 } -result {1 0}
 
-test single-c.2 {ELS_NO_SINGLE_INSTANCE forces multi-instance} -setup recover_reset -body {
-    set appdata [single_setup_primary]
-    if {$appdata eq ""} { return {0 1} }
+test single-c.2 {ELS_NO_SINGLE_INSTANCE forces multi-instance} \
+        -setup {recover_reset ; set ::__single_bs $::els::boot_script} \
+        -cleanup {unset -nocomplain ::env(ELS_NO_SINGLE_INSTANCE) ; set ::els::boot_script $::__single_bs ; catch {file delete -force [file join $::ELS_TMP single-primary]}} -body {
+    single_setup_primary
     set ::env(ELS_NO_SINGLE_INSTANCE) 1
     set off [els::primary_running]
     unset ::env(ELS_NO_SINGLE_INSTANCE)
     set on [els::primary_running]
-    file delete -force [file dirname $appdata]
     list $off $on
 } -result {0 1}
 
-test single-c.4 {a live lock with NO listen marker is an opted-out peer, not a handoff target (F34)} -setup recover_reset -body {
-    lassign [els::config_candidates] near appdata
-    if {[file exists $near]} { return 0 }      ;# a portable config is present: not testable here
-    file mkdir [file dirname $appdata]
-    raw_write $appdata "geometry 800x600"
-    set swapd [file join [file dirname $appdata] swap] ; file mkdir $swapd
-    set lp [file join $swapd host-nolisten.lock]
-    raw_write $lp "pid 0" ; file mtime $lp [clock seconds]   ;# live lock, but no .listen marker
-    set r [els::primary_running]
-    file delete -force [file dirname $appdata]
-    set r
+test single-c.2b {a live lock with NO listen marker is an opted-out peer, not a handoff target (F34)} \
+        -setup {recover_reset ; set ::__single_bs $::els::boot_script} \
+        -cleanup {set ::els::boot_script $::__single_bs ; catch {file delete -force [file join $::ELS_TMP single-primary]}} -body {
+    single_setup_primary 0
+    els::primary_running
 } -result 0
 
 test single-c.3 {handoff round-trip: send spools the file, drain opens it and clears the spool} -setup recover_reset -body {
@@ -341,14 +441,14 @@ test single-c.3 {handoff round-trip: send spools the file, drain opens it and cl
     list $spooled $opened $left
 } -result {1 1 0}
 
-test single-c.4 {a stale handoff spool file is swept} -setup recover_reset -body {
+test single-c.4 {valid handoff spool files never expire before durable delivery} -setup recover_reset -body {
     set hd [file join $::ELS_TMP handoff] ; file mkdir $hd
     set old [file join $hd old-1.open] ; raw_write $old ""
     file mtime $old [expr {[clock seconds] - 9999}]
     set fresh [file join $hd fresh-1.open] ; raw_write $fresh ""
     els::swap_sweep
     list [file exists $old] [file exists $fresh]
-} -result {0 1}
+} -result {1 1}
 
 test single-c.5 {handoff round-trips a NON-ASCII path (UTF-8 spool), not silently dropped} -setup recover_reset -body {
     # José-你好.txt — the exact class (accented Windows profile / CJK name) the old
@@ -413,6 +513,107 @@ test single-c.8 {handoff_tick defers the drain while a modal is up (swap_suspend
     list $duringSpool $afterSpool $opened
 } -result {1 0 1}
 
+test single-c.9 {handoff_send reports durable spool failure instead of authorizing secondary exit} \
+        -setup {
+            recover_reset
+            rename ::els::write_atomic ::els::write_atomic_real
+            set ::handoff_durable -1
+            proc ::els::write_atomic {path bytes tmp durable} {
+                set ::handoff_durable $durable
+                return "injected spool failure"
+            }
+        } -cleanup {
+            catch {rename ::els::write_atomic {}}
+            if {[llength [info commands ::els::write_atomic_real]]} {
+                rename ::els::write_atomic_real ::els::write_atomic
+            }
+            unset -nocomplain ::handoff_durable
+        } -body {
+    set rc [els::handoff_send [file join $::ELS_TMP els.conf] \
+        [list [file join $::ELS_TMP never-lost.txt]]]
+    set hd [file join $::ELS_TMP handoff]
+    list $rc $::handoff_durable [llength [glob -nocomplain -directory $hd *.open]]
+} -result {0 1 0}
+
+test single-c.10 {mixed handoff opens good paths and atomically retains only unresolved paths} \
+        -setup recover_reset -body {
+    set good [file join $::ELS_TMP handoff-good.txt] ; raw_write $good "good\n"
+    set later [file join $::ELS_TMP handoff-later.txt] ; catch {file delete -force $later}
+    els::handoff_send [file join $::ELS_TMP els.conf] [list $good $later]
+    set hd [file join $::ELS_TMP handoff]
+    els::handoff_drain
+    set spool [lindex [glob -nocomplain -directory $hd *.open] 0]
+    set rec [els::handoff_decode [raw_read $spool]]
+    set goodCount 0
+    foreach id $::els::docs {
+        if {$::els::docPath($id) ne "" && [els::same_path $::els::docPath($id) $good]} { incr goodCount }
+    }
+    set first [list $goodCount [llength [dict get $rec paths]] \
+        [els::same_path [lindex [dict get $rec paths] 0] $later] \
+        [expr {[dict get $rec attempt] > 0}]]
+    raw_write $later "arrived\n"
+    raw_write $spool [els::handoff_encode [dict get $rec paths] [dict get $rec attempt] 0]
+    els::handoff_drain
+    set laterOpen 0
+    foreach id $::els::docs {
+        if {$::els::docPath($id) ne "" && [els::same_path $::els::docPath($id) $later]} { set laterOpen 1 }
+    }
+    list $first $laterOpen [llength [glob -nocomplain -directory $hd *.open]] $goodCount
+} -result {{1 1 1 1} 1 0 1}
+
+test single-c.11 {failed durable large-file deferral leaves the handoff request retryable} \
+        -setup {
+            recover_reset
+            set ::els::OPEN_WARN_SIZE 1
+            set p [file join $::ELS_TMP handoff-defer-fail.txt] ; raw_write $p "large\n"
+            els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+            rename ::els::deferred_save ::els::deferred_save_real
+            proc ::els::deferred_save {} { return 0 }
+        } -cleanup {
+            set ::els::OPEN_WARN_SIZE 26214400
+            catch {rename ::els::deferred_save {}}
+            if {[llength [info commands ::els::deferred_save_real]]} {
+                rename ::els::deferred_save_real ::els::deferred_save
+            }
+        } -body {
+    set ::els_test_mbcount 0
+    els::handoff_drain
+    set hd [file join $::ELS_TMP handoff]
+    set spool [lindex [glob -nocomplain -directory $hd *.open] 0]
+    set rec [els::handoff_decode [raw_read $spool]]
+    list [file exists $spool] [llength [dict get $rec paths]] \
+         [els::deferred_contains $p] $::els_test_mbcount $::els::last_open_outcome
+} -result {1 1 0 0 failed}
+
+test single-c.12 {transient spool read failure never deletes the durable request} \
+        -setup {
+            recover_reset
+            set p [file join $::ELS_TMP handoff-read-fail.txt] ; raw_write $p "body\n"
+            els::handoff_send [file join $::ELS_TMP els.conf] [list $p]
+            rename ::els::handoff_read_file ::els::handoff_read_file_real
+            proc ::els::handoff_read_file {path} { error "injected sharing violation" }
+        } -cleanup {
+            catch {rename ::els::handoff_read_file {}}
+            if {[llength [info commands ::els::handoff_read_file_real]]} {
+                rename ::els::handoff_read_file_real ::els::handoff_read_file
+            }
+        } -body {
+    set hd [file join $::ELS_TMP handoff]
+    set spool [lindex [glob -nocomplain -directory $hd *.open] 0]
+    els::handoff_drain
+    list [file exists $spool] [llength [glob -nocomplain -directory $hd *.open]]
+} -result {1 1}
+
+test single-c.13 {invalid and unsupported handoff records are quarantined, never treated as paths} \
+        -setup recover_reset -body {
+    set hd [file join $::ELS_TMP handoff] ; file mkdir $hd
+    set bad1 [file join $hd invalid-utf8.open] ; raw_write $bad1 "\xff\xfe"
+    set bad2 [file join $hd future.open] ; raw_write $bad2 "ELSHANDOFF v2\nschema 2"
+    els::handoff_drain
+    list [llength [glob -nocomplain -directory $hd *.open]] \
+         [llength [glob -nocomplain -directory $hd *.invalid-*]]
+} -result {0 2}
+
 test extmod-recover-1.1 {a crash-recovered fresh tab arms the R3 guard from the swap's savedSig} -setup recover_reset -body {
     set p [file join $::ELS_TMP recov-extmod.txt]
     raw_write $p "on-disk at crash time\n"
@@ -430,6 +631,79 @@ test extmod-recover-1.1 {a crash-recovered fresh tab arms the R3 guard from the 
     list $armed $rc [info exists ::els::docExtModPause($tid)] \
          [expr {[raw_read $p] eq "CHANGED SINCE THE CRASH\n"}]
 } -result {1 0 1 1}
+
+test extmod-recover-1.2 {changed recovery merged onto a restored tab cannot auto-overwrite newer disk} -setup recover_reset -body {
+    set p [file join $::ELS_TMP recov-merged-newer.txt]
+    raw_write $p "NEWER DISK VERSION\n"
+    els::open $p ; set tid $::els::active
+    set oldSig [els::sig_from_bytes "OLD DISK VERSION\n" 1]
+    set rec [dict create schema 1 sessionId sY docId dY path $p \
+                 enc utf-8 bom 0 eol lf cursor 1.0 dirty 1 \
+                 savedSig $oldSig mtime [clock seconds] host h \
+                 bodyCrc 0 text "RECOVERED OLD EDITS"]
+    set merged [els::recover_load $rec changed]
+    set ::els::autosave 1
+    set ::els_test_mbcount 0
+    els::autosave_flush_doc $tid
+    set recoveredBefore [info exists ::els::docRecovered($tid)]
+    set afterAuto [raw_read $p]
+    set ::els_test_mbanswer cancel
+    set cancelled [els::save $tid]
+    set afterCancel [raw_read $p]
+    set ::els_test_mbanswer yes
+    set accepted [els::save $tid]
+    list [expr {$merged eq $tid}] $recoveredBefore \
+         [expr {$afterAuto eq "NEWER DISK VERSION\n"}] $cancelled \
+         [expr {$afterCancel eq "NEWER DISK VERSION\n"}] $accepted \
+         [expr {[raw_read $p] eq "RECOVERED OLD EDITS"}] \
+         [info exists ::els::docRecovered($tid)] $::els_test_mbcount
+} -result {1 1 1 0 1 1 1 0 2}
+
+test fsync-1.1 {fsync failure fails save and retains dirty state plus recovery swap until retry} -setup {
+    recover_reset
+    if {[llength [info commands ::els::win_fsync]]} { rename ::els::win_fsync ::_els_real_fsync }
+    set ::_els_fsync_fail 1
+    proc ::els::win_fsync {path} {
+        if {$::_els_fsync_fail} { return "simulated FlushFileBuffers failure" }
+        return ""
+    }
+} -cleanup {
+    catch {rename ::els::win_fsync {}}
+    if {[llength [info commands ::_els_real_fsync]]} { rename ::_els_real_fsync ::els::win_fsync }
+} -body {
+    set p [file join $::ELS_TMP fsync-retain.txt]
+    raw_write $p "old\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] delete 1.0 end ; [els::W $id] insert end "new durable content"
+    set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set sp [els::swap_path [els::session_id] $id]
+    set first [els::save $id]
+    set retained [list [els::doc_dirty $id] [file exists $sp] \
+                          [expr {[dict get [els::swap_read $sp] text] eq "new durable content"}]]
+    set rebased [expr {[els::file_sig $p] eq [els::doc_saved_sig $id]}]
+    set ::_els_fsync_fail 0
+    set second [els::save $id]
+    list $first $retained $rebased [expr {[raw_read $p] eq "new durable content"}] \
+         $second [els::doc_dirty $id] [file exists $sp]
+} -result {0 {1 1 1} 1 1 1 0 0}
+
+test saveas-recover-1.1 {failed Save As restores the invoking document path in its recovery metadata} -setup recover_reset -body {
+    set old [file join $::ELS_TMP saveas-swap-old.txt]
+    raw_write $old "old\n"
+    els::open $old ; set id $::els::active
+    [els::W $id] insert end "dirty"
+    set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set bad [file join $::ELS_TMP no-such-saveas-dir new.txt]
+    catch {file delete -force [file dirname $bad]}
+    set ::els_test_savefile $bad
+    set rc [els::saveas]
+    els::swap_flush_doc $id
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    list $rc [els::same_path $::els::docPath($id) $old] \
+         [els::same_path [dict get $rec path] $old] [els::doc_dirty $id]
+} -result {0 1 1 1}
 
 # ---- bug-hunt wave 3: clean docs never swap; metadata + claims ------------
 
@@ -554,15 +828,17 @@ test review-reopen-1.1 {reopen_with refuses to blank a recovered tab with no cac
     list $::els::docRaw($id) [els_text $id] [expr {$::els_test_mbcount >= 1}]
 } -result [list {} {recovered text} 1]
 
-test review-filesig-1.1 {file_sig returns a valid sampled sig above the crc cap (no return-in-catch)} -setup recover_reset -body {
+test review-filesig-1.1 {file_sig streams a full-content CRC regardless of the legacy cap} -setup recover_reset -body {
     set saved $::els::SWAP_FILE_CRC_CAP
-    set ::els::SWAP_FILE_CRC_CAP 100000          ;# exercise the >cap sampled branch
+    set ::els::SWAP_FILE_CRC_CAP 100000          ;# legacy cap must not alter the result
     set p [file join $::ELS_TMP big.txt]
-    raw_write $p [string repeat "ABCDEFGH" 25000]   ;# 200000 bytes > cap and > 128 KiB
+    set bytes [string repeat "ABCDEFGH" 25000]
+    raw_write $p $bytes
     set sig [els::file_sig $p]
     set ::els::SWAP_FILE_CRC_CAP $saved
-    list [expr {$sig ne ""}] [llength [split $sig :]]
-} -result {1 3}
+    list [expr {$sig ne ""}] [llength [split $sig :]] \
+         [expr {[lindex [split $sig :] 2] == [zlib crc32 $bytes]}]
+} -result {1 3 1}
 
 test review-bufsig-1.1 {a length-changing edit above the sig cap is caught without a dirtySince poke} -setup recover_reset -body {
     set saved $::els::SWAP_SIG_FULL_CAP
@@ -612,11 +888,11 @@ test review-sweep-corrupt-1.1 {swap_sweep reclaims an OLD corrupt swap, keeps a 
     list [file exists $old] [file exists $new]
 } -result {0 1}
 
-test review-recovered-label-1.1 {a recovered tab is labelled "(recovered)"; saving clears the marker} -setup recover_reset -body {
+test review-recovered-label-1.1 {a recovered tab has a compact recovery marker; saving clears it} -setup recover_reset -body {
     set f [forge_swap "host-r-dead" d0 "recovered note"]      ;# untitled
     els::recover_apply [list $f [els::swap_read $f] untitled] recover
     set id [lindex $::els::docs end]
-    set labelled [string match "*(recovered)*" [els::tab_text $id]]
+    set labelled [string match "*↺*" [els::tab_text $id]]
     els::switch_to $id
     set ::els_test_savefile [file join $::ELS_TMP saved-recovered.txt]
     els::save

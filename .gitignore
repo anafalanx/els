@@ -1,4 +1,4 @@
-# els builds against z's shared runtime (<z>/r); it has no project-local
+# els builds against z's shared runtime (<z>/.z/r); it has no project-local
 # toolchain.  Ignore any locally-hydrated .toolchain (and moved-aside variants)
 # so the multi-hundred-MB payload can never be committed by accident.
 /.toolchain/
@@ -23,18 +23,17 @@
 
 # BUILD LAYOUT (the convention, enforced by tools/tasks.tcl):
 #   dist/els.exe  = THE final artifact: what you run, what gets released
-#   build/        = compiler intermediates only (objects, .res, els-bare.exe,
-#                   generated els.rc/manifest/ico, dev-built extension DLLs)
+#   build/        = development executables plus compiler/release intermediates
 #   repo root     = no binaries
 /build/
 /dist/
 
 # belt-and-suspenders: a root els.exe (pre-0.60 build layout, or an explicit
-# `z build els.exe`) must never be committed either
+# `z build build/custom.exe`) must never be committed either
 /els.exe
 
-# a "portable" config chosen during a dev run lands next to els.tcl (the repo
-# root here); real builds write it next to els.exe instead
+# source runs always store config next to els.tcl (the repo root here); packaged
+# builds always store it next to els.exe
 /els.conf
 /config.tcl
 

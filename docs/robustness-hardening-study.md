@@ -11,6 +11,73 @@
 
 **Scope:** a robustness audit and prioritized hardening plan for els (single-file Tcl/Tk 9.0.3 Windows text editor, `els.tcl`, ~3000 lines). Goal is *robustness, not features*. Grounded in direct code reads, six parallel audits (several with live probes driven via `tests/helpers.tcl` under `tclsh90.exe`), and an adversarial verification pass on every critical/high data-loss claim. Each claim below is tagged **[OBSERVED]** (reproduced by live probe), **[CODE-READ]** (confirmed in source), or **[INFERRED]**.
 
+> ## STATUS UPDATE — 2026-07-15
+>
+> This later closure supersedes several implementation choices recorded below;
+> the baseline findings and proposal text remain as historical evidence, with
+> current status annotations added where the shipped design moved on.
+>
+> - **One adjacent state location.** The packaged app keeps `els.conf`,
+>   `els.deferred`, `swap\`, `backups\`, `handoff\`, rotating
+>   `els.log`/`els.log.1`, and transient `.els-find\` beside `els.exe`; a source
+>   run uses the `els.tcl` directory. There is no chooser, profile fallback,
+>   migration, or deletion of old profile state. The sole legacy bridge is an
+>   adjacent `config.tcl`: if `els.conf` is absent, it is copied once and retained.
+>   That state root must be writable, and moving the exe without its sidecars
+>   creates separate state. This supersedes R2's accepted first-run gap and the
+>   profile fallback question in §8.
+> - **Large and network opens require foreground consent.** Interactive open and
+>   reload ask before reading more than 25 MiB. Startup, session restore and
+>   handoff persist large files—and quiet UNC/network paths—in `els.deferred`
+>   instead of reading them or posting a background modal. The Deferred Opens
+>   manager is the explicit open/forget surface; corrupt queue bytes are
+>   quarantined, and a failed durable queue update is never acknowledged as a
+>   delivered handoff.
+> - **Tabs and disk observation remain bounded.** Duplicate basenames use the
+>   shortest distinguishing parent suffix, untitled documents are numbered,
+>   compact state marks survive label elision, and the active tab stays visible
+>   while the overflow/Tabs menu exposes the rest. The status bar reports Not on
+>   disk, On disk, Changed on disk, Missing, Unavailable, or Read-only. This is
+>   only an early warning: automatic observation does no I/O on obvious UNC paths,
+>   and every save performs the authoritative full conflict check.
+> - **Find/replace is isolated, bounded and atomic.** The UI interpreter never
+>   evaluates a user regex. A disposable, Job-Object-contained worker scans an
+>   immutable UTF-8 snapshot iteratively, highlights at most 5,000 matches, keeps
+>   a navigable disk index up to the 1,000,000 hard ceiling, and handles zero-width
+>   progress. Replace All is cancellable and stages the complete result; only a
+>   still-current document epoch/request can commit it, as one undo unit. Error,
+>   timeout, cancellation or staleness leaves source and undo history untouched.
+> - **Local-desktop threat boundary is explicit.** `.els-find` rejects links,
+>   junctions/reparse points, unexpected leaves and observed path races, and all
+>   control/result schemas and byte identities are verified. A malicious process
+>   running as the same Windows user can still exchange a checked path before a
+>   later path-based open/delete (a TOCTOU race). Closing that boundary requires
+>   handle-relative `FILE_FLAG_OPEN_REPARSE_POINT` operations throughout and is
+>   outside the current threat model.
+> - **No truncating save fallback.** A complete same-directory temporary file is
+>   atomically installed with `ReplaceFileW` or rename. If neither atomic
+>   operation succeeds, the target remains untouched and the complete temporary
+>   rescue is retained and named; the save path never calls the legacy in-place
+>   writer. This supersedes every detect-and-fall-back-to-in-place proposal below.
+> - **Durability failure is a save failure.** After replacement, the final target
+>   must pass `FlushFileBuffers`. Because replacement has already committed, disk
+>   may contain the new bytes when that flush fails; els nevertheless reports
+>   failure, keeps the tab dirty, and preserves a current recovery swap until a
+>   retry is confirmed. This supersedes the earlier "best-effort, never blocks a
+>   save" wording.
+> - **Recovery and disk conflicts require foreground resolution.** Every recovered
+>   tab, including one merged onto a clean session-restored tab, is excluded from
+>   auto-save until a foreground save succeeds. Changed, missing, and unreadable
+>   targets pause background saves and require an explicit manual overwrite,
+>   recreate, reload, or cancel decision.
+> - **Releases fail closed.** `z release-check` requires a stable clean source
+>   tree, complete no-skip tests, native/package/PE/process checks, embedded MIT
+>   plus exact Tcl, Tk, MinGW-w64, GCC GPLv3/runtime-exception, zlib, and LibTomMath notices, and
+>   recomputed checksum/provenance output. `z sign` accepts only that
+>   verified set, enforces the source-pinned publisher "Open Source Developer
+>   Vincent Vercauteren" plus an optional leaf thumbprint, requires a verified
+>   timestamp, re-probes the signed candidate, and only then promotes it.
+>
 > ## STATUS UPDATE — 2026-07-04
 >
 > **Every risk ranked in §2 has since been implemented.** This document is now a
@@ -23,21 +90,22 @@
 > | **R2** no swap / crash-recovery | ✅ IMPLEMENTED | swap subsystem + `win_lock_file` liveness locks |
 > | **R3** external-change (lost-update) guard | ✅ IMPLEMENTED (Wave 1) | pre-write `file_sig` vs `savedSig`; prompt / autosave-pause; File ▸ Reload from Disk |
 > | **R4** silent lossy save | ✅ IMPLEMENTED | strict `-profile` gate + consent dialog |
-> | **R5** find long-line freeze | ✅ IMPLEMENTED (Wave 1) | `FIND_MAXHITS` cap + one batched `tag add` |
+> | **R5** find long-line freeze | ✅ IMPLEMENTED (Phase C) | isolated worker + bounded global index/highlights + cancellable staged replacement |
 > | **R6** no production bgerror / log | ✅ IMPLEMENTED (Wave 1) | `els::bgerror` (flush→log→one note) + rotating `els.log` |
 > | **R7** off-screen geometry | ✅ IMPLEMENTED (Wave 1) | `els::clamp_geometry` vs the true virtual desktop (`win_virtual_screen`) + zoomed-state persistence |
-> | **P3** native `WinMain` capstone | ✅ SHIPPED | `src/els_main.c` (the SEH crash-handler sub-item is deferred — see §7) |
+> | **P3** native `WinMain` capstone | ✅ SHIPPED | `src/els_main.c` (the SEH crash-handler sub-item was explicitly declined — see §7) |
 >
 > **Every ranked risk in this study is now implemented, including P2-c** (the
 > large-file open guard — §2 Bucket C / §4 P2-c — shipped Wave 2, 2026-07-04:
-> `els::open` confirms before reading a >25 MB file, with a busy cursor and a
-> bounded undo stack). The **one** remaining sub-item is the P3 SEH crash handler,
-> deliberately deferred (see §7).
+> `els::open` confirms before reading a >25 MiB file, with a busy cursor and a
+> bounded undo stack). The proposed P3 SEH crash handler was later explicitly
+> declined rather than left as an unfinished release requirement (see §7).
 > Two design points below are now **superseded**: (1) els **does** have single-instance
 > file-handoff — Bucket B's "els has NO single-instance machinery, by design" is obsolete;
 > (2) §8 open questions Q1 (ReplaceFileW) and Q2 (a bounded backups ring, not a single
 > `.bak`) are resolved by shipped code. R1/R3/R5/R6/R7 carry per-section IMPLEMENTED
-> banners below. Test count is now ~497, not the 268 quoted in §5.
+> banners below. The maintained suite is now more than 700 tests; the 268 quoted
+> in §5 is the historical baseline for this study.
 >
 > **Post-Wave-2 hardening (2026-07-04).** Three follow-ups beyond the ranked risks:
 > (a) **Backup ring ordering** — the previous-versions ring stamped backups at
@@ -80,8 +148,10 @@
 > the name back to the old data. Flushing the final target fixes it. `els::write_atomic`
 > gained a `durable` flag; only `els::save` sets it — swaps/config/backups skip the flush
 > (a forced disk flush on every ~2s swap tick is too costly for a snapshot a process
-> crash already preserves). Best-effort (never blocks a save) and native-only, so the
-> pure-Tcl dev path is unchanged. Tests: `winfs-5.1..5.3`.
+> crash already preserves). In the packaged build this check is required: a flush
+> failure makes the save fail, keeps the tab dirty and retains recovery state even
+> though replacement may already have installed the new bytes. The pure-Tcl dev path
+> cannot make that native durability promise. Tests: `winfs-5.1..5.3`.
 >
 > **P3 SEH crash handler — declined (2026-07-05), not merely deferred.** A deliberate
 > decision after weighing it explicitly. To salvage the last <2 s of *unswapped* edits a
@@ -97,7 +167,7 @@
 > future native "write-only C producer" stages swap bytes in C so the handler needs no
 > Tcl. (Supersedes the "deferred" note on the P3 row above and in §7.)
 
-## 1. Executive summary & robustness posture today
+## 1. Executive summary & robustness posture at the 0.30 baseline
 
 els is already a *carefully* built editor. The robustness gaps are not sloppiness — they are a small number of specific, high-consequence omissions, plus one architectural decision (in-place document writes) that is the dominant data-loss risk. The verification pass **confirmed every critical and high finding**, reproduced the #1 truncation window byte-for-byte, and — importantly — found that the proposed fixes are sound but carry concrete Windows pitfalls that must be handled (notably for the atomic-save rename).
 
@@ -193,10 +263,16 @@ els is already a *carefully* built editor. The robustness gaps are not sloppines
 
 ### R5 — UI freeze in find/replace on a very long line **[OBSERVED]**
 
-> **Status — IMPLEMENTED (Wave 1, 2026-07-04).** `els::find_scan` caps tracked
-> matches at `FIND_MAXHITS` (5000) and `els::find_update` batches the highlight
-> into one `$w tag add findAll {*}[concat {*}$scan]`; the count shows `N+`. Replace
-> All stays uncapped (it must rewrite every match). Tests `perf-4.*`.
+> **Status — IMPLEMENTED, then superseded by Phase C (2026-07-15).** The first
+> Wave-1 fix capped/batched highlighting. The current design goes further: the UI
+> interpreter never evaluates a user regex. A disposable worker scans an immutable
+> snapshot iteratively under a native Job Object and enforced deadline, writes a
+> bounded global index (1,000,000 hard ceiling), and the parent highlights only the
+> first 5,000 ranges in idle slices while F3 navigation continues past that display
+> cap. Zero-width matches make explicit forward progress. Replace All stages and
+> verifies the complete output, is cancellable, and commits only a still-current
+> request as one undo unit. Tests `perf-4.*`, `worker-find-7.*`, `worker-life-8.*`,
+> and `worker-protocol-9.*`.
 
 - **Location:** `els::find_update` els.tcl:2558-2568 (per-match `$w index "$s + $L chars"` and per-match `$w tag add`); `find_replace_all` ~2642 walks the same ranges with a `regsub` per match.
 - **Trigger:** open a one-/few-line file (minified JS/CSS/JSON, single-line CSV, binary blob), open Find, type a common substring. `find_update` is **O(matches × lineLength)**.
@@ -317,7 +393,7 @@ Effort: **S** ≈ ½–1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 
 ### P1 — Never hang / fail visibly
 
-**P1-a. Find/replace long-line guard (R5)** — *S.* Cap (`MAXHITS≈5000`, `"N+"`) + batched `$w tag add findAll {*}$ranges` in `find_update` (els.tcl:2558-2568); symmetric in `find_replace_all`. *Tested:* a `perf-*` case mirroring ui-4.12 but with a **single long line** of thousands of matches, asserting `<500 ms` (the existing perf test is multi-line and misses the O(n²) case).
+**P1-a. Find/replace long-line guard (R5)** — *S.* Historical first step: cap (`MAXHITS≈5000`, `"N+"`) + batched `$w tag add findAll {*}$ranges` in `find_update`. **Current closure:** the Phase-C isolated-worker/index/staged-replacement architecture in the R5 status banner supersedes this proposal and removes user regex evaluation from Tk's event thread altogether.
 
 **P1-b. Production bgerror + rotating log (R6)** — *S–M.* `els::log {level msg}` (self-catching, temp+rename rollover, ~256 KB + one `.1`) next to `els.conf`; production `bgerror` outside the `$startupProbe` guard that flushes swaps → logs → shows one coalesced non-modal notice; also override `tk::dialog::error::bgerror`. Log startup, save failures, geometry clamps, config R/W failures, bgerror events. *Tested:* process-level — probe triggers a benign `after`-error, assert it's logged (under pinned LOCALAPPDATA) and the process stayed alive; in-process — a thrown after-error lands in the log path, not a dialog.
 
@@ -327,8 +403,8 @@ Effort: **S** ≈ ½–1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 
 **P2-a. Geometry clamp + zoomed state (R7)** — *S.* Clamp in `load_geometry` (281-283); persist/restore zoomed in `save_geometry`. *Tested:* feed `+99999+99999`, assert `rootx` within screen bounds.
 **P2-b. External-modification detection (R3)** — *M.* Cache mtime+size+hash at open (1929-1933); **re-cache after every successful save** and on reload/Save-As; compare before write; prompt. *Tested:* `extmod-*` family — bump `file mtime` explicitly (deterministic, no clock wait); assert save prompts; cancel preserves the external bytes.
-**P2-c. Large-file guard** — *S.* `file size` check + confirm + busy cursor in `els::open` (~1908); consider dropping/lazy `docRaw` for huge files. *Tested:* `perf-*` K-line load budget.
-**P2-d. longPathAware + PerMonitorV2 manifest** — *S (build, not Tcl).* Embed/override the manifest on the produced exe in `tools/package.tcl` (~57-62).
+**P2-c. Large-file guard** — *S.* Historical proposal: `file size` check + confirm + busy cursor in `els::open`. **Current closure:** the reader limits the actual open channel to 25 MiB + 1 before consent, closing the stat/read growth race; quiet large and UNC/network paths are durably queued in `els.deferred`, and explicit consent has no hidden hard ceiling.
+**P2-d. longPathAware + PerMonitorV2 manifest** — *S (build, not Tcl).* Historical proposal: embed/override the manifest. **Current closure:** long-path awareness and the UTF-8 active code page shipped; PerMonitorV2 remains deliberately excluded because Tk 9.0.3 does not handle `WM_DPICHANGED` correctly on a mixed-DPI move.
 **P2-e. `save_geometry` visibility** — *S.* Log + one-shot non-modal status note instead of silent return.
 **Keep-as-is regression guards:** assoc injection-safety (assert a quote-laden exe path stays one argv element); corrupt-config + dir-as-config + vanished-session startup cases; "save fails on quit ⇒ exit not called".
 
@@ -354,13 +430,31 @@ All families stay hermetic exactly as `helpers.tcl` guarantees (pinned dirs, stu
 
 ## 6. Pitfalls & caveats
 
-- **Atomic save is the trade, not a free win.** `file rename -force` on Windows is `MoveFileEx(REPLACE_EXISTING)` — atomic for same-volume NTFS, but the destination inherits the *temp's* metadata: **explicit ACLs, ADS (incl. Zone.Identifier / mark-of-the-web), compression/EFS, and hardlink identity are dropped** (all reproduced). It **fails on a read-locked target** (AV/indexer/OneDrive holding a handle) where in-place `open w` could write through — fails *cleanly* (original intact), a recoverable regression. **`ReplaceFileW`** (packaged build) preserves ACL/ADS/attributes by design; in pure Tcl, detect-and-fall-back-to-in-place for hardlinked/ADS/EFS files. Temp **must** be same-directory (same-volume) or rename degrades to non-atomic copy. **No fsync in Tcl 9.0.3** — durability against power-loss between rename and OS flush is no better than the existing atomic config save (acceptable; native port can add it).
+- **Atomic save is the trade, not a free win.** The packaged build uses
+  `ReplaceFileW`; Windows normally merges ACLs, ADS (including mark-of-the-web),
+  attributes and creation time, but a metadata-merge failure can leave the new
+  bytes installed without every item carrying over. A source/dev run may use
+  same-directory `file rename -force`, whose replacement inherits the temp's
+  metadata and can drop explicit ACLs, ADS, compression/EFS metadata and hardlink
+  identity. Both operations fail cleanly on a read-locked target. els never
+  responds by truncating in place: failure retains the complete temp and leaves
+  the target untouched. The temp must stay in the target directory for atomicity.
+  Packaged saves additionally require `FlushFileBuffers` on the installed target;
+  Tcl 9.0.3 alone has no equivalent power-loss guarantee for the dev fallback.
 - **mtime alone is insufficient for R3.** NTFS ~1 s granularity (FAT 2 s); same-second equal-size external edits evade an mtime+size check — **include a content hash**. And els's *own* save advances mtime by 1 s → **re-cache the signature after every successful save** or the next save false-positives.
 - **Swap-file engineering (R2):** write the swap atomically (else a crash mid-swap yields a truncated swap, defeating the purpose); validate with a checksum/trailer; keep one prior generation; robust **liveness** (pid + start-time / lock token — PID reuse is real on Windows); **debounce** (`<<Modified>>` fires per keystroke and is fired programmatically by the app) — never write synchronously per keystroke; wrap the writer in `catch` so it can't itself raise into bgerror; store text **lossless UTF-8**, not the doc's lossy `docEnc`.
 - **Swap collisions:** key by `sessionId+docId`, not basename; recovery scan must skip live sessions or a second running els's swaps get mis-claimed as orphans.
-- **Regex timeout:** the cap+batch is the real fix; a wall-clock budget is optional defense-in-depth. The Tcl engine already resists classic catastrophic backtracking — don't over-invest here.
+- **Regex timeout (superseded):** the original cap+batch protected highlight cost
+  but could not pre-empt one regex call on Tk's event thread. Phase C therefore
+  moved evaluation into a disposable worker with parent-enforced deadlines and
+  Job-Object cancellation. Tcl's engine still resists the classic catastrophic
+  backtracking cases measured in the baseline, but the UI no longer relies on
+  that property for responsiveness.
 - **Recovery prompts and bgerror** must use the app's own parented, coalesced dialog (the known "raining modal dialogs" hazard), never Tk's default; recovery **never auto-writes** the user's file.
-- **OneDrive/network targets:** `file exists` on a slow/offline UNC path can briefly block the UI (latency, not correctness) — consider bounding the validity probe off the UI critical path.
+- **OneDrive/network targets:** the automatic disk observer performs no I/O on
+  obvious UNC paths, and quiet startup/restore/handoff routes them to Deferred
+  Opens. An explicit open, reload or save can still block on an offline share—the
+  user chose that I/O—and a non-UNC cloud/provider path may still hide latency.
 - **Harness teardown:** an observed `EXIT=124` on some probes was a **Tk-on-exit teardown hang in the headless harness** (clean `exit 0` returns `EXIT=0`), **not** an els defect — but the event loop can wedge at process teardown; worth knowing.
 
 ---
@@ -377,21 +471,32 @@ All families stay hermetic exactly as `helpers.tcl` guarantees (pinned dirs, stu
 ✅ P1  Find/replace guard · production bgerror + log · strict-encoding gate
    P2  ✅ Geometry clamp · ✅ ext-mod detection · ✅ large-file guard · ✅ manifest · ✅ save_geometry visibility
         ▼
-   P3  ✅ Native C WinMain  ·  ⏳ SEH crash handler  ──► CAPSTONE, depends on P0-b's swap format
+   P3  ✅ Native C WinMain  ·  ✗ SEH crash handler declined after risk review
 ```
 
-**P3 split:** the native `WinMain` shipped (release 0.50, `src/els_main.c`); the SEH
-crash-handler sub-item is **deliberately deferred** — with the shipped ~2 s swap
-cadence a C-level segfault now loses at most a couple of seconds of typing, so the
-large, corrupt-process-context handler is low payoff. Reopen only if `els.log`
-(now that R6 exists) shows real C-level crashes in the field. With P2-c shipped
-in Wave 2, the SEH handler is the **only** unimplemented sub-item left in this study.
+**P3 split:** the native `WinMain` shipped (release 0.50, `src/els_main.c`). The
+SEH crash-handler sub-item was later **explicitly declined**, not left pending:
+reading Tcl/Tk buffers from a corrupted process can deadlock or fault again, while
+the shipped ~2 s swap cadence already limits the residual loss window. Reconsider
+only if a future native write-only producer keeps crash-safe shadow bytes without
+calling Tcl from the handler.
 
-The native port is **last, not first.** The Tcl swap+reconcile layer (P0-b) covers the common abrupt-exit classes a pure-Tcl idle/periodic writer *can* pre-empt — power loss, taskkill, OS reboot, bgerror-exit. A C-level segfault is the **residual tail** that only an OS-level SEH handler can survive, and that handler is near-useless without the Tcl reader that detects orphans, reconciles against disk, and prompts. So: **freeze the swap format/dir now** as the shared contract; ship the Tcl layer; add the thin, write-only C producer afterward. (P2-d's manifest naturally rides along with the native-port build work.)
+The historical dependency reasoning remains useful: the Tcl swap+reconcile layer
+(P0-b) had to precede any native crash producer because it owns orphan detection,
+disk reconciliation and recovery UX. That layer shipped; the proposed SEH producer
+did not, for the risk/payoff reason above. P2-d's manifest work shipped with the
+native entry point.
 
 ---
 
-## 8. Open questions
+## 8. Historical open questions
+
+These are preserved from the 0.30 plan. Current resolutions are: `ReplaceFileW`
+without an in-place fallback; a bounded `backups\` ring; dirty-document swap
+snapshots; session restore before recovery layering; a non-modal disk-state
+observer; a 25 MiB soft guard with durable Deferred Opens and no hard ceiling;
+adjacent-only rotating logs with no profile fallback; and no SEH shadow buffer
+because the handler was declined.
 
 1. **Atomic-save mechanism for the packaged build:** commit to `ReplaceFileW` (needs a tiny C shim or a Tcl extension), or stay pure-Tcl with detect-and-fall-back-to-in-place for hardlink/ADS/EFS files? The pure-Tcl path silently drops ADS (e.g. mark-of-the-web) on every save of an ADS-bearing file unless special-cased.
 2. **`.bak` policy:** keep a one-generation `$path.bak` on first overwrite (extra safety + an undo-the-save affordance) vs. no clutter in the user's directory?
@@ -399,7 +504,7 @@ The native port is **last, not first.** The Tcl swap+reconcile layer (P0-b) cove
 4. **Recovery-vs-session-restore precedence** when both reference the same path: confirm the "restore paths first, then layer swaps by path, then add untitled" ordering avoids double-open in all cases.
 5. **External-mod UX granularity:** also flag on window focus-in (not just at save), so the user sees a "changed on disk" banner before they keep editing a stale buffer?
 6. **Large-file thresholds:** soft confirm at ~25 MB and a hard ceiling (refuse / open read-only)? And do we drop `docRaw` for huge files (losing zero-cost "Reopen with Encoding") to bound the ~2-3× RAM?
-7. **Log location & retention:** `els.log` next to `els.conf` — but in portable mode that's the program dir (may be read-only on a locked-down machine); fall back to `%LOCALAPPDATA%`?
+7. **Log location & retention:** `els.log` next to `els.conf` — in a packaged run that is the program directory (which may be read-only on a locked-down machine); fall back to `%LOCALAPPDATA%`?
 8. **Shadow-buffer cost for the SEH table (P3):** maintaining a flat `{ptr,len}` snapshot of each dirty buffer for the handler has an edit-time cost — acceptable, or only snapshot on the periodic tick?
 
 ---

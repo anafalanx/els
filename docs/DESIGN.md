@@ -51,7 +51,7 @@ what Tk 9 can actually render well.
 
 - **Font:** Consolas 11pt for the document (the one monospace hand-hinted for
   Windows ClearType that ships on every machine; zero-install matters for a
-  copy-paste-portable app), Segoe UI 9pt for chrome. Fonts are sized in
+  single-file app), Segoe UI 9pt for chrome. Fonts are sized in
   **points** so they scale correctly on HiDPI.
 - **Leading ≈ 1.34×** is the single biggest "calm" lever. Applied via the Text
   widget's `-spacing1`/`-spacing3`, computed as `int(linespace × 0.17)` so it
@@ -65,15 +65,12 @@ A **steady** 4px red bar (`-insertwidth 4 -insertofftime 0`). A blinking cursor
 is a documented distraction; a solid red caret is calmer *and* more distinctive.
 It is els's signature.
 
-### Accessibility, honestly
+### Screen-reader limitation
 
-The steady caret removes one documented barrier, but it does not make els an
-accessible editor. Tk draws its own text surface and exposes no UI Automation
-provider, so Windows screen readers (Narrator, NVDA, JAWS) cannot read or
-navigate document text — a limitation of the toolkit, not a setting els withheld,
-and one no amount of theming fixes. Text zoom and a fixed high-contrast palette
-are the accessibility levers els does have. The user-facing statement of this
-lives in the README's *Requirements & limitations*.
+Tk draws its own text surface and exposes no UI Automation provider, so Windows
+screen readers (Narrator, NVDA, JAWS) cannot read or navigate document text.
+els does not add an assistive-technology layer; the user-facing limitation is
+stated plainly in the README's *Requirements & limitations*.
 
 ### Platform floor
 
@@ -97,8 +94,11 @@ only when needed.
 A docked bar (Ctrl+F / Ctrl+H), the lessons distilled from EditPad Pro
 (*restraint plus polish*):
 
-- **Incremental** highlight of all matches with a live `N of M` count; Enter /
-  Shift+Enter step and wrap.
+- **Incremental** highlight of the first 5,000 matches with an exact global
+  `N of M` disk-backed index (hard ceiling: 1,000,000); Enter / Shift+Enter can
+  navigate beyond the display cap and wraps only when the global index is complete.
+  Zero-width matches are indexed and navigated with Tcl `regsub -all` progress
+  semantics, so anchors and lookarounds terminate predictably.
 - **Inline, never popup.** No-match, bad-pattern and wrap-around show as text in
   the count label, never a dialog.
 - **Match Case / Whole Word / Regex** toggles (Tcl ARE), plus **Adapt case**:
@@ -109,6 +109,75 @@ A docked bar (Ctrl+F / Ctrl+H), the lessons distilled from EditPad Pro
 - **Backreferences** (`\1`, `\2`) expand in the replacement.
 - **History:** Enter records the term; Up/Down recall it.
 - **Tooltips** explain the terse toggles.
+- **Isolation:** the UI interpreter never evaluates a user regex. It writes an
+  immutable UTF-8 snapshot, then starts the same source script or fused executable
+  as a disposable worker. A native Windows Job Object is assigned atomically at
+  process creation, before the initial thread runs; only then can a tokenized `go`
+  file authorize work. While Replace All is running its button reads **Cancel**;
+  cancellation, parent death, timeout or editor exit kills the whole job. Search
+  or replacement work made stale by an edit, tab switch, query change or close is
+  discarded. Replacement output is staged against the immutable source, verified
+  in full and committed atomically as one undo unit only if the document epoch and
+  complete request signature still match. Cancellation or any failure leaves the
+  document and undo stack untouched.
+- **Scratch containment:** `.els-find` is always beside `els.conf`; root, job,
+  snapshot, control, result, and cleanup paths reject links, junctions, and other
+  reparse points, use exact leaf schemas, and fail closed on races they observe.
+  An actively malicious process running as the same Windows user can still swap a
+  checked path before a later path-based open/delete; defending that adversary
+  requires handle-relative `FILE_FLAG_OPEN_REPARSE_POINT` APIs throughout and is
+  explicitly outside the current local-desktop threat model.
+
+## Documents and tabs
+
+Tabs are identifiers, not merely filenames:
+
+- Untitled documents are numbered in their document order.
+- Duplicate basenames grow only the shortest parent suffix needed to distinguish
+  them. Middle elision preserves both that discriminator and the filename; if two
+  labels still collide under the character/pixel cap, a stable short document
+  discriminator is added.
+- Compact leading marks carry state without consuming the identity: `•` dirty,
+  `↺` recovered, and `�` text that acquired replacement characters while decoding.
+  Full paths and warnings remain available in the tab tooltip.
+- The layout always keeps the active tab and its close button visible. It packs a
+  contiguous neighbourhood into the remaining width; the right-hand overflow
+  button and **Tabs** menu expose every document.
+
+## Large files and disk state
+
+An interactive open or reload asks before reading more than 25 MiB. Quiet paths
+(startup arguments, session restore and single-instance handoff) may not make that
+memory decision or display a timer-driven prompt. They persist the path in
+`els.deferred`; **File > Deferred Opens...** is the explicit foreground consent
+surface. Obvious UNC/network paths follow the same route during quiet work so an
+offline share cannot block Tk's only event thread before the UI is usable.
+
+The active-document status item has six user-facing states: **Not on disk**,
+**On disk**, **Changed on disk**, **Missing**, **Unavailable**, and **Read-only**.
+It is deliberately an early-warning observer. It may update one quiet label, but
+never reloads or writes, never changes auto-save policy, and never asks a question.
+Automatic observation performs no I/O on obvious UNC/network paths. Every manual
+or automatic save independently performs the authoritative full conflict check
+before replacing a target, so the label is never treated as permission to write.
+
+## Adjacent state
+
+There is one state root: beside `els.exe` when packaged, beside `els.tcl` in a
+source run. `els.conf`, `els.deferred`, `swap\`, `backups\`, `handoff\`,
+`els.log`/`els.log.1`, and transient `.els-find\` all live there. No user-profile
+path is a fallback, migration source or deletion target. The sole compatibility
+case is an adjacent `config.tcl`: when `els.conf` is absent, it is copied once to
+the new name and retained. Corrupt deferred-open state is quarantined rather than
+silently rewritten when that preservation is possible.
+
+## About and credits
+
+The About dialog remains compact, but it names the foundations that make the
+single executable possible: Tcl/Tk 9, MinGW-w64, GCC, zlib and LibTomMath, followed
+by thanks to their maintainers and communities. It does not attempt to reproduce
+license text. The complete MIT and third-party notices are embedded in every
+released executable as `LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`.
 
 ## Non-goals
 
@@ -154,6 +223,4 @@ The study behind this design:
 - EditPad Pro search / regex: <https://www.editpadpro.com/search.html>,
   <https://www.regular-expressions.info/editpadpro.html>
 - iA Writer: responsive typography <https://ia.net/topics/responsive-typography-the-basics>
-- Blinking caret as an accessibility barrier:
-  <https://sensorydiversity.com/the-blinking-cursor-text-caret-is-an-overlooked-accessibility-barrier-in-software-development/>
 - Tk theming: `clam`, `ttk::style`; awthemes <https://github.com/bll123/tcl-awthemes>

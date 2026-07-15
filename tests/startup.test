@@ -46,6 +46,20 @@ proc startup_write {path bytes} {
     close $f
     return $path
 }
+proc startup_read {path} {
+    set f [open $path r]
+    try { return [read $f] } finally { close $f }
+}
+# Create a large fixture without manufacturing a 25 MiB Tcl string.  The hole is
+# never read when startup correctly defers the file.
+proc startup_sparse {path size} {
+    set f [open $path w]
+    fconfigure $f -translation binary
+    seek $f [expr {$size - 1}] start
+    puts -nonewline $f x
+    close $f
+    return $path
+}
 proc startup_wait_report {report pid} {
     set deadline [expr {[clock milliseconds] + 5000}]
     while {[clock milliseconds] < $deadline} {
@@ -84,18 +98,19 @@ proc startup_probe {appdir args} {
     return [startup_wait_report $report $pid]
 }
 
-test startup-1.1 {first launch without config maps and asks where to keep els.conf} -constraints startup -setup {
+test startup-1.1 {first launch pins adjacent config with no location prompt} -constraints startup -setup {
     set app [startup_appdir first]
 } -body {
     set r [startup_probe $app]
-    list [dict get $r mapped] [dict get $r cfgask] [dict get $r cfgask_mapped] [dict get $r config] \
+    list [dict get $r mapped] [dict get $r cfgask] [dict get $r cfgask_mapped] \
+         [expr {[dict get $r config] eq [file join $app els.conf]}] \
          [file exists [file join $app els.conf]] \
          [file exists [file join $app localappdata els els.conf]]
 } -cleanup {
     catch {file delete -force $app}
-} -result {1 1 1 {} 0 0}
+} -result {1 0 0 1 0 0}
 
-test startup-1.2 {existing config suppresses first-run location prompt} -constraints startup -setup {
+test startup-1.2 {existing adjacent config is loaded without any location prompt} -constraints startup -setup {
     set app [startup_appdir configured]
 } -body {
     set conf [file join $app els.conf]
@@ -140,3 +155,51 @@ test startup-1.4 {explicit launch file takes precedence over saved session} -con
 } -cleanup {
     catch {file delete -force $app}
 } -result {0 1 explicit.txt explicit.txt}
+
+test startup-1.5 {a large explicit startup file is persisted for later consent, never silently loaded} \
+        -constraints startup -setup {
+    set app [startup_appdir deferred]
+} -body {
+    set p [startup_sparse [file join $app huge.txt] 26214401]
+    set r [startup_probe $app $p]
+    list [dict get $r cfgask] [dict get $r docs] \
+         [lmap q [dict get $r paths] {file tail $q}] \
+         [lmap q [dict get $r deferred] {file tail $q}] \
+         [file exists [file join $app els.deferred]]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {0 1 {{}} huge.txt 1}
+
+test startup-1.6 {failed explicit path is logged and does not suppress a usable saved session} \
+        -constraints startup -setup {
+    set app [startup_appdir missing_explicit]
+} -body {
+    set prior [startup_write [file join $app prior.txt] "prior session\n"]
+    set missing [file join $app missing-explicit.txt]
+    set conf [file join $app els.conf]
+    startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
+        restore_session 1 session_files [list $prior] session_active $prior]
+    set r [startup_probe $app $missing]
+    set log [file join $app els.log]
+    list [dict get $r docs] [lmap p [dict get $r paths] {file tail $p}] \
+         [expr {[file exists $log] && [string match "*quiet open failed*" [startup_read $log]]}]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {1 prior.txt 1}
+
+test startup-1.7 {mixed good and failed explicit paths keep the good launch and log the failure} \
+        -constraints startup -setup {
+    set app [startup_appdir mixed_explicit]
+} -body {
+    set prior [startup_write [file join $app previous.txt] "previous\n"]
+    set good [startup_write [file join $app good.txt] "good\n"]
+    set missing [file join $app absent.txt]
+    startup_write [file join $app els.conf] [dict create geometry 800x600 recent {} word_wrap 0 \
+        restore_session 1 session_files [list $prior] session_active $prior]
+    set r [startup_probe $app $missing $good]
+    set log [file join $app els.log]
+    list [dict get $r docs] [lmap p [dict get $r paths] {file tail $p}] \
+         [expr {[file exists $log] && [string match "*quiet open failed*" [startup_read $log]]}]
+} -cleanup {
+    catch {file delete -force $app}
+} -result {1 good.txt 1}

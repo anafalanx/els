@@ -10,6 +10,7 @@ set ::els_helpers_loaded 1
 
 package require Tk
 package require tcltest
+::tcltest::testConstraint powershellAvailable [expr {[auto_execok powershell] ne ""}]
 
 # Keep the test UI invisible without unmapping it. Keyboard `event generate`
 # needs a mapped, focusable window, so we can't withdraw the root; instead make
@@ -36,8 +37,8 @@ source [file join $::ELS_ROOT els.tcl]
 # hygiene, so a test can assert what els actually ships with (F62).
 set ::els_shipped_backups $::els::backups
 
-# Pin the config path into the temp dir, so build's resolver is skipped and the
-# first-run location dialog can never pop during a test run.
+# Pin the config path into the temp dir so tests never read or write the
+# source-adjacent product state.
 set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
 
@@ -132,14 +133,19 @@ proc ::tk_chooseDirectory {args} { return "" }
 
 # Build a clean els UI for a test, resetting all document state.
 proc els_reset {} {
+    # Stop and reap isolated find workers before their widgets/snapshots vanish.
+    # The worker Job Object is the final backstop, but orderly per-test cleanup
+    # keeps the hermetic adjacent state directory empty and deterministic.
+    catch {els::find_shutdown}
     catch {. configure -menu {}}
     foreach w [winfo children .] { destroy $w }
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    foreach a {docPath docEnc docBom docEol docRaw docRecovered docDecodeLossy swapSig savedSig
+    foreach a {docPath docEnc docBom docEol docRaw docRecovered docRecoverySource docDecodeLossy docFormatPending swapSig savedSig
+               docDiskState docDiskMeta docDiskContent docDiskDetail docDiskDeepAt
                savedSigPath dirtySince loading docLossyOk docLossyPause docExtModPause
-               swap_fail_streak} {
+               swap_fail_streak handoff_seen docEpoch} {
         array unset ::els::$a
         array set ::els::$a {}
     }
@@ -154,6 +160,7 @@ proc els_reset {} {
     # leaves autosave running for every later test FILE (timing flakiness).
     catch {els::swap_stop}
     catch {els::handoff_stop}
+    catch {els::disk_watch_deactivate}
     set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
     set ::els::handoff_after ""
@@ -163,6 +170,12 @@ proc els_reset {} {
     # litter-free; backup tests enable + retune the knobs per test
     set ::els::backups 0
     set ::els::BK_RING 8 ; set ::els::BK_MININT 60
+    set ::els::OPEN_WARN_SIZE 26214400
+    set ::els::FIND_MAXHITS 5000 ; set ::els::FIND_MAXINDEX 1000000
+    set ::els::FIND_INPUT_MAX 268435456 ; set ::els::FIND_OUTPUT_MAX 268435456
+    set ::els::FIND_SLICE_CHARS 262144 ; set ::els::FIND_SLICE_BYTES 262144
+    set ::els::FIND_SEARCH_MS 10000 ; set ::els::FIND_REPLACE_MS 30000
+    set ::els::find_worker_command_override {}
     set ::els::swap_interval 2000 ; set ::els::swap_debounce 400   ;# tick/debounce periods (F11 tests retune these)
     set ::els::status_note_after ""   ;# afters were cancelled above; unblock namelabel
     catch {file delete -force [file join [file dirname $::els::config_path] backups]}
@@ -174,7 +187,9 @@ proc els_reset {} {
     # Cancel every view-layer deferral too: find_after is a 130 ms TIMER and
     # tip_after 550 ms — they survive widget destruction, so one test's pending
     # callback could fire into a LATER test's update (order-dependent flakes).
-    foreach v {find_after refresh_after gutter_after vs_after hs_after ws_after} {
+    foreach v {find_after find_poll_after find_reap_after find_snapshot_after \
+               find_validation_after find_highlight_after find_output_after \
+               refresh_after gutter_after vs_after hs_after ws_after tabs_layout_after disk_watch_after} {
         catch {after cancel [set ::els::$v]}
         set ::els::$v ""
     }
@@ -185,14 +200,29 @@ proc els_reset {} {
     # list, so no file inherits a stray search (F58).
     set ::els::find_mode "" ; set ::els::find_q "" ; set ::els::find_r ""
     set ::els::find_matches {} ; set ::els::find_current -1
+    set ::els::find_truncated 0 ; set ::els::find_index_truncated 0
+    set ::els::find_generation 0 ; set ::els::find_job_seq 0
+    set ::els::find_job {} ; set ::els::find_retired {} ; set ::els::find_pending {}
+    set ::els::find_snapshot {} ; set ::els::find_snapshot_build {}
+    set ::els::find_result_job {} ; set ::els::find_index_path "" ; set ::els::find_total 0
+    set ::els::find_validation {} ; set ::els::find_highlight_state {}
+    set ::els::find_output_read {} ; set ::els::find_replace_all_busy 0
+    set ::els::find_applying 0 ; set ::els::find_shutdown 0
+    set ::els::find_test_sync 1
     set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::recent {}
+    set ::els::deferred_files {}
+    set ::els::deferred_blocked 0 ; set ::els::deferred_notice ""
+    set ::els::last_open_outcome ""
+    set ::els::tabs_menu_choice ""
     # And as the final backstop, cancel EVERY pending after (e.g. the
     # `after idle recover_boot` scheduled by config_apply_choice in cfg-1.3,
     # which otherwise fired mid-suite and could deiconify a REAL recovery
     # dialog over the desktop).
     foreach a [after info] { catch {after cancel $a} }
     set ::els::probe_quiet 0
+    set ::els::disk_watch_active 0 ; set ::els::DISK_WATCH_MS 5000
+    set ::els::DISK_DEEP_BACKOFF_MS 1500 ; set ::els::DISK_DEEP_PROBE_CAP 16777216
     set ::els::session_id_cached "" ; set ::els::session_token_cached ""
     set ::els::lock_handle "" ; set ::els::lock_chan ""
     set ::els::last_recover 0 ; set ::els::recover_auto 0
@@ -213,6 +243,9 @@ proc els_reset {} {
     set ::els_test_mbcount 0 ; set ::els_test_mbargs {} ; set ::els_test_mbqueue {}
     set ::els_test_bgerrors {}
     catch {file delete -force $::els::config_path}
+    catch {file delete -force [els::deferred_path]}
+    catch {file delete -force [file join $::ELS_TMP .els-find]}
+    foreach q [glob -nocomplain "[els::deferred_path].corrupt-*"] { catch {file delete -force $q} }
     catch {font configure elsMono -size 11}
     set ::els::font_size 11
     catch {set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]}

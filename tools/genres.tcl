@@ -20,10 +20,24 @@ proc script_root {} {
 set ROOT [script_root]
 set OUT  [lindex $argv 0]
 if {$OUT eq ""} { set OUT [file join $ROOT build] }
-file mkdir $OUT
+if {[llength $argv] > 1} { error "usage: genres.tcl ?output-directory?" }
+set OUT [file normalize $OUT]
+set BUILD [file normalize [file join $ROOT build]]
+set outKey [string tolower [string map {\\ /} $OUT]]
+set buildKey [string trimright [string tolower [string map {\\ /} $BUILD]] /]
+if {$outKey ne $buildKey && [string first "$buildKey/" "$outKey/"] != 0} {
+    error "genres output must remain below $BUILD: $OUT"
+}
+if {![file exists $OUT]} { file mkdir $OUT }
+if {[catch {set outStat [file lstat $OUT]}] || [dict get $outStat type] ne "directory"} {
+    error "genres output must be a real directory: $OUT"
+}
 
 # --- version, straight from els.tcl ------------------------------------------
-set fh [open [file join $ROOT els.tcl] r] ; set src [read $fh] ; close $fh
+set sourcePath [file join $ROOT els.tcl]
+if {![file isfile $sourcePath]} { error "genres: els.tcl is missing or not a regular file" }
+set fh [open $sourcePath r]
+try { set src [read $fh] } finally { close $fh }
 if {![regexp {variable version "([0-9][0-9.]*)"} $src -> ver]} {
     error "genres: could not read `variable version` from els.tcl"
 }
@@ -33,8 +47,11 @@ set fv4  [join [lrange $parts 0 3] ,]     ;# FILEVERSION    0,30,0,0
 set vdot [join [lrange $parts 0 3] .]     ;# manifest "version"  0.50.0.0
 
 proc emit {path text} {
-    set fh [open $path w] ; fconfigure $fh -translation lf
-    puts -nonewline $fh $text ; close $fh
+    set fh [open $path {WRONLY CREAT EXCL}]
+    try {
+        fconfigure $fh -encoding utf-8 -translation lf
+        puts -nonewline $fh $text
+    } finally { close $fh }
 }
 
 # --- application manifest -----------------------------------------------------

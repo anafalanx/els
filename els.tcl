@@ -11,10 +11,418 @@
 # scrollbar and status bar re-point to whichever document is active.  A custom
 # flat tab strip switches between them.
 
+# ---------------------------------------------------------------------------
+# Isolated find worker
+# ---------------------------------------------------------------------------
+# User regular expressions never run in the UI interpreter.  The normal source
+# build starts this file under tclsh; the packaged build starts the same exe and
+# reaches this dispatch after its embedded Tcl/Tk runtime has initialized.  Keep
+# every command in this section pure Tcl and before `package require Tk`, so the
+# source worker does not load or map Tk at all.  A packaged worker may already
+# own Tk's implicit root, but it exits without entering the event loop; withdraw
+# it immediately as an additional no-flash guard.
+namespace eval ::elsworker {
+    variable VERSION 1
+    variable CONTROL_MAX 262144
+    variable FIELD_MAX 65536
+    variable SNAPSHOT_MAX 268435456
+    variable MATCH_MAX 1000000
+    variable RECORD_BYTES 42
+    variable OUTPUT_MAX 268435456
+}
+
+proc ::elsworker::read_regular {path limit} {
+    if {![file exists $path] || [file type $path] ne "file"} {
+        error "required regular file is missing"
+    }
+    set size [file size $path]
+    if {$size < 0 || $size > $limit} { error "file exceeds limit" }
+    set f [::open $path rb]
+    try { set raw [read $f [expr {$limit + 1}]] } finally { close $f }
+    if {[string length $raw] != $size || [string length $raw] > $limit} {
+        error "file changed while being read"
+    }
+    return $raw
+}
+
+proc ::elsworker::decode_utf8 {raw} {
+    return [encoding convertfrom -profile strict utf-8 $raw]
+}
+
+proc ::elsworker::encode_utf8 {text} {
+    return [encoding convertto -profile strict utf-8 $text]
+}
+
+# Parse a serialized Tcl dictionary without allowing duplicate keys.  `dict
+# create {*}$value` alone would silently let the last duplicate win, which would
+# make the file protocol ambiguous at exactly the trust boundary it protects.
+proc ::elsworker::exact_dict {text keys} {
+    if {[catch {llength $text} n] || $n % 2} { error "invalid dictionary list" }
+    set out [dict create]
+    foreach {k v} $text {
+        if {[dict exists $out $k]} { error "duplicate dictionary key" }
+        dict set out $k $v
+    }
+    if {[lsort [dict keys $out]] ne [lsort $keys]} { error "dictionary schema mismatch" }
+    return $out
+}
+
+proc ::elsworker::write_atomic_utf8 {path text} {
+    set raw [::elsworker::encode_utf8 $text]
+    set tmp "$path.tmp-[pid]-[clock clicks]"
+    set f [::open $tmp {WRONLY CREAT EXCL TRUNC}]
+    fconfigure $f -translation binary
+    try { puts -nonewline $f $raw } finally { close $f }
+    # Every protocol leaf is single-assignment.  Refuse an unexpected existing
+    # target instead of replacing something that appeared after the parent made
+    # its containment checks.
+    file rename $tmp $path
+}
+
+proc ::elsworker::wait_for_go {jobdir token} {
+    set path [file join $jobdir go]
+    set until [expr {[clock milliseconds] + 5000}]
+    while {[clock milliseconds] < $until} {
+        if {[file exists $path]} {
+            if {[catch {
+                set raw [::elsworker::read_regular $path $::elsworker::CONTROL_MAX]
+                set d [::elsworker::exact_dict [::elsworker::decode_utf8 $raw] \
+                    {command token version}]
+                expr {[dict get $d version] == $::elsworker::VERSION \
+                    && [dict get $d command] eq "go" \
+                    && [dict get $d token] eq $token}
+            } ok] == 0 && $ok} { return 1 }
+            return 0
+        }
+        after 25
+    }
+    return 0
+}
+
+proc ::elsworker::expand_subspec {subspec source groups} {
+    set out ""
+    set n [string length $subspec]
+    for {set i 0} {$i < $n} {incr i} {
+        set ch [string index $subspec $i]
+        if {$ch eq "&"} {
+            set group 0
+        } elseif {$ch eq "\\" && $i + 1 < $n} {
+            set next [string index $subspec [expr {$i + 1}]]
+            if {[regexp {^[0-9]$} $next]} {
+                set group $next
+                incr i
+            } elseif {$next eq "\\" || $next eq "&"} {
+                append out $next
+                incr i
+                continue
+            } else {
+                # Tcl regsub preserves an unknown escape (and a trailing
+                # backslash) byte-for-byte in the substitution result.
+                append out $ch
+                continue
+            }
+        } else {
+            append out $ch
+            continue
+        }
+        if {$group < [llength $groups]} {
+            lassign [lindex $groups $group] a b
+            if {$a >= 0 && $b >= $a} { append out [string range $source $a [expr {$b - 1}]] }
+        }
+    }
+    return $out
+}
+
+proc ::elsworker::adapt_case {enabled match replacement} {
+    if {!$enabled || $match eq "" || ![regexp {[[:alpha:]]} $match]} {
+        return $replacement
+    }
+    if {$match eq [string tolower $match]} { return [string tolower $replacement] }
+    if {$match eq [string totitle $match]} { return [string totitle $replacement] }
+    if {$match eq [string toupper $match]} { return [string toupper $replacement] }
+    return $replacement
+}
+
+proc ::elsworker::append_output {outVar bytesVar crcVar limit text} {
+    upvar 1 $outVar out $bytesVar bytes $crcVar crc
+    set raw [::elsworker::encode_utf8 $text]
+    incr bytes [string length $raw]
+    if {$bytes > $limit} { error "replacement output exceeds limit" }
+    set crc [zlib crc32 $raw $crc]
+    append out $text
+}
+
+proc ::elsworker::record {f crcVar start end} {
+    upvar 1 $crcVar crc
+    set rec [format "%020d %020d\n" $start $end]
+    if {[string length $rec] != $::elsworker::RECORD_BYTES} { error "match offset overflow" }
+    puts -nonewline $f $rec
+    set crc [zlib crc32 $rec $crc]
+}
+
+proc ::elsworker::run_job {jobdir token request source} {
+    set kind [dict get $request kind]
+    set pattern [dict get $request pattern]
+    set replacement [dict get $request replacement]
+    set nocase [dict get $request nocase]
+    set regexMode [dict get $request regex_mode]
+    set adapt [dict get $request adapt]
+    set matchLimit [dict get $request match_limit]
+    set outputLimit [dict get $request output_limit]
+    set hintStart [dict get $request hint_start]
+    set hintEnd [dict get $request hint_end]
+    set deadline [expr {[clock milliseconds] + [dict get $request deadline_ms]}]
+
+    set matchPath [file join $jobdir matches.idx]
+    set mf [::open $matchPath {WRONLY CREAT EXCL TRUNC}]
+    fconfigure $mf -translation binary
+    set matchCrc 0
+    set matchCount 0
+    set matchTruncated 0
+    set changedCount 0
+    set status ok
+    set err ""
+    set sourceChars [string length $source]
+    set output ""
+    set outputBytes 0
+    set outputCrc 0
+    set cursor 0
+    set offset 0
+    set foundHint 0
+    set flags {-line}
+    if {$nocase} { lappend flags -nocase }
+
+    try {
+        while {$offset <= $sourceChars} {
+            if {[clock milliseconds] > $deadline} { error "worker deadline exceeded" }
+            set rc [catch {
+                regexp {*}$flags -indices -start $offset -- $pattern $source \
+                    m g1 g2 g3 g4 g5 g6 g7 g8 g9
+            } matched]
+            if {$rc} {
+                set status bad-pattern
+                set err $matched
+                break
+            }
+            if {!$matched} { break }
+            lassign $m start last
+            set end [expr {$last < $start ? $start : $last + 1}]
+            if {$start < 0 || $end < $start || $end > $sourceChars} {
+                error "regex engine returned an invalid range"
+            }
+
+            if {$kind eq "replace-one"} {
+                if {$start > $hintStart} { break }
+                if {$start != $hintStart || $end != $hintEnd} {
+                    set offset [expr {$end > $start ? $end : $start + 1}]
+                    if {$start == $sourceChars && $end == $start} { break }
+                    continue
+                }
+                set foundHint 1
+            }
+
+            incr matchCount
+            if {$matchCount > $matchLimit} {
+                set matchTruncated 1
+                if {$kind ne "search"} {
+                    set status limit
+                    set err "match limit exceeded"
+                }
+                break
+            }
+            ::elsworker::record $mf matchCrc $start $end
+
+            if {$kind ne "search"} {
+                if {$kind eq "replace-all"} {
+                    ::elsworker::append_output output outputBytes outputCrc $outputLimit \
+                        [string range $source $cursor [expr {$start - 1}]]
+                }
+                set groups {}
+                foreach pair [list $m $g1 $g2 $g3 $g4 $g5 $g6 $g7 $g8 $g9] {
+                    lassign $pair a b
+                    if {$a < 0 || $b < $a} {
+                        lappend groups {-1 -1}
+                    } else {
+                        lappend groups [list $a [expr {$b + 1}]]
+                    }
+                }
+                if {$regexMode} {
+                    set repl [::elsworker::expand_subspec $replacement $source $groups]
+                } else {
+                    set repl $replacement
+                }
+                set matchedText [string range $source $start [expr {$end - 1}]]
+                set repl [::elsworker::adapt_case $adapt $matchedText $repl]
+                ::elsworker::append_output output outputBytes outputCrc $outputLimit $repl
+                if {$repl ne $matchedText} { incr changedCount }
+                set cursor $end
+            }
+
+            if {$kind eq "replace-one"} { break }
+            if {$end > $start} {
+                set offset $end
+            } elseif {$start < $sourceChars} {
+                set offset [expr {$start + 1}]
+            } else {
+                break
+            }
+        }
+
+        if {$status eq "ok" && $kind eq "replace-one" && !$foundHint} {
+            set status stale
+            set err "hint no longer identifies the requested match"
+        }
+        if {$status eq "ok" && $kind eq "replace-all"} {
+            ::elsworker::append_output output outputBytes outputCrc $outputLimit \
+                [string range $source $cursor end]
+        }
+    } trap {*} {e o} {
+        set status error
+        set err $e
+    } finally {
+        close $mf
+    }
+
+    set outputChars 0
+    if {$status eq "ok" && $kind ne "search"} {
+        set outputChars [string length $output]
+        set raw [::elsworker::encode_utf8 $output]
+        if {[string length $raw] != $outputBytes || [zlib crc32 $raw] != $outputCrc} {
+            set status error
+            set err "internal output verification failed"
+        } else {
+            set outPath [file join $jobdir replacement.utf8]
+            set f [::open $outPath {WRONLY CREAT EXCL TRUNC}]
+            fconfigure $f -translation binary
+            try { puts -nonewline $f $raw } finally { close $f }
+        }
+    }
+
+    set matchBytes [file size $matchPath]
+    if {$matchBytes != min($matchCount, $matchLimit) * $::elsworker::RECORD_BYTES} {
+        set status error
+        set err "internal match index verification failed"
+    }
+    # Failed work is never committable.  Do this after every self-check: output
+    # and match-index verification can themselves turn an otherwise successful
+    # replacement into an error.  Keep the match index for diagnostics, but
+    # make every replacement/output field unambiguously empty and remove any
+    # regular replacement file that an earlier stage may have published.
+    if {$status ne "ok"} {
+        set changedCount 0
+        set output ""
+        set outputChars 0
+        set outputBytes 0
+        set outputCrc 0
+        set outPath [file join $jobdir replacement.utf8]
+        if {[file exists $outPath] && ![catch {file type $outPath} outType] \
+                && $outType eq "file"} {
+            catch {file delete $outPath}
+        }
+    }
+    return [dict create \
+        version $::elsworker::VERSION token $token status $status kind $kind \
+        source_chars [dict get $request source_chars] \
+        source_bytes [dict get $request source_bytes] \
+        source_crc [dict get $request source_crc] \
+        match_count [expr {min($matchCount, $matchLimit)}] \
+        match_truncated $matchTruncated match_bytes $matchBytes match_crc $matchCrc \
+        changed_count $changedCount output_chars $outputChars \
+        output_bytes $outputBytes output_crc $outputCrc error [string range $err 0 4095]]
+}
+
+proc ::elsworker::main {jobdir token} {
+    if {![regexp {^[0-9a-f]{16,64}$} $token]} { return 2 }
+    if {![file exists $jobdir] || [file type $jobdir] ne "directory"} { return 2 }
+    if {![::elsworker::wait_for_go $jobdir $token]} { return 3 }
+    set requestKeys {adapt deadline_ms hint_end hint_start kind match_limit nocase \
+        output_limit pattern regex_mode replacement source_bytes source_chars source_crc token version}
+    if {[catch {
+        set reqRaw [::elsworker::read_regular [file join $jobdir request.dict] \
+            $::elsworker::CONTROL_MAX]
+        set request [::elsworker::exact_dict [::elsworker::decode_utf8 $reqRaw] $requestKeys]
+        if {[dict get $request version] != $::elsworker::VERSION \
+                || [dict get $request token] ne $token} { error "request identity mismatch" }
+        if {[dict get $request kind] ni {search replace-one replace-all}} { error "invalid job kind" }
+        foreach k {nocase regex_mode adapt} {
+            if {[dict get $request $k] ni {0 1}} { error "invalid boolean" }
+        }
+        foreach k {source_bytes source_chars source_crc match_limit output_limit deadline_ms hint_start hint_end} {
+            if {![string is entier -strict [dict get $request $k]] || [dict get $request $k] < 0} {
+                error "invalid numeric field"
+            }
+        }
+        if {[dict get $request source_crc] > 0xffffffff \
+                || [dict get $request match_limit] < 1 \
+                || [dict get $request deadline_ms] < 1} { error "request numeric range exceeded" }
+        if {[dict get $request source_bytes] > $::elsworker::SNAPSHOT_MAX \
+                || [dict get $request source_chars] > $::elsworker::SNAPSHOT_MAX \
+                || [dict get $request match_limit] > $::elsworker::MATCH_MAX \
+                || [dict get $request output_limit] > $::elsworker::OUTPUT_MAX \
+                || [dict get $request deadline_ms] > 30000} { error "request limit exceeded" }
+        if {[dict get $request source_chars] > [dict get $request source_bytes] \
+                || [dict get $request hint_end] < [dict get $request hint_start] \
+                || [dict get $request hint_end] > [dict get $request source_chars] \
+                || ([dict get $request kind] ne "replace-one" \
+                    && ([dict get $request hint_start] != 0 \
+                        || [dict get $request hint_end] != 0))} {
+            error "request range invariant mismatch"
+        }
+        foreach k {pattern replacement} {
+            if {[string length [::elsworker::encode_utf8 [dict get $request $k]]] > $::elsworker::FIELD_MAX} {
+                error "request field exceeds limit"
+            }
+        }
+        set snapRaw [::elsworker::read_regular [file join $jobdir snapshot.utf8] \
+            $::elsworker::SNAPSHOT_MAX]
+        if {[string length $snapRaw] != [dict get $request source_bytes] \
+                || [zlib crc32 $snapRaw] != [dict get $request source_crc]} {
+            error "snapshot byte identity mismatch"
+        }
+        set source [::elsworker::decode_utf8 $snapRaw]
+        if {[string length $source] != [dict get $request source_chars]} {
+            error "snapshot character identity mismatch"
+        }
+        set result [::elsworker::run_job $jobdir $token $request $source]
+        ::elsworker::write_atomic_utf8 [file join $jobdir result.ready] $result
+    } err opts]} {
+        # If the request was readable enough to authenticate, publish a bounded
+        # failure record.  Otherwise leave no result: the parent treats missing
+        # or malformed protocol state as failure and never touches the document.
+        catch {
+            set result [dict create version $::elsworker::VERSION token $token \
+                status error kind unknown source_chars 0 source_bytes 0 source_crc 0 \
+                match_count 0 match_truncated 0 match_bytes 0 match_crc 0 \
+                changed_count 0 output_chars 0 output_bytes 0 output_crc 0 \
+                error [string range $err 0 4095]]
+            ::elsworker::write_atomic_utf8 [file join $jobdir result.ready] $result
+        }
+        return 4
+    }
+    return 0
+}
+
+set ::elsworker::_dispatch 0
+if {[llength $::argv] == 3 && [lindex $::argv 0] eq "--find-worker"} {
+    set _script [info script]
+    set _sourceDirect 0
+    catch { set _sourceDirect [expr {[file normalize $_script] eq [file normalize $::argv0]}] }
+    set _packagedDirect [expr {[string match {//zipfs:/*/main.tcl} $_script] \
+        && [file tail $::argv0] eq [file tail [info nameofexecutable]]}]
+    set ::elsworker::_dispatch [expr {$_sourceDirect || $_packagedDirect}]
+}
+if {$::elsworker::_dispatch} {
+    catch {wm withdraw .}
+    set _rc [catch {::elsworker::main [lindex $::argv 1] [lindex $::argv 2]} _result]
+    if {$_rc} { exit 5 }
+    exit $_result
+}
+unset ::elsworker::_dispatch
+
 package require Tk
 
 namespace eval els {
-    variable version "0.92"      ;# 0.92: 0.91 bug-hunt hardening — data-safety, encoding, long-path, single-instance
+    variable version "0.93"      ;# 0.93: production hardening — adjacent state, isolated find/replace, resilient Windows lifecycle
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
@@ -30,7 +438,9 @@ namespace eval els {
     variable docEol ; array set docEol {}   ;# id -> lf | crlf | cr
     variable docRaw ; array set docRaw {}   ;# id -> exact bytes as loaded ("" = never from disk)
     variable docRecovered ; array set docRecovered {}  ;# id -> 1 if this tab is crash-recovered (unsaved)
+    variable docRecoverySource; array set docRecoverySource {} ;# id -> old orphan retained until a replacement swap is verified
     variable docDecodeLossy; array set docDecodeLossy {} ;# id -> 1 if decode substituted U+FFFD (bad bytes for the encoding)
+    variable docFormatPending; array set docFormatPending {} ;# id -> explicit Reopen-with format awaits manual Save
     variable docLossyOk   ; array set docLossyOk {}    ;# id -> user accepted lossy saves (this session)
     variable docLossyPause; array set docLossyPause {} ;# id -> auto-save paused (unencodable chars)
     variable docExtModPause; array set docExtModPause {} ;# id -> auto-save paused (file changed on disk)
@@ -44,6 +454,13 @@ namespace eval els {
     variable BK_MAXAGE 2592000      ;# s: prune backups older than 30 days
     variable BK_MAXSIZE 20971520    ;# bytes: don't back up files larger than 20 MB
     variable OPEN_WARN_SIZE 26214400 ;# bytes: confirm before opening a file larger than 25 MB
+    variable IO_CHUNK 1048576        ;# bounded physical read size for streaming I/O
+    variable HANDOFF_MAX_BYTES 1048576 ;# poison guard for tiny handoff request files
+    variable DEFERRED_MAX_BYTES 1048576 ;# poison guard for the adjacent deferred queue
+    variable deferred_files {}       ;# large files held for a deliberate foreground open
+    variable deferred_blocked 0      ;# corrupt queue could not be quarantined: never overwrite it
+    variable deferred_notice ""      ;# startup diagnostic surfaced after the status bar exists
+    variable last_open_outcome ""    ;# opened|already|deferred|cancelled|failed (quiet callers inspect it)
     variable MAXUNDO 2000           ;# cap the per-doc undo stack (compound actions) so a long session can't grow it without bound
     # ---- crash-recovery / autosave subsystem (R2 / docs robustness P0-b) ----
     # A swap file per dirty doc under <configdir>/swap/, written atomically and
@@ -66,6 +483,7 @@ namespace eval els {
     variable lock_chan   ""         ;# pure-Tcl fallback: a held channel ("" = none)
     variable probe_quiet 0          ;# probe mode: alpha-0 every toplevel (no desktop flash)
     variable handoff_after ""       ;# primary's handoff-spool poll (single-instance)
+    variable handoff_seen; array set handoff_seen {} ;# attempt-0 requests already raised once
     variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
     variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
     variable log_active 0           ;# reentry latch: a failing els::log must not recurse via bgerror
@@ -75,10 +493,16 @@ namespace eval els {
     variable swapSig    ; array set swapSig    {}  ;# id -> last-written buffer sig "chars:crc"
     variable savedSig   ; array set savedSig   {}  ;# id -> on-disk file sig "size:mtime:crc" ("" untitled)
     variable savedSigPath; array set savedSigPath {} ;# id -> path savedSig was cached for (pins the R3 baseline)
+    variable docDiskState; array set docDiskState {} ;# id -> untitled|normal|changed|missing|unavailable|readonly
+    variable docDiskMeta; array set docDiskMeta {}   ;# id -> last cheap {path size mtime} observation
+    variable docDiskContent; array set docDiskContent {} ;# id -> normal|changed result cached for docDiskMeta
+    variable docDiskDetail; array set docDiskDetail {} ;# id -> short tooltip detail
+    variable docDiskDeepAt; array set docDiskDeepAt {} ;# id -> last forced full-content observation (ms)
     variable dirtySince ; array set dirtySince {}  ;# id -> 1 if edited since last successful swap
     variable loading    ; array set loading    {}  ;# id -> 1 while open/recovery mutate identity
     variable SWAP_SIG_FULL_CAP  4194304    ;# chars: above this an idle dirty doc reuses its cached sig
-    variable SWAP_FILE_CRC_CAP  16777216   ;# bytes: above this a file sig uses a sampled (head+tail) crc
+    variable SWAP_FILE_CRC_CAP  16777216   ;# retained config/test compatibility; signatures are now always full
+    variable DISK_DEEP_PROBE_CAP 16777216  ;# forced UI checks hash only reasonably small files
     variable STALE_SECS         45         ;# fallback liveness / litter staleness window (s)
     variable HEARTBEAT_EVERY    3          ;# bump the lock mtime every Nth tick
     # charset detection (chardet quality via the system ICU; 0 until loaded)
@@ -117,8 +541,42 @@ namespace eval els {
     variable find_current -1     ;# index into find_matches
     variable find_count ""       ;# status text e.g. "3 of 12"
     variable FIND_MAXHITS 5000   ;# cap tracked/highlighted matches; the count shows "N+"
-    variable find_truncated 0    ;# did the last scan hit FIND_MAXHITS?  (drives the "+")
+    variable FIND_MAXINDEX 1000000 ;# hard cap in the on-disk global match index
+    variable FIND_INPUT_MAX 268435456 ;# 256 MiB UTF-8 snapshot ceiling
+    variable FIND_OUTPUT_MAX 268435456 ;# 256 MiB staged replacement ceiling
+    variable FIND_SLICE_CHARS 262144   ;# bounded Text extraction per idle turn
+    variable FIND_SLICE_BYTES 262144   ;# bounded staged-output verification turn
+    variable FIND_RECORD_BYTES 42      ;# "%020d %020d\n"
+    variable FIND_SEARCH_MS 10000      ;# parent-enforced isolated-worker deadline
+    variable FIND_REPLACE_MS 30000
+    variable find_truncated 0    ;# exact global result has more than 5000 display highlights
+    variable find_index_truncated 0 ;# worker hit the 1,000,000 hard index ceiling
     variable find_adapt 0        ;# adapt-case replace (replacement follows the match's case)
+    variable docEpoch ; array set docEpoch {} ;# increments on every successful text mutation
+    variable find_generation 0   ;# stale callbacks/results can never win a newer request
+    variable find_job_seq 0
+    variable find_job {}         ;# active isolated worker job dictionary
+    variable find_retired {}     ;# killed jobs awaiting confirmed process exit + cleanup
+    variable find_poll_after ""
+    variable find_reap_after ""
+    variable find_snapshot {}    ;# immutable cache {doc epoch path chars bytes crc}
+    variable find_snapshot_build {} ;# in-progress idle-sliced snapshot state
+    variable find_snapshot_after ""
+    variable find_pending {}     ;# newest action waiting for a snapshot / worker slot
+    variable find_result_job {}  ;# completed search job retained for random-access F3
+    variable find_index_path ""
+    variable find_total 0
+    variable find_validation {}  ;# idle-sliced matches.idx verification state
+    variable find_validation_after ""
+    variable find_highlight_state {} ;# idle-sliced first-5000 display tagging
+    variable find_highlight_after ""
+    variable find_output_read {} ;# in-progress idle-sliced replacement verification
+    variable find_output_after ""
+    variable find_replace_all_busy 0 ;# accepted Replace All remains cancellable through every stage
+    variable find_applying 0     ;# suppress edit-triggered restart during atomic commit
+    variable find_shutdown 0
+    variable find_test_sync [expr {[info exists ::els_helpers_loaded] ? 1 : 0}]
+    variable find_worker_command_override {} ;# deterministic child used only by tests
     variable find_history {}     ;# recent search terms, newest first (cap 16)
     variable find_hidx -1        ;# position while cycling history with Up/Down
     variable show_ws 0           ;# View ▸ Show Whitespace
@@ -135,8 +593,6 @@ namespace eval els {
     variable hs_shown -1         ;# horizontal scrollbar visibility (only when wrap off + long lines)
     variable hs_after ""         ;# pending (idle) horizontal scrollbar-visibility update
     variable find_after ""       ;# pending (debounced) incremental search
-    variable find_scan_doc ""    ;# doc id the cached matches were scanned in
-    variable find_scan_chars -1  ;# buffer char count at scan time (staleness probe)
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
     variable tab_tip_delay 1000  ;# tabs are crossed often; let their tips breathe
     variable recent {}           ;# recently-opened file paths, newest first
@@ -151,14 +607,23 @@ namespace eval els {
                                   ;# explicit-file-arg launch never adopted it, so
                                   ;# persisting its own doc list would destroy the
                                   ;# stored multi-tab session
-    variable config_path ""      ;# resolved els.conf path ("" until resolved)
-    variable cfg_radio appdata   ;# first-run location dialog selection
+    variable config_path ""      ;# resolved executable-adjacent els.conf path
     variable gutter_px -1        ;# last-set gutter canvas width (px); -1 = unset
     variable gutter_after ""     ;# coalesced gutter-redraw after token
     variable refresh_after ""    ;# coalesced full-view refresh (resize bursts)
     variable tp_zoom_acc 0       ;# accumulated Ctrl+touchpad zoom delta
     variable recent_row_tip -1   ;# recent-list row whose hover tip is active
     variable recent_sel_path ""  ;# Maintain List selection, tracked by PATH
+    variable tabs_layout_after "" ;# coalesced tab-strip overflow layout
+    variable tabs_menu_choice ""  ;# radiobutton scratch state for the Tabs menu
+    variable TAB_LABEL_MAX 22      ;# hard character cap; active tab fits the minimum window
+    variable TAB_LABEL_PX 190      ;# hard text-pixel cap (wide glyphs cannot balloon a tab)
+    variable TAB_MENU_MAX 64       ;# hard character cap for the overflow menu
+    variable TAB_MENU_PX 420       ;# hard text-pixel cap for the overflow menu
+    variable disk_watch_active 0   ;# true only while the application is foreground-active
+    variable disk_watch_after ""   ;# modest active-window metadata poll
+    variable DISK_WATCH_MS 5000    ;# stat interval; deep checks are separately cached
+    variable DISK_DEEP_BACKOFF_MS 1500 ;# forced activations cannot repeatedly stream a file
     variable boot_script ""      ;# path of this file at source time (see below)
 }
 # Capture the script path NOW, while a `source` is active: `info script` is only
@@ -243,41 +708,174 @@ proc els::load_icon {} {
     wm iconphoto . -default {*}$imgs
 }
 # ---- config location ----------------------------------------------------
-# els keeps a tiny settings dict (window geometry + recent files) in one
-# els.conf.  It is sought next to the program first (portable), then under
-# %LOCALAPPDATA%\els.  On first run (neither exists) the user picks which.
+# els keeps its settings, recovery data and handoff state beside the program.
+# A source/dev run uses the source directory (not the shared wish directory);
+# a packaged zipfs build uses the directory containing els.exe.
 proc els::config_roots {} {
     # "next to the program" = the exe's folder when packaged, the script's
     # folder (the repo) in a dev run.
-    # Use the boot script captured at load time, NOT `info script`: config_roots
-    # runs from the first-run `after` callback where `info script` is "" — which
-    # missed the zipfs branch AND normalized "" to ".", making the portable
-    # candidate the cwd-relative "./els.conf" (settings written into whatever
-    # folder the launch happened from, and the choice never sticking).  Same fix
-    # association_exe already carries.
+    # Use the boot script captured at load time, NOT `info script`: this resolver
+    # can run from a later callback where `info script` is "".  That used to miss
+    # the zipfs branch and normalize "" to ".", turning the adjacent state path
+    # into cwd-relative "./els.conf" (state written into whichever directory the
+    # launch happened from).  Same fix association_exe already carries.
     set bs $::els::boot_script
     if {[string match "//zipfs:*" $bs]} {
         set progdir [file dirname [info nameofexecutable]]
     } else {
         set progdir [file dirname [file normalize $bs]]
     }
-    if {[info exists ::env(LOCALAPPDATA)] && $::env(LOCALAPPDATA) ne ""} {
-        set la $::env(LOCALAPPDATA)
-    } else {
-        # Tcl 9 removed tilde expansion (TIP 602): `file normalize ~` returns a
-        # literal cwd-relative "~" path.  `file home` is the replacement.
-        set la [file join [file home] AppData Local]
-    }
-    return [list $progdir [file join $la els]]
+    return [list $progdir]
 }
 proc els::config_candidates {{name els.conf}} {
-    lassign [els::config_roots] near appdata
-    return [list [file join $near $name] [file join $appdata $name]]
+    set near [lindex [els::config_roots] 0]
+    return [list [file join $near $name]]
 }
 proc els::config_legacy_candidates {} {
     return [els::config_candidates config.tcl]
 }
 proc els::config_file {} { return $::els::config_path }
+
+# Large files discovered by non-interactive startup/session/handoff paths are
+# never read silently and never trigger a timer-driven modal.  Keep them in their
+# own tiny adjacent state file: writing els.conf here would also rewrite session
+# ownership while startup is still deciding whether to adopt the previous one.
+proc els::deferred_path {} {
+    if {$::els::config_path eq ""} { return "" }
+    return [file join [file dirname $::els::config_path] els.deferred]
+}
+proc els::deferred_sanitize {paths} {
+    set out {}
+    foreach p $paths {
+        set n [els::session_path $p]
+        if {$n eq ""} { continue }
+        set duplicate 0
+        foreach old $out {
+            if {[els::same_path $old $n]} { set duplicate 1 ; break }
+        }
+        if {!$duplicate} { lappend out $n }
+    }
+    return $out
+}
+# Preserve a corrupt queue before allowing any new writer to replace it.  Kept
+# as a seam so fault tests can prove that a failed quarantine blocks overwrite.
+proc els::deferred_quarantine {path} {
+    set stamp "[clock seconds]-[pid]-[clock clicks]"
+    set target "$path.corrupt-$stamp"
+    file rename $path $target
+    return $target
+}
+proc els::deferred_load {} {
+    set ::els::deferred_files {}
+    set ::els::deferred_blocked 0
+    set ::els::deferred_notice ""
+    set p [els::deferred_path]
+    if {$p eq "" || ![file exists $p]} { return }
+    set fh ""
+    set problem ""
+    if {[catch {
+        if {[file isdirectory $p]} { error "state path is a directory" }
+        set fh [::open $p r]
+        fconfigure $fh -translation binary
+        set raw [read $fh [expr {$::els::DEFERRED_MAX_BYTES + 1}]]
+        close $fh
+        set fh ""
+        if {[string length $raw] > $::els::DEFERRED_MAX_BYTES} { error "state file exceeds size limit" }
+        set data [encoding convertfrom -profile strict utf-8 $raw]
+        # Force one exact dict parse and accept only the schema we actually
+        # understand.  Unknown/trailing keys are not silently rewritten away.
+        dict size $data
+        if {[llength $data] != 4} { error "duplicate or incomplete fields" }
+        if {[lsort [dict keys $data]] ne {files schema}} { error "unexpected fields" }
+        if {![string is integer -strict [dict get $data schema]] || [dict get $data schema] != 1} {
+            error "unsupported schema"
+        }
+        set files [dict get $data files]
+        llength $files
+        set ::els::deferred_files [els::deferred_sanitize $files]
+    } problem]} {
+        if {$fh ne ""} { catch {close $fh} }
+        set ::els::deferred_files {}
+        if {[catch {set quarantined [els::deferred_quarantine $p]} qerr]} {
+            # The evidence could not be moved aside.  Leave the original bytes
+            # untouched and prohibit every queue write for this run.
+            set ::els::deferred_blocked 1
+            set ::els::deferred_notice "deferred-open state is corrupt and could not be quarantined"
+            catch {els::log error "invalid deferred-open state at $p ($problem); quarantine failed: $qerr"}
+        } else {
+            set ::els::deferred_notice "corrupt deferred-open state was quarantined"
+            catch {els::log warn "invalid deferred-open state at $p ($problem); preserved as $quarantined"}
+        }
+    }
+}
+proc els::deferred_save {} {
+    if {$::els::deferred_blocked} {
+        catch {els::log error "refusing to overwrite corrupt deferred-open state"}
+        catch {els::status_note "deferred file list is blocked; corrupt state was preserved"}
+        return 0
+    }
+    set p [els::deferred_path]
+    if {$p eq ""} { return 0 }
+    if {[catch {
+        set payload [dict create schema 1 files [els::deferred_sanitize $::els::deferred_files]]
+        encoding convertto -profile strict utf-8 $payload
+    } bytes]} {
+        catch {els::log warn "could not encode deferred-open state without loss: $bytes"}
+        catch {els::status_note "deferred file list contains an invalid path and was not saved"}
+        return 0
+    }
+    set err [els::write_atomic $p $bytes ".els-deferred-[pid]-[clock clicks].tmp"]
+    if {$err ne ""} {
+        catch {els::log warn "could not persist deferred opens to $p: $err"}
+        catch {els::status_note "deferred file list could not be saved"}
+        return 0
+    }
+    return 1
+}
+proc els::deferred_contains {p} {
+    foreach old $::els::deferred_files {
+        if {[els::same_path $old $p]} { return 1 }
+    }
+    return 0
+}
+proc els::deferred_add {p} {
+    set n [els::session_path $p]
+    if {$n eq "" || [els::deferred_contains $n]} { return 0 }
+    set old $::els::deferred_files
+    lappend ::els::deferred_files $n
+    if {![els::deferred_save]} {
+        # The queue is a durability promise.  Never claim success for a path
+        # that exists only in RAM and would vanish at the next process exit.
+        set ::els::deferred_files $old
+        if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
+        return 0
+    }
+    if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
+    return 1
+}
+proc els::deferred_remove_many {paths} {
+    set before $::els::deferred_files
+    set kept {}
+    set changed 0
+    foreach queued $::els::deferred_files {
+        set remove 0
+        foreach p $paths {
+            if {[els::same_path $queued $p]} { set remove 1 ; break }
+        }
+        if {$remove} { set changed 1 } else { lappend kept $queued }
+    }
+    if {!$changed} { return 0 }
+    set ::els::deferred_files $kept
+    if {![els::deferred_save]} {
+        # Retaining an already-open duplicate is harmless; forgetting an entry
+        # without durably publishing that removal is not.  Roll memory back too.
+        set ::els::deferred_files $before
+        if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
+        return 0
+    }
+    if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
+    return 1
+}
 # Single choke point for resolving the config location: the instant the dir is
 # known, hold the session lock and start autosave -- so edits are protected even
 # before the first save or a session restore.
@@ -290,91 +888,19 @@ proc els::set_config_path {p} {
         els::handoff_start   ;# become the primary: poll for handed-off files
     }
 }
-# Point config_path at whichever location already holds a config; 1 if found,
-# 0 if this looks like a first run (neither location exists yet).
+# Pin config_path immediately, even when no state file exists yet.  Return 1
+# when an existing config (including old adjacent config.tcl) was found, else 0.
 proc els::config_resolve_existing {} {
-    lassign [els::config_candidates] near appdata
-    if {[file exists $near]}    { els::set_config_path $near    ; return 1 }
-    if {[file exists $appdata]} { els::set_config_path $appdata ; return 1 }
-    lassign [els::config_legacy_candidates] oldNear oldAppdata
-    foreach {old new} [list $oldNear $near $oldAppdata $appdata] {
-        if {![file exists $old]} { continue }
-        els::set_config_path $new
-        if {![file exists $new]} {
-            catch {
-                file mkdir [file dirname $new]
-                file copy -force $old $new
-            }
-        }
+    set near [lindex [els::config_candidates] 0]
+    set existed [file exists $near]
+    els::set_config_path $near
+    if {$existed} { return 1 }
+    set oldNear [lindex [els::config_legacy_candidates] 0]
+    if {[file exists $oldNear]} {
+        catch {file copy -force $oldNear $near}
         return 1
     }
     return 0
-}
-# First run: ask where to keep settings.  The dialog is callback-driven (NOT a
-# modal vwait): a vwait entered from this startup `after` deadlocks the packaged
-# single-exe before its main window is ever mapped.  config_apply_choice does
-# the work when the user clicks Continue.
-proc els::config_first_run {} {
-    lassign [els::config_candidates] near appdata
-    if {$::els::selftest} { set ::els::config_path $appdata ; return }
-    els::config_choice_dialog $near $appdata
-}
-proc els::config_postpone_choice {top} {
-    catch {grab release $top}
-    catch {destroy $top}
-}
-proc els::config_apply_choice {near appdata} {
-    els::set_config_path [expr {$::els::cfg_radio eq "near" ? $near : $appdata}]
-    els::save_geometry
-    catch {grab release .cfgask}
-    catch {destroy .cfgask}
-    after idle [list els::recover_boot 0]   ;# no orphans on a true first run; harmless
-}
-proc els::config_choice_dialog {near appdata} {
-    set ::els::cfg_radio appdata
-    set top .cfgask
-    catch {destroy $top}
-    toplevel $top -bg $::els::PAGE
-    # probe runs assert ismapped, so hide via alpha (like the root), not withdraw
-    if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
-    wm title $top "Welcome to els"
-    wm transient $top .
-    wm resizable $top 0 0
-    set apply [list els::config_apply_choice $near $appdata]
-    # closing the dialog is a POSTPONE, not consent: it used to run $apply and
-    # silently adopt the default location as if Continue had been clicked.
-    # Postponing leaves config_path unset for this session (no config written,
-    # autosave/recovery stay off) and the choice is asked again next launch.
-    wm protocol $top WM_DELETE_WINDOW [list els::config_postpone_choice $top]
-    bind $top <Escape> [list els::config_postpone_choice $top]
-    ttk::frame $top.f -padding 20 ; pack $top.f
-    ttk::label $top.f.h -text "Where should els keep its settings?" \
-        -font elsUIb -foreground $::els::INK
-    ttk::label $top.f.s -justify left -font elsUI -foreground $::els::MUTED \
-        -text "Your window size, recent files and preferences live in one small\nconfig file. Choose where to keep it."
-    grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
-    grid $top.f.s -row 1 -column 0 -sticky w -pady {0 16}
-    ttk::radiobutton $top.f.r1 -text "In your user profile (recommended)" \
-        -value appdata -variable ::els::cfg_radio
-    ttk::label $top.f.p1 -text [file nativename $appdata] -font elsUI -foreground $::els::MUTED
-    ttk::radiobutton $top.f.r2 -text "Next to els (portable)" \
-        -value near -variable ::els::cfg_radio
-    ttk::label $top.f.p2 -text [file nativename $near] -font elsUI -foreground $::els::MUTED
-    grid $top.f.r1 -row 2 -column 0 -sticky w
-    grid $top.f.p1 -row 3 -column 0 -sticky w -padx {24 0} -pady {0 10}
-    grid $top.f.r2 -row 4 -column 0 -sticky w
-    grid $top.f.p2 -row 5 -column 0 -sticky w -padx {24 0} -pady {0 18}
-    ttk::button $top.f.ok -text "Continue" -command $apply
-    grid $top.f.ok -row 6 -column 0 -sticky e
-    # route <Return> through the button's -command: $apply as a BIND script
-    # would get %-substituted, so a "%" in the install path (legal on Windows)
-    # corrupted where the config/swap dir lands when confirming with Enter
-    bind $top <Return> [list $top.f.ok invoke]
-    update idletasks
-    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
-    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
-    wm geometry $top +$x+$y
-    catch {grab $top}
 }
 # The VIRTUAL desktop rect {x y w h} — the bounding box of ALL monitors, with a
 # possibly-negative top-left.  From the native GetSystemMetrics(SM_*VIRTUALSCREEN)
@@ -601,8 +1127,17 @@ proc els::save_geometry {} {
     set ::els::geom_save_warned 0
 }
 
+proc els::remote_path {path} {
+    set slash [string map {\\ /} $path]
+    if {[string match -nocase {//?/UNC/*} $slash]} { return 1 }
+    if {[string range $slash 0 3] in {//?/ //./}} { return 0 }
+    return [expr {[string range $slash 0 1] eq "//"}]
+}
 proc els::session_path {p} {
     if {$p eq ""} { return "" }
+    # UNC normalization must stay lexical: asking the OS to canonicalize an
+    # offline share can stall startup before the UI exists.
+    if {[els::remote_path $p]} { return [string map {\\ /} $p] }
     if {[catch {file normalize $p} n]} { return "" }
     return $n
 }
@@ -642,6 +1177,134 @@ proc els::session_current_active {} {
 }
 proc els::session_set_restore {} {
     els::save_geometry
+}
+
+# ---- deferred large-file opens ------------------------------------------
+# The queue is intentionally modeless: it is the one foreground place where a
+# user can inspect paths gathered by startup/session/handoff code and explicitly
+# consent to the memory cost of opening them.
+proc els::deferred_dialog_selected {} {
+    set lb .deferred.f.list.lb
+    if {![winfo exists $lb]} { return {} }
+    set out {}
+    foreach i [$lb curselection] {
+        if {$i >= 0 && $i < [llength $::els::deferred_files]} {
+            lappend out [lindex $::els::deferred_files $i]
+        }
+    }
+    return $out
+}
+proc els::deferred_dialog_refresh {} {
+    set lb .deferred.f.list.lb
+    if {![winfo exists $lb]} { return }
+    set selected [els::deferred_dialog_selected]
+    $lb delete 0 end
+    foreach p $::els::deferred_files { $lb insert end [els::display_path $p] }
+    foreach p $selected {
+        set i 0
+        foreach q $::els::deferred_files {
+            if {[els::same_path $p $q]} { $lb selection set $i ; break }
+            incr i
+        }
+    }
+    if {![llength [$lb curselection]] && [llength $::els::deferred_files]} {
+        $lb selection set 0
+        $lb activate 0
+        $lb see 0
+    }
+    set state [expr {[llength $::els::deferred_files] ? "normal" : "disabled"}]
+    .deferred.f.buttons.open configure -state $state
+    .deferred.f.buttons.forget configure -state $state
+}
+proc els::deferred_dialog_select_all {} {
+    set lb .deferred.f.list.lb
+    if {[winfo exists $lb] && [$lb size]} { $lb selection set 0 end }
+}
+proc els::deferred_dialog_open {} {
+    set paths [els::deferred_dialog_selected]
+    foreach p $paths {
+        # This button is deliberate foreground consent.  Bypass the threshold,
+        # but retain the normal open error dialog; a failed open stays queued.
+        els::open $p 0 0 1
+    }
+    if {[winfo exists .deferred.f.list.lb]} { focus .deferred.f.list.lb }
+}
+proc els::deferred_dialog_forget {} {
+    set paths [els::deferred_dialog_selected]
+    if {[llength $paths]} { els::deferred_remove_many $paths }
+    if {[winfo exists .deferred.f.list.lb]} { focus .deferred.f.list.lb }
+}
+proc els::deferred_dialog {} {
+    set top .deferred
+    if {[winfo exists $top]} {
+        wm deiconify $top
+        raise $top
+        focus $top.f.list.lb
+        return
+    }
+    toplevel $top -bg $::els::PAGE
+    wm withdraw $top
+    if {$::els::probe_quiet || (![catch {wm attributes . -alpha} rootAlpha] && $rootAlpha == 0.0)} {
+        catch {wm attributes $top -alpha 0.0}
+    }
+    wm title $top "Deferred Opens"
+    wm transient $top .
+    ttk::frame $top.f -padding 16
+    pack $top.f -fill both -expand 1
+    ttk::label $top.f.h -text "Files waiting for a deliberate open" -font elsUIb \
+        -foreground $::els::INK
+    ttk::label $top.f.s -font elsUI -foreground $::els::MUTED -justify left \
+        -text "Large files received during startup, session restore, or handoff are held here."
+    grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
+    grid $top.f.s -row 1 -column 0 -sticky w -pady {0 12}
+    ttk::frame $top.f.list
+    set lb $top.f.list.lb
+    listbox $lb -height 10 -width 72 -selectmode extended -exportselection 0 \
+        -font elsUI -bg $::els::PAGE -fg $::els::INK \
+        -selectbackground $::els::SEL -selectforeground $::els::INK \
+        -highlightcolor $::els::CARET -highlightbackground $::els::HAIR \
+        -yscrollcommand [list $top.f.list.vs set] \
+        -xscrollcommand [list $top.f.list.hs set]
+    ttk::scrollbar $top.f.list.vs -orient vertical -command [list $lb yview]
+    ttk::scrollbar $top.f.list.hs -orient horizontal -command [list $lb xview]
+    grid $lb -row 0 -column 0 -sticky nsew
+    grid $top.f.list.vs -row 0 -column 1 -sticky ns
+    grid $top.f.list.hs -row 1 -column 0 -sticky ew
+    grid columnconfigure $top.f.list 0 -weight 1
+    grid rowconfigure $top.f.list 0 -weight 1
+    grid $top.f.list -row 2 -column 0 -sticky nsew -pady {0 12}
+    ttk::frame $top.f.buttons
+    ttk::button $top.f.buttons.open -text "Open selected" -style Dialog.TButton \
+        -default active -command els::deferred_dialog_open
+    ttk::button $top.f.buttons.forget -text "Forget selected" -style Dialog.TButton \
+        -command els::deferred_dialog_forget
+    ttk::button $top.f.buttons.close -text Close -style Dialog.TButton \
+        -command [list destroy $top]
+    grid $top.f.buttons.open -row 0 -column 0 -padx {0 6}
+    grid $top.f.buttons.forget -row 0 -column 1 -padx {0 6}
+    grid $top.f.buttons.close -row 0 -column 2
+    grid $top.f.buttons -row 3 -column 0 -sticky e
+    grid columnconfigure $top.f 0 -weight 1
+    grid rowconfigure $top.f 2 -weight 1
+    bind $lb <Control-KeyPress-a> {els::deferred_dialog_select_all; break}
+    bind $lb <Control-KeyPress-A> {els::deferred_dialog_select_all; break}
+    bind $lb <KeyPress-Return> {els::deferred_dialog_open; break}
+    bind $lb <KeyPress-KP_Enter> {els::deferred_dialog_open; break}
+    bind $lb <KeyPress-Delete> {els::deferred_dialog_forget; break}
+    bind $lb <Double-Button-1> {els::deferred_dialog_open; break}
+    bind $top <Escape> [list destroy $top]
+    wm protocol $top WM_DELETE_WINDOW [list destroy $top]
+    els::deferred_dialog_refresh
+    update idletasks
+    set width [winfo reqwidth $top]
+    set height [winfo reqheight $top]
+    wm minsize $top 520 $height
+    wm resizable $top 1 0
+    set x [expr {[winfo rootx .] + ([winfo width .] - $width) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - $height) / 2}]
+    wm geometry $top +$x+$y
+    wm deiconify $top
+    focus $lb
 }
 
 # ---- recent files -------------------------------------------------------
@@ -774,7 +1437,8 @@ proc els::recent_manage {} {
 
     ttk::frame .recent.f.buttons
     grid .recent.f.buttons -row 4 -column 0 -columnspan 3 -sticky ew
-    ttk::button .recent.f.buttons.open -text Open -style Dialog.TButton -command els::recent_manage_open
+    ttk::button .recent.f.buttons.open -text Open -style Dialog.TButton \
+        -default active -command els::recent_manage_open
     ttk::button .recent.f.buttons.remove -text Remove -style Dialog.TButton -command els::recent_manage_remove
     ttk::button .recent.f.buttons.missing -text "Remove Missing" -style Dialog.TButton -command els::recent_manage_remove_missing
     ttk::button .recent.f.buttons.clear -text Clear -style Dialog.TButton -command els::recent_manage_clear
@@ -786,6 +1450,8 @@ proc els::recent_manage {} {
     grid rowconfigure .recent.f 2 -weight 1
     bind .recent.f.list <<ListboxSelect>> els::recent_manage_select
     bind .recent.f.list <Double-Button-1> els::recent_manage_open
+    bind .recent.f.list <Return>   {els::recent_manage_open ; break}
+    bind .recent.f.list <KP_Enter> {els::recent_manage_open ; break}
     # re-elide the rows AND the detail label to the current width on any resize
     bind .recent.f.list <Configure> els::recent_manage_refresh
     bind .recent <Escape> {destroy .recent}
@@ -1047,24 +1713,23 @@ proc els::assoc_commands {exe} {
     }
     return $cmds
 }
-# reg.exe commands that fully remove els's app registration (everything
-# assoc_commands writes, including the per-type OpenWithProgids options).  Deletes
-# the whole HKCU\Software\anafalanx vendor key, not just its \els\Capabilities leaf,
-# so the otherwise-orphaned empty parent keys are not stranded (F70).  Per-user
-# only.  Any default the USER set via Open with > Always is left alone — that's
-# their choice, Windows protects it, and it's reset in Settings > Default apps, not
-# by us.
+# reg.exe commands that fully remove exactly what assoc_commands writes.  The
+# shared HKCU\Software\anafalanx vendor root may contain other anafalanx products,
+# so it is never deleted merely to tidy empty parents.  Per-user only.  Any
+# default the USER set via Open with > Always is left alone — that's their choice,
+# Windows protects it, and it is reset in Settings > Default apps, not by us.
 proc els::assoc_unregister_commands {exe} {
     set appExe [file tail [file normalize $exe]]
     set progid els.txt
-    set cmds [list \
-        [list reg.exe delete "HKCU\\Software\\Classes\\Applications\\$appExe" /f] \
-        [list reg.exe delete {HKCU\Software\Classes\els.txt} /f] \
-        [list reg.exe delete {HKCU\Software\anafalanx} /f] \
-        [list reg.exe delete {HKCU\Software\RegisteredApplications} /v els /f]]
+    set cmds {}
     foreach e [els::assoc_exts] {
         lappend cmds [list reg.exe delete "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid /f]
     }
+    lappend cmds \
+        [list reg.exe delete {HKCU\Software\RegisteredApplications} /v els /f] \
+        [list reg.exe delete {HKCU\Software\anafalanx\els\Capabilities} /f] \
+        [list reg.exe delete "HKCU\\Software\\Classes\\Applications\\$appExe" /f] \
+        [list reg.exe delete {HKCU\Software\Classes\els.txt} /f]
     return $cmds
 }
 proc els::assoc_run {cmd} {
@@ -1141,8 +1806,17 @@ proc els::assoc_register {} {
 proc els::assoc_unregister {} {
     set exe [els::association_exe]
     if {$exe eq ""} { set exe els.exe }   ;# canonical app-key name, never the host interpreter
-    foreach cmd [els::assoc_unregister_commands $exe] { catch {els::assoc_run $cmd} }
+    set errs {}
+    foreach cmd [els::assoc_unregister_commands $exe] {
+        if {[catch {els::assoc_run $cmd} err]} { lappend errs $err }
+    }
+    if {[llength $errs]} {
+        set parent [expr {[winfo exists .assoc] ? ".assoc" : "."}]
+        tk_messageBox -parent $parent -icon error -title els \
+            -message "Removal didn't fully complete:\n[join [lsort -unique $errs] \n]"
+    }
     catch {els::assoc_render}
+    return [expr {![llength $errs]}]
 }
 # (Re)build the dialog body to reflect the current registration state.
 proc els::assoc_render {} {
@@ -1172,13 +1846,20 @@ proc els::assoc_render {} {
         pack .assoc.f.b.close -side right -padx {6 0}
         pack .assoc.f.b.un    -side right -padx {6 0}
         pack .assoc.f.b.def   -side left
+        set ::els::assoc_default .assoc.f.b.close
     } else {
-        ttk::button .assoc.f.b.reg -text "Register els with Windows" -style Dialog.TButton -command els::assoc_register
+        ttk::button .assoc.f.b.reg -text "Register els with Windows" \
+            -style Dialog.TButton -default active -command els::assoc_register
         pack .assoc.f.b.close -side right -padx {6 0}
         pack .assoc.f.b.reg   -side left
+        set ::els::assoc_default .assoc.f.b.reg
     }
+    if {$reg} { .assoc.f.b.close configure -default active }
     grid columnconfigure .assoc.f 0 -weight 1
     update idletasks
+    after idle {if {[info exists ::els::assoc_default] && [winfo exists $::els::assoc_default]} {
+        focus $::els::assoc_default
+    }}
 }
 proc els::file_associations {} {
     if {$::tcl_platform(platform) ne "windows"} {
@@ -1199,7 +1880,9 @@ proc els::file_associations {} {
     set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight .assoc]) / 4}]
     wm geometry .assoc +$x+$y
     wm deiconify .assoc
-    focus .assoc
+    if {[info exists ::els::assoc_default] && [winfo exists $::els::assoc_default]} {
+        focus $::els::assoc_default
+    }
 }
 
 # ---- flat chrome styling ------------------------------------------------
@@ -1210,8 +1893,14 @@ proc els::init_style {} {
     set s ttk::style
     catch {$s theme use clam}
     set bg $::els::CHROME ; set ink $::els::INK ; set hair $::els::HAIR
+    set focusBorder "#A6ACB4"
+    set selectedBg "#C6C6C6"
+    set scrollBg "#BCBCBC"
+    set scrollActive "#A4A4A4"
+    set scrollInk "#4A4A4A"
+    set scrollBorder "#9A9A9A"
     $s configure . -background $bg -foreground $ink -font elsUI \
-        -borderwidth 0 -focuscolor $bg -troughcolor $::els::PAGE \
+        -borderwidth 0 -focuscolor $focusBorder -troughcolor $::els::PAGE \
         -bordercolor $hair -darkcolor $bg -lightcolor $bg
     $s configure TFrame -background $bg
     $s configure TLabel -background $bg -foreground $ink
@@ -1220,43 +1909,50 @@ proc els::init_style {} {
     $s configure TEntry -relief flat -borderwidth 1 -padding {6 4} \
         -fieldbackground $::els::PAGE -foreground $ink -insertcolor $ink \
         -bordercolor $hair -lightcolor $hair -darkcolor $hair
-    $s map TEntry -bordercolor [list focus "#A6ACB4"] \
-        -lightcolor [list focus "#A6ACB4"] -darkcolor [list focus "#A6ACB4"]
+    $s map TEntry -bordercolor [list focus $focusBorder] \
+        -lightcolor [list focus $focusBorder] -darkcolor [list focus $focusBorder]
     # buttons: flat, quiet until hovered
     $s configure TButton -background $bg -foreground $ink -anchor center \
-        -borderwidth 0 -relief flat -padding {8 4} -focuscolor $bg
+        -borderwidth 0 -relief flat -padding {8 4} -focuscolor $focusBorder
     $s map TButton -background [list pressed $hair active $::els::TABBG] \
         -foreground [list disabled $::els::MUTED]
     # find toggles (Aa / W / .*): a flat chip that fills grey when active
     $s configure Toolbutton -background $bg -foreground $::els::MUTED \
-        -borderwidth 0 -relief flat -padding {8 4} -anchor center
-    $s map Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
-        -foreground [list selected $ink active $ink]
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -focuscolor $focusBorder
+    $s map Toolbutton -background [list selected $selectedBg active $::els::TABBG] \
+        -foreground [list selected $ink active $ink disabled $::els::MUTED]
     # find/replace controls stay regular-weight; outlines carry affordance.
     $s configure Find.Toolbutton -background $bg -foreground $::els::MUTED \
-        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUI
-    $s map Find.Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
-        -foreground [list selected $ink active $ink]
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUI \
+        -focuscolor $focusBorder
+    $s map Find.Toolbutton -background [list selected $selectedBg active $::els::TABBG] \
+        -foreground [list selected $ink active $ink disabled $::els::MUTED]
     $s configure Find.TButton -background $bg -foreground $::els::MUTED \
-        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUI
+        -borderwidth 0 -relief flat -padding {8 4} -anchor center -font elsUI \
+        -focuscolor $focusBorder
     $s map Find.TButton -background [list pressed $hair active $::els::TABBG] \
-        -foreground [list active $ink]
+        -foreground [list active $ink disabled $::els::MUTED]
     $s configure FindAction.TButton -background $bg -foreground $ink \
         -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUI \
-        -bordercolor $hair -lightcolor $hair -darkcolor $hair
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair -focuscolor $focusBorder
     $s map FindAction.TButton -background [list pressed $hair active $::els::TABBG]
     $s configure FindAction.Toolbutton -background $bg -foreground $ink \
         -borderwidth 1 -relief solid -padding {10 4} -anchor center -font elsUI \
-        -bordercolor $hair -lightcolor $hair -darkcolor $hair
-    $s map FindAction.Toolbutton -background [list selected #C6C6C6 active $::els::TABBG] \
-        -foreground [list selected $ink active $ink]
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair -focuscolor $focusBorder
+    $s map FindAction.Toolbutton -background [list selected $selectedBg active $::els::TABBG] \
+        -foreground [list selected $ink active $ink disabled $::els::MUTED]
     # Dialog buttons should read as buttons even before hover, unlike the main
     # chrome where flatness matters more than affordance.
     $s configure Dialog.TButton -background $bg -foreground $ink \
         -borderwidth 1 -relief solid -padding {10 5} -anchor center \
-        -bordercolor $hair -lightcolor $hair -darkcolor $hair
+        -bordercolor $hair -lightcolor $hair -darkcolor $hair -focuscolor $focusBorder
     $s map Dialog.TButton -background [list pressed $hair active $::els::TABBG] \
         -foreground [list disabled $::els::MUTED]
+    $s configure Treeview -background $::els::PAGE -fieldbackground $::els::PAGE \
+        -foreground $ink -bordercolor $hair -lightcolor $hair -darkcolor $hair
+    $s map Treeview -background [list selected $::els::SEL] \
+        -foreground [list selected $::els::INK disabled $::els::MUTED]
+    $s configure Treeview.Heading -background $bg -foreground $ink
     # A traditional vertical scrollbar: clam's DEFAULT layout (so the up/down
     # arrow buttons are always drawn — unlike a thumb-only layout, and unlike the
     # classic Tk widget which on Windows only paints its arrows once activated).
@@ -1265,15 +1961,15 @@ proc els::init_style {} {
     # a bare pixel value is NOT scaled by tk scaling.  12p is a chunky, easy-to-
     # grab bar at any DPI.
     $s configure Vertical.TScrollbar -troughcolor $::els::PAGE \
-        -background #BCBCBC -arrowcolor #4A4A4A -bordercolor #9A9A9A \
+        -background $scrollBg -arrowcolor $scrollInk -bordercolor $scrollBorder \
         -relief raised -borderwidth 1 -arrowsize 12p
-    $s map Vertical.TScrollbar -background [list active #A4A4A4 disabled $::els::PAGE]
+    $s map Vertical.TScrollbar -background [list active $scrollActive disabled $::els::PAGE]
     # the horizontal scrollbar matches the vertical one exactly (same clam default
     # layout, chunky 12p arrows, colors) so the two read as one family
     $s configure Horizontal.TScrollbar -troughcolor $::els::PAGE \
-        -background #BCBCBC -arrowcolor #4A4A4A -bordercolor #9A9A9A \
+        -background $scrollBg -arrowcolor $scrollInk -bordercolor $scrollBorder \
         -relief raised -borderwidth 1 -arrowsize 12p
-    $s map Horizontal.TScrollbar -background [list active #A4A4A4 disabled $::els::PAGE]
+    $s map Horizontal.TScrollbar -background [list active $scrollActive disabled $::els::PAGE]
 }
 
 # ---- build the UI -------------------------------------------------------
@@ -1284,25 +1980,32 @@ proc els::build {} {
     . configure -background $::els::PAGE
     els::load_icon
     if {$::els::config_path eq ""} { els::config_resolve_existing }
+    after idle els::find_prune_stale
     catch {els::load_geometry}   ;# backstop: NO config content may abort build
+    els::deferred_load
     wm minsize . 360 240
     wm protocol . WM_DELETE_WINDOW els::quit
 
     menu .menu
     . configure -menu .menu
     menu .menu.file
-    .menu add cascade -label File -menu .menu.file
+    .menu add cascade -label File -underline 0 -menu .menu.file
     .menu.file add command -label "New Tab"   -accelerator Ctrl+N -command els::new
     .menu.file add command -label Open...      -accelerator Ctrl+O -command els::open
     menu .menu.file.recent
     .menu.file add cascade -label "Open Recent" -menu .menu.file.recent
     els::recent_rebuild
+    .menu.file add command -label "Deferred Opens..." -command els::deferred_dialog
     .menu.file add command -label "Reload from Disk" -command els::reload
     .menu.file add checkbutton -label "Restore Previous Session" \
         -variable ::els::restore_session -command els::session_set_restore
     .menu.file add separator
     .menu.file add command -label Save         -accelerator Ctrl+S -command els::save
     .menu.file add command -label "Save As..." -accelerator Ctrl+Shift+S -command els::saveas
+    .menu.file add cascade -label "Encoding" -underline 0 \
+        -menu [els::build_enc_picker .menu.file.encoding]
+    .menu.file add cascade -label "Line Endings" -underline 0 \
+        -menu [els::eol_menu .menu.file.eol]
     .menu.file add checkbutton -label "Auto-save" -variable ::els::autosave \
         -command els::set_autosave
     .menu.file add checkbutton -label "Keep Backups" -variable ::els::backups \
@@ -1312,7 +2015,7 @@ proc els::build {} {
     .menu.file add command -label "Close File" -accelerator Ctrl+W -command els::close_tab
     .menu.file add command -label Exit         -accelerator Ctrl+Q -command els::quit
     menu .menu.edit
-    .menu add cascade -label Edit -menu .menu.edit
+    .menu add cascade -label Edit -underline 0 -menu .menu.edit
     .menu.edit add command -label Undo  -accelerator Ctrl+Z -command els::menu_undo
     .menu.edit add command -label Redo  -accelerator Ctrl+Y -command els::menu_redo
     .menu.edit add separator
@@ -1329,7 +2032,7 @@ proc els::build {} {
     # Line ops act on the selected lines (or the current line); sort/reverse/dedupe act on
     # the selection, else the whole buffer.
     menu .menu.buffer
-    .menu add cascade -label Buffer -menu .menu.buffer
+    .menu add cascade -label Buffer -underline 0 -menu .menu.buffer
     .menu.buffer add command -label "Move Line Up"    -accelerator Alt+Up       -command {els::xform::move -1}
     .menu.buffer add command -label "Move Line Down"  -accelerator Alt+Down     -command {els::xform::move 1}
     .menu.buffer add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
@@ -1346,8 +2049,10 @@ proc els::build {} {
     .menu.buffer add command -label "UPPERCASE"                -command {els::xform::case upper}
     .menu.buffer add command -label "lowercase"                -command {els::xform::case lower}
     .menu.buffer add command -label "Trim Trailing Whitespace" -command els::xform::trim_trailing
+    menu .menu.tabs -postcommand els::tabs_menu_rebuild
+    .menu add cascade -label Tabs -underline 0 -menu .menu.tabs
     menu .menu.view
-    .menu add cascade -label View -menu .menu.view
+    .menu add cascade -label View -underline 0 -menu .menu.view
     .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \
         -command els::set_wrap
     .menu.view add checkbutton -label "Line Numbers" -variable ::els::show_linenos \
@@ -1363,7 +2068,7 @@ proc els::build {} {
     .menu.view add command -label "Zoom Out"   -accelerator Ctrl+- -command {els::zoom -1}
     .menu.view add command -label "Reset Zoom" -accelerator Ctrl+0 -command els::zoom_reset
     menu .menu.help
-    .menu add cascade -label Help -menu .menu.help
+    .menu add cascade -label Help -underline 0 -menu .menu.help
     .menu.help add command -label "Keyboard Shortcuts" -command els::shortcuts
     .menu.help add command -label "File Associations..." -command els::file_associations
     .menu.help add command -label "els on GitHub" \
@@ -1373,6 +2078,17 @@ proc els::build {} {
 
     # the tab strip
     frame .tabs -bg $::els::TABBG
+    label .tabs.more -text "▾" -width 3 -padx 0 -pady 3 -anchor center \
+        -font elsUI -bg $::els::TABBG -fg $::els::MUTED -cursor hand2 \
+        -takefocus 1 -highlightthickness 1 -highlightbackground $::els::TABBG \
+        -highlightcolor $::els::CARET
+    pack .tabs.more -side right -fill y
+    bind .tabs.more <Button-1> els::tabs_popup
+    bind .tabs.more <KeyPress-Return> {els::tabs_popup; break}
+    bind .tabs.more <KeyPress-KP_Enter> {els::tabs_popup; break}
+    bind .tabs.more <KeyPress-space> {els::tabs_popup; break}
+    bind .tabs <Configure> {els::tabs_schedule}
+    els::tooltip .tabs.more "All open documents"
 
     # the shared line-number gutter — a Canvas that draws only the numbers for
     # the display rows currently on screen (see els::draw_gutter), so it is
@@ -1402,12 +2118,15 @@ proc els::build {} {
     ttk::label .sb.name -font elsUI -anchor w -text "untitled" -width 8 \
         -foreground $::els::MUTED
     ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1 Col 1" -foreground $::els::MUTED
+    ttk::label .sb.disk -font elsUI -anchor e -width 15 -text "Not on disk" \
+        -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED \
         -cursor hand2 -padding {4 1}
     ttk::label .sb.enc  -font elsUI -anchor e -text "UTF-8" -foreground $::els::MUTED \
         -cursor hand2 -padding {4 1}
     frame .sb.sep_eol -width 1 -bg $::els::HAIR
     frame .sb.sep_enc -width 1 -bg $::els::HAIR
+    frame .sb.sep_disk -width 1 -bg $::els::HAIR
     # a normally-empty notice; lights up red when a newer release is detected
     ttk::label .sb.update -font elsUI -anchor e -text "" -foreground $::els::CARET -cursor hand2
     pack .sb.hair -side top -fill x
@@ -1419,6 +2138,8 @@ proc els::build {} {
     pack .sb.eol     -side right -padx {8 2}   -pady 4
     pack .sb.sep_eol -side right -padx {8 2}   -pady {7 6} -fill y
     pack .sb.pos  -side right -padx {12 0}  -pady 4
+    pack .sb.sep_disk -side right -padx {8 2} -pady {7 6} -fill y
+    pack .sb.disk -side right -padx {8 2} -pady 4
     pack .sb.update -side right -padx {12 0} -pady 4
     # the EOL and encoding indicators are clickable pickers
     bind .sb.eol  <Button-1>  els::popup_eol_menu
@@ -1434,6 +2155,7 @@ proc els::build {} {
     bind .sb.update <Enter> {.sb.update configure -background $::els::TABBG}
     bind .sb.update <Leave> {.sb.update configure -background $::els::CHROME}
     els::tooltip_for .sb.name els::name_tip
+    els::tooltip_for .sb.disk els::disk_tip
 
     # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter+vscroll ·
     # 3 hscroll (shown on demand) · 4 status.  The gutter spans rows 2-3 so its
@@ -1445,8 +2167,10 @@ proc els::build {} {
     # build, before .ln existed, so its set_linenos call could not apply — and
     # the unconditional grid above would leave an EMPTY gutter band showing
     if {!$::els::show_linenos} { grid remove .ln }
-    # auto-save when the app window loses focus (Deactivate fires on toplevels)
-    bind . <Deactivate> {if {"%W" eq "."} { els::autosave_all }}
+    # The disk observer polls only while the application is foreground-active.
+    # Deactivation also retains the existing auto-save-on-focus-loss behavior.
+    bind . <Activate> {if {"%W" eq "."} { els::disk_watch_activate }}
+    bind . <Deactivate> {if {"%W" eq "."} { els::disk_watch_deactivate ; els::autosave_all }}
     # remember the last NORMAL-state geometry: while maximized, `wm geometry .`
     # returns the maximized rect, so save_geometry would otherwise persist that as
     # a normal window.  Guard %W eq "." — `.` is in every child's bindtags, so an
@@ -1570,9 +2294,45 @@ proc els::build {} {
 
     # start with one empty document
     els::new_doc
+    if {$::els::deferred_notice ne ""} {
+        after idle [list els::status_note $::els::deferred_notice]
+    }
 }
 
 # ---- documents ----------------------------------------------------------
+# Every document Text command is proxied so a same-length edit is just as
+# observable as an insertion/deletion.  Tk marks and tags float with edits, but
+# worker snapshots and match offsets do not; docEpoch is the authoritative
+# invalidation token captured by every asynchronous find operation.
+proc els::text_proxy_install {id w} {
+    set native "::els::text_native_$id"
+    catch {rename $native {}}
+    rename $w $native
+    interp alias {} $w {} els::text_proxy $id $w $native
+    bind $w <Destroy> +[list els::text_proxy_destroy $id $w $native]
+}
+proc els::text_proxy {id public native args} {
+    set mutates 0
+    set op [lindex $args 0]
+    if {$op in {insert delete replace}} {
+        set mutates 1
+    } elseif {$op eq "edit" && [lindex $args 1] in {undo redo}} {
+        set mutates 1
+    }
+    set rc [catch {{*}$native {*}$args} result opts]
+    if {$rc} { return -options $opts $result }
+    if {$mutates && [info exists ::els::docEpoch($id)]} {
+        incr ::els::docEpoch($id)
+        els::find_doc_mutated $id
+    }
+    return $result
+}
+proc els::text_proxy_destroy {id public native} {
+    if {[info exists ::els::docEpoch($id)]} { els::find_doc_closed $id }
+    catch {rename $public {}}
+    catch {rename $native {}}
+}
+
 proc els::new_doc {{path ""}} {
     variable docs
     variable seq
@@ -1590,6 +2350,8 @@ proc els::new_doc {{path ""}} {
         -tabstyle wordprocessor \
         -yscrollcommand [list els::yscroll $id] \
         -xscrollcommand [list els::xscroll $id]
+    set ::els::docEpoch($id) 0
+    els::text_proxy_install $id $w
     $w tag configure currentLine -background $::els::LINE
     $w tag configure wsSpace -background $::els::WSSPACE
     $w tag configure wsTab   -background $::els::WSTAB
@@ -1658,6 +2420,8 @@ proc els::switch_to {id} {
     variable docs
     variable active
     if {[lsearch -exact $docs $id] < 0} { return }
+    set wasActive [expr {$active eq $id}]
+    if {$active ne "" && $active ne $id} { els::find_context_leave $active }
     if {$active ne "" && $active ne $id} { els::autosave_flush_doc $active }
     if {$active ne "" && [winfo exists [els::W $active]]} {
         # clear find highlights on the tab we are leaving so they don't linger as
@@ -1673,6 +2437,7 @@ proc els::switch_to {id} {
     focus $w
     els::refresh_tabs
     els::settitle
+    els::disk_probe $id [expr {$wasActive ? "refresh" : "forced"}]
     els::refresh_view
     if {$::els::find_mode ne ""} { els::find_update }
     after idle els::update_vscroll
@@ -1712,14 +2477,20 @@ proc els::close_doc {id} {
     set idx [lsearch -exact $docs $id]
     set docs [lreplace $docs $idx $idx]
     els::swap_clear $id   ;# clean close -> the swap is no longer needed
+    els::recover_source_drop $id ;# saved or explicitly discarded: old orphan is no longer needed
     destroy [els::W $id]
     destroy [els::tabW $id]
-    unset -nocomplain ::els::docRecovered($id) ::els::docDecodeLossy($id)
+    unset -nocomplain ::els::docRecovered($id) ::els::docRecoverySource($id) \
+        ::els::docDecodeLossy($id) \
+        ::els::docFormatPending($id)
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     unset -nocomplain docPath($id) ::els::docEnc($id) ::els::docBom($id) \
         ::els::docEol($id) ::els::docRaw($id) \
         ::els::savedSig($id) ::els::savedSigPath($id) \
-        ::els::docExtModPause($id) ::els::swap_fail_streak($id) ::els::loading($id)
+        ::els::docDiskState($id) ::els::docDiskMeta($id) \
+        ::els::docDiskContent($id) ::els::docDiskDetail($id) ::els::docDiskDeepAt($id) \
+        ::els::docExtModPause($id) ::els::swap_fail_streak($id) ::els::loading($id) \
+        ::els::docEpoch($id)
     if {$active eq $id} { set active "" }
     if {[llength $docs] == 0} {
         els::new_doc
@@ -1734,17 +2505,155 @@ proc els::close_doc {id} {
 }
 
 # ---- tab strip ----------------------------------------------------------
+proc els::tab_name_equal {a b} {
+    if {$::tcl_platform(platform) eq "windows"} { return [string equal -nocase $a $b] }
+    return [string equal $a $b]
+}
+# A forward-slash suffix is compact and stable even when the native path uses
+# backslashes.  depth=1 means parent/basename, depth=2 grandparent/parent/name.
+proc els::tab_path_suffix {id depth} {
+    if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return "" }
+    set parts [file split [els::strip_ext_prefix $::els::docPath($id)]]
+    set first [expr {[llength $parts] - $depth - 1}]
+    if {$first < 0} { set first 0 }
+    return [join [lrange $parts $first end] /]
+}
+# Names in the strip are identities, not merely basenames: untitled documents
+# are numbered, and duplicate basenames grow the shortest parent suffix that
+# distinguishes them from every peer.
+proc els::tab_identity {id} {
+    if {![info exists ::els::docPath($id)]} { return "" }
+    set p $::els::docPath($id)
+    if {$p eq ""} {
+        set n 0
+        foreach other $::els::docs {
+            if {[info exists ::els::docPath($other)] && $::els::docPath($other) eq ""} { incr n }
+            if {$other eq $id} { return "untitled $n" }
+        }
+        return "untitled"
+    }
+    set base [file tail $p]
+    set peers {}
+    foreach other $::els::docs {
+        if {![info exists ::els::docPath($other)] || $::els::docPath($other) eq ""} { continue }
+        if {[els::tab_name_equal [file tail $::els::docPath($other)] $base]} { lappend peers $other }
+    }
+    if {[llength $peers] <= 1} { return $base }
+    set parts [file split [els::strip_ext_prefix $p]]
+    set maxDepth [expr {[llength $parts] - 1}]
+    for {set depth 1} {$depth <= $maxDepth} {incr depth} {
+        set candidate [els::tab_path_suffix $id $depth]
+        set unique 1
+        foreach other $peers {
+            if {$other eq $id} { continue }
+            if {[els::tab_name_equal $candidate [els::tab_path_suffix $other $depth]]} {
+                set unique 0
+                break
+            }
+        }
+        if {$unique} { return $candidate }
+    }
+    # Identical normalized paths are normally rejected by open/save-as.  Keep a
+    # deterministic last-resort identity for extensions/tests that create one.
+    return "[els::tab_path_suffix $id $maxDepth] ([expr {[lsearch -exact $::els::docs $id] + 1}])"
+}
+proc els::tab_elide_identity {s max} {
+    if {$max < 1} { return "" }
+    if {[string length $s] <= $max} { return $s }
+    if {$max == 1} { return "…" }
+    # Middle elision preserves the parent discriminator at the beginning and the
+    # filename/extension at the end, unlike head-only clipping.
+    set keep [expr {$max - 1}]
+    set left [expr {max(2, int(ceil($keep * 0.35)))}]
+    if {$left >= $keep} { set left [expr {$keep - 1}] }
+    set right [expr {$keep - $left}]
+    return "[string range $s 0 [expr {$left - 1}]]…[string range $s end-[expr {$right - 1}] end]"
+}
+# Compact state marks leave room for the identity while remaining durable:
+# dirty bullet, recovered arrow, and decoding-replacement warning.
+proc els::tab_markers {id} {
+    set marks ""
+    if {[els::doc_dirty $id]} { append marks "•" }
+    if {[info exists ::els::docRecovered($id)]} { append marks "↺" }
+    if {[info exists ::els::docDecodeLossy($id)]} { append marks "�" }
+    if {$marks ne ""} { append marks " " }
+    return $marks
+}
+proc els::tab_label_base {id max maxPixels suffix} {
+    if {$max <= 0} { return "" }
+    set marks [els::tab_markers $id]
+    set reserved [expr {[string length $marks] + [string length $suffix]}]
+    set room [expr {max(0, $max - $reserved)}]
+    set identity [els::tab_identity $id]
+    while {$room >= 0} {
+        set label "$marks[els::tab_elide_identity $identity $room]$suffix"
+        if {[string length $label] > $max} {
+            set label [string range $label 0 [expr {$max - 1}]]
+        }
+        if {$maxPixels <= 0 || [font measure elsUI $label] <= $maxPixels} { return $label }
+        incr room -1
+    }
+    # Actual UI caps are comfortably larger than the markers/suffix.  Keep a
+    # defensive exact cap for unit callers using an artificially tiny limit.
+    set label "$marks$suffix"
+    set label [string range $label 0 [expr {$max - 1}]]
+    while {$label ne "" && $maxPixels > 0 && [font measure elsUI $label] > $maxPixels} {
+        set label [string range $label 0 end-1]
+    }
+    return $label
+}
+# Build the whole label set before selecting one: independent middle-elision can
+# collapse distinct identities to the same visible string.  Colliding entries
+# get a short document discriminator that is itself inside both caps.
+proc els::tab_labels {max {maxPixels 0}} {
+    set labels [dict create]
+    foreach id $::els::docs {
+        dict set labels $id [els::tab_label_base $id $max $maxPixels ""]
+    }
+    # A second pass covers the pathological case where a disambiguated label
+    # itself equals another literal/elided name.  The document id is unique and
+    # is preserved as the final suffix inside the cap.
+    for {set pass 0} {$pass < 2} {incr pass} {
+        set groups [dict create]
+        foreach id $::els::docs {
+            set key [dict get $labels $id]
+            if {$::tcl_platform(platform) eq "windows"} { set key [string tolower $key] }
+            dict lappend groups $key $id
+        }
+        set collided 0
+        foreach key [dict keys $groups] {
+            set ids [dict get $groups $key]
+            if {[llength $ids] <= 1} { continue }
+            set collided 1
+            foreach id $ids {
+                if {$pass == 0} {
+                    set discriminator " ·[expr {[lsearch -exact $::els::docs $id] + 1}]"
+                } else {
+                    set discriminator " ·$id"
+                }
+                dict set labels $id [els::tab_label_base $id $max $maxPixels $discriminator]
+            }
+        }
+        if {!$collided} { break }
+    }
+    return $labels
+}
+proc els::tab_label {id max {maxPixels 0}} {
+    set labels [els::tab_labels $max $maxPixels]
+    if {![dict exists $labels $id]} { return "" }
+    return [dict get $labels $id]
+}
 proc els::tab_text {id} {
-    set mark [expr {[els::doc_dirty $id] ? "• " : ""}]
-    set tag [expr {[info exists ::els::docRecovered($id)] ? " (recovered)" : ""}]
-    if {[info exists ::els::docDecodeLossy($id)]} { append tag " (replaced)" }
-    return "$mark[els::doc_name $id]$tag"
+    return [els::tab_label $id $::els::TAB_LABEL_MAX $::els::TAB_LABEL_PX]
 }
 # Tooltip text for a tab: the document's full native path (empty for untitled).
 proc els::tab_tip {id} {
     if {![info exists ::els::docPath($id)]} { return "" }
     set p $::els::docPath($id)
-    return [expr {$p eq "" ? "" : [els::path_tip $p]}]
+    if {$p eq ""} { return "" } else { set tip [els::path_tip $p] }
+    if {[info exists ::els::docRecovered($id)]} { append tip "\nRecovered unsaved content" }
+    if {[info exists ::els::docDecodeLossy($id)]} { append tip "\nContains decoding replacement characters" }
+    return $tip
 }
 proc els::make_tab {id} {
     set tf [els::tabW $id]
@@ -1769,6 +2678,7 @@ proc els::make_tab {id} {
     bind $tf.name  <Button-3> [list els::popup_tab_menu $id %X %Y]
     els::tooltip_for $tf      [list els::tab_tip $id] $::els::tab_tip_delay
     els::tooltip_for $tf.name [list els::tab_tip $id] $::els::tab_tip_delay
+    els::tabs_schedule
 }
 # Reorder by drag: when the pointer crosses a neighbouring tab's midpoint,
 # move the dragged doc to that position and repack.  State-free (each motion
@@ -1780,7 +2690,7 @@ proc els::tab_drag {id rootX} {
     foreach other $docs {
         if {$other eq $id} continue
         set tw [els::tabW $other]
-        if {![winfo exists $tw]} continue
+        if {![winfo exists $tw] || [winfo manager $tw] ne "pack"} continue
         set mid  [expr {[winfo rootx $tw] + [winfo width $tw] / 2}]
         set oidx [lsearch -exact $docs $other]
         if {($oidx < $idx && $rootX < $mid) || ($oidx > $idx && $rootX > $mid)} {
@@ -1791,12 +2701,7 @@ proc els::tab_drag {id rootX} {
     }
 }
 proc els::tab_repack {} {
-    foreach id $::els::docs {
-        set tf [els::tabW $id]
-        if {![winfo exists $tf]} continue
-        pack forget $tf
-        pack $tf -side left -padx {0 1} -pady {2 0} -fill y
-    }
+    els::tabs_layout
 }
 proc els::tab_close_enter {id} {
     set w [els::tabW $id].close
@@ -1813,10 +2718,12 @@ proc els::update_tab {id} {
     set tf [els::tabW $id]
     if {![winfo exists $tf]} { return }
     $tf.name configure -text [els::tab_text $id]
+    els::tabs_schedule
 }
 proc els::refresh_tabs {} {
     variable docs
     variable active
+    set labels [els::tab_labels $::els::TAB_LABEL_MAX $::els::TAB_LABEL_PX]
     foreach id $docs {
         set tf [els::tabW $id]
         if {![winfo exists $tf]} { continue }
@@ -1826,9 +2733,295 @@ proc els::refresh_tabs {} {
             set bg $::els::TABOFF ; set fg $::els::MUTED
         }
         $tf       configure -bg $bg
-        $tf.name  configure -bg $bg -fg $fg
+        $tf.name  configure -bg $bg -fg $fg -text [dict get $labels $id]
         $tf.close configure -bg $bg -fg $::els::MUTED
     }
+    set ::els::tabs_menu_choice $active
+    els::tabs_layout
+}
+proc els::tabs_schedule {} {
+    if {![winfo exists .tabs] || $::els::tabs_layout_after ne ""} { return }
+    set ::els::tabs_layout_after [after idle {
+        set ::els::tabs_layout_after ""
+        els::tabs_layout
+    }]
+}
+# Pack only a contiguous neighbourhood that contains the active document.  The
+# right-side control always remains visible and exposes every hidden document.
+proc els::tabs_layout {} {
+    if {![winfo exists .tabs] || ![winfo exists .tabs.more]} { return }
+    foreach id $::els::docs {
+        set tf [els::tabW $id]
+        if {[winfo exists $tf]} { pack forget $tf }
+    }
+    pack forget .tabs.more
+    pack .tabs.more -side right -fill y
+    if {![llength $::els::docs]} { return }
+    set idx [lsearch -exact $::els::docs $::els::active]
+    if {$idx < 0} { set idx 0 }
+    set avail [expr {[winfo width .tabs] - [winfo reqwidth .tabs.more]}]
+    if {$avail < 1} { set avail 1 }
+    set left $idx
+    set right $idx
+    set activeW [els::tabW [lindex $::els::docs $idx]]
+    # The active tab and its close button are non-negotiable at the minimum
+    # window width.  Tighten its text by measured pixels before packing peers.
+    set closeW [winfo reqwidth $activeW.close]
+    set activeTextPx [expr {max(1, min($::els::TAB_LABEL_PX, $avail - $closeW - 18))}]
+    $activeW.name configure -text [els::tab_label [lindex $::els::docs $idx] \
+        $::els::TAB_LABEL_MAX $activeTextPx]
+    set used [expr {[winfo reqwidth $activeW] + 1}]
+    set grew 1
+    while {$grew} {
+        set grew 0
+        if {$right + 1 < [llength $::els::docs]} {
+            set w [els::tabW [lindex $::els::docs [expr {$right + 1}]]]
+            set need [expr {[winfo reqwidth $w] + 1}]
+            if {$used + $need <= $avail} {
+                incr right
+                incr used $need
+                set grew 1
+            }
+        }
+        if {$left > 0} {
+            set w [els::tabW [lindex $::els::docs [expr {$left - 1}]]]
+            set need [expr {[winfo reqwidth $w] + 1}]
+            if {$used + $need <= $avail} {
+                incr left -1
+                incr used $need
+                set grew 1
+            }
+        }
+    }
+    for {set i $left} {$i <= $right} {incr i} {
+        set tf [els::tabW [lindex $::els::docs $i]]
+        pack $tf -side left -padx {0 1} -pady {2 0} -fill y
+    }
+}
+proc els::tabs_menu_rebuild {} {
+    set m .menu.tabs
+    if {![winfo exists $m]} { return }
+    $m delete 0 end
+    set ::els::tabs_menu_choice $::els::active
+    if {![llength $::els::docs]} {
+        $m add command -label "(empty)" -state disabled
+        return
+    }
+    set labels [els::tab_labels $::els::TAB_MENU_MAX $::els::TAB_MENU_PX]
+    foreach id $::els::docs {
+        $m add radiobutton -label [dict get $labels $id] \
+            -variable ::els::tabs_menu_choice -value $id \
+            -command [list els::switch_to $id]
+    }
+}
+proc els::tabs_popup {} {
+    if {![winfo exists .tabs.more]} { return }
+    els::tabs_menu_rebuild
+    update idletasks
+    set m .menu.tabs
+    set x [expr {[winfo rootx .tabs.more] + [winfo width .tabs.more] - [winfo reqwidth $m]}]
+    if {$x < [winfo rootx .]} { set x [winfo rootx .] }
+    set y [expr {[winfo rooty .tabs.more] + [winfo height .tabs.more]}]
+    tk_popup $m $x $y
+}
+
+# ---- active document: on-disk state ------------------------------------
+# This observer is deliberately separate from the authoritative save guard.
+# Polling may update one quiet status label; it never reloads, writes, pauses
+# auto-save, or asks a question.  Save still performs its own fresh signature
+# probe and owns every overwrite/reload decision.
+proc els::disk_stat_probe {path} {
+    if {[catch {file stat $path st} err opts]} {
+        set code {}
+        if {[dict exists $opts -errorcode]} { set code [dict get $opts -errorcode] }
+        set posix [lindex $code 1]
+        set state [expr {$posix in {ENOENT ENOTDIR} ? "missing" : "unavailable"}]
+        return [dict create state $state error $err]
+    }
+    if {![info exists st(type)] || $st(type) ne "file"} {
+        return [dict create state unavailable error "path is not a regular file"]
+    }
+    if {[catch {file readable $path} readable] || !$readable} {
+        return [dict create state unavailable error "file is not readable"]
+    }
+    # Read-only means we have affirmative evidence: the Windows attribute is
+    # set, or Tcl reports that the current process cannot write the file.  A
+    # failed attribute query alone never invents a warning.
+    set readonly 0
+    if {![catch {file attributes $path -readonly} ro] && \
+            [string is boolean -strict $ro] && $ro} {
+        set readonly 1
+    } elseif {![catch {file writable $path} writable] && !$writable} {
+        set readonly 1
+    }
+    return [dict create state ok size $st(size) mtime $st(mtime) readonly $readonly]
+}
+proc els::disk_probe_reset {id} {
+    unset -nocomplain ::els::docDiskState($id) ::els::docDiskMeta($id) \
+        ::els::docDiskContent($id) ::els::docDiskDetail($id) ::els::docDiskDeepAt($id)
+}
+proc els::disk_state_set {id state {detail ""}} {
+    set ::els::docDiskState($id) $state
+    set ::els::docDiskDetail($id) $detail
+    if {$id eq $::els::active} { els::disk_render }
+    return $state
+}
+proc els::disk_render {} {
+    if {![winfo exists .sb.disk]} { return }
+    set state untitled
+    if {$::els::active ne "" && [info exists ::els::docDiskState($::els::active)]} {
+        set state $::els::docDiskState($::els::active)
+    }
+    switch $state {
+        normal      { set label "On disk" }
+        changed     { set label "Changed on disk" }
+        missing     { set label "Missing" }
+        unavailable { set label "Unavailable" }
+        readonly    { set label "Read-only" }
+        default     { set label "Not on disk" ; set state untitled }
+    }
+    set fg [expr {$state in {changed missing unavailable readonly} ? $::els::CARET : $::els::MUTED}]
+    .sb.disk configure -text $label -foreground $fg
+}
+proc els::disk_tip {} {
+    set state untitled
+    set detail ""
+    if {$::els::active ne "" && [info exists ::els::docDiskState($::els::active)]} {
+        set state $::els::docDiskState($::els::active)
+        if {[info exists ::els::docDiskDetail($::els::active)]} {
+            set detail $::els::docDiskDetail($::els::active)
+        }
+    }
+    switch $state {
+        normal      { set tip "No external change has been detected since els opened or saved this file. Save always performs a full conflict check." }
+        changed     { set tip "The file appears to have changed outside els. Save will ask before overwriting it." }
+        missing     { set tip "The file no longer exists at its saved path." }
+        unavailable { set tip "The file cannot currently be inspected." }
+        readonly    { set tip "The file can be read but is not currently writable." }
+        default     { set tip "This document has not been saved to disk." }
+    }
+    if {$detail ne ""} { append tip "\n$detail" }
+    return $tip
+}
+proc els::disk_probe {{id ""} {mode forced}} {
+    if {$id eq ""} { set id $::els::active }
+    if {$id eq "" || $id ni $::els::docs || ![info exists ::els::docPath($id)]} { return "" }
+    set path $::els::docPath($id)
+    if {$path eq ""} {
+        els::disk_probe_reset $id
+        return [els::disk_state_set $id untitled]
+    }
+    # No automatic observer may synchronously poke an obvious UNC/network path:
+    # a dead share can block Tk's only event thread for many seconds.  Explicit
+    # open/save/reload operations remain the deliberate place for a real check.
+    if {[els::remote_path $path]} {
+        if {[info exists ::els::docDiskState($id)] && $::els::docDiskState($id) ne "untitled"} {
+            return $::els::docDiskState($id)
+        }
+        return [els::disk_state_set $id unavailable "Network paths are checked only by explicit open, save, or reload actions."]
+    }
+    set observed [els::disk_stat_probe $path]
+    set observedState [dict get $observed state]
+    if {$observedState ne "ok"} {
+        unset -nocomplain ::els::docDiskMeta($id) ::els::docDiskContent($id)
+        if {$observedState ni {missing unavailable}} { set observedState unavailable }
+        set detail ""
+        if {[dict exists $observed error]} { set detail [dict get $observed error] }
+        return [els::disk_state_set $id $observedState $detail]
+    }
+    set size [dict get $observed size]
+    set mtime [dict get $observed mtime]
+    set readonly [expr {[dict get $observed readonly] ? 1 : 0}]
+    set norm [els::session_path $path]
+    if {$norm eq ""} { set norm $path }
+    set meta [list $norm $size $mtime]
+
+    set priorMeta ""
+    if {[info exists ::els::docDiskMeta($id)]} { set priorMeta $::els::docDiskMeta($id) }
+    set contentState normal
+    if {[info exists ::els::docDiskContent($id)]} {
+        # A metadata-only observation may never clear a content change already
+        # established by a full hash.  Only a later forced hash or rebase may.
+        if {$::els::docDiskContent($id) eq "changed" || $priorMeta eq $meta} {
+            set contentState $::els::docDiskContent($id)
+        }
+    }
+    set baseline [els::doc_saved_sig $id]
+    set bp [split $baseline :]
+    set comparable [expr {[llength $bp] == 3 \
+        && [string is integer -strict [lindex $bp 0]] \
+        && [string is integer -strict [lindex $bp 1]] \
+        && [info exists ::els::savedSigPath($id)] \
+        && [els::same_path $::els::savedSigPath($id) $path]}]
+    if {$comparable} {
+        set baseSize [lindex $bp 0]
+        set baseMtime [lindex $bp 1]
+        if {$size != $baseSize} {
+            set contentState changed
+        } elseif {$mode ne "forced"} {
+            # Timer/refresh paths are metadata-only and conservative.  They
+            # never stream file content from Tk's event loop.
+            if {$mtime != $baseMtime} { set contentState changed }
+        } elseif {$size > $::els::DISK_DEEP_PROBE_CAP} {
+            # Large observer checks stay cheap; the save guard still hashes all
+            # bytes authoritatively before any overwrite.
+            if {$mtime != $baseMtime} { set contentState changed }
+        } else {
+            set now [clock milliseconds]
+            set due [expr {$priorMeta ne $meta || ![info exists ::els::docDiskDeepAt($id)] || \
+                $now - $::els::docDiskDeepAt($id) >= $::els::DISK_DEEP_BACKOFF_MS}]
+            if {$due} {
+                set ::els::docDiskDeepAt($id) $now
+                if {[catch {els::file_sig_probe $path} deep]} {
+                    unset -nocomplain ::els::docDiskMeta($id) ::els::docDiskContent($id)
+                    return [els::disk_state_set $id unavailable $deep]
+                }
+                set deepState [dict get $deep state]
+                if {$deepState ne "ok"} {
+                    unset -nocomplain ::els::docDiskMeta($id) ::els::docDiskContent($id)
+                    set state [expr {$deepState eq "missing" ? "missing" : "unavailable"}]
+                    set detail ""
+                    if {[dict exists $deep error]} { set detail [dict get $deep error] }
+                    return [els::disk_state_set $id $state $detail]
+                }
+                set actual [dict get $deep sig]
+                set ap [split $actual :]
+                if {[llength $ap] == 3} { set meta [list $norm [lindex $ap 0] [lindex $ap 1]] }
+                set contentState [expr {[els::sig_content $actual] eq [els::sig_content $baseline] \
+                    ? "normal" : "changed"}]
+            }
+        }
+    }
+    set ::els::docDiskMeta($id) $meta
+    set ::els::docDiskContent($id) $contentState
+    if {$contentState eq "normal" && $readonly} {
+        return [els::disk_state_set $id readonly]
+    }
+    set detail ""
+    if {$contentState eq "changed" && $readonly} { set detail "The disk file is also read-only." }
+    return [els::disk_state_set $id $contentState $detail]
+}
+proc els::disk_watch_schedule {} {
+    if {!$::els::disk_watch_active || $::els::disk_watch_after ne ""} { return }
+    set ::els::disk_watch_after [after $::els::DISK_WATCH_MS els::disk_watch_tick]
+}
+proc els::disk_watch_activate {} {
+    set ::els::disk_watch_active 1
+    catch {els::disk_probe "" forced}
+    els::disk_watch_schedule
+}
+proc els::disk_watch_deactivate {} {
+    set ::els::disk_watch_active 0
+    if {$::els::disk_watch_after ne ""} { catch {after cancel $::els::disk_watch_after} }
+    set ::els::disk_watch_after ""
+}
+proc els::disk_watch_tick {} {
+    set ::els::disk_watch_after ""
+    if {!$::els::disk_watch_active} { return }
+    if {[catch {els::disk_probe "" timer} err]} {
+        catch {els::log warn "disk-state poll failed: $err"}
+    }
+    els::disk_watch_schedule
 }
 
 # ---- title / status -----------------------------------------------------
@@ -1968,7 +3161,7 @@ proc els::xform::atomic {w body} {
 proc els::xform::lastline {w} { return [lindex [split [$w index "end - 1 char"] .] 0] }
 # Last DOCUMENT line.  When the text ends in \n, "end - 1 char" sits at column 0
 # of the widget's mandatory final line: an empty pseudo-line that represents the
-# trailing newline, not content (els::find_scan pins the same invariant).  Line
+# trailing newline, not content (worker snapshots pin the same invariant).  Line
 # ops must stop above it, or they drag a phantom "" into their input and write
 # it back as real text (sort/reverse moved a blank line to the top and ate the
 # trailing newline; dedupe ate it whenever an interior blank line existed).
@@ -2683,10 +3876,24 @@ proc els::enc_menu {path action} {
     $path add cascade -label "Other (all encodings)" -menu $other
     return $path
 }
+proc els::encoding_menu_post {path} {
+    if {![winfo exists $path]} { return }
+    set canReopen [expr {$::els::active ne "" \
+        && [info exists ::els::docPath($::els::active)] \
+        && $::els::docPath($::els::active) ne ""}]
+    $path entryconfigure "Reopen with Encoding" \
+        -state [expr {$canReopen ? "normal" : "disabled"}]
+}
+proc els::build_enc_picker {path} {
+    menu $path -tearoff 0 -postcommand [list els::encoding_menu_post $path]
+    $path add cascade -label "Reopen with Encoding" \
+        -menu [els::enc_menu $path.re reopen]
+    $path add cascade -label "Set Save Encoding" \
+        -menu [els::enc_menu $path.sv save]
+    return $path
+}
 proc els::build_enc_popup {} {
-    menu .encpop -tearoff 0
-    .encpop add cascade -label "Reopen with Encoding" -menu [els::enc_menu .encpop.re reopen]
-    .encpop add cascade -label "Set Save Encoding"    -menu [els::enc_menu .encpop.sv save]
+    els::build_enc_picker .encpop
 }
 # ---- context menus (right-click on the text and on tabs) ------------------
 # Editor context menu: the Windows-convention right-click Undo/Cut/Copy/Paste/…
@@ -2751,25 +3958,47 @@ proc els::tab_copy_path {id} {
     clipboard clear
     clipboard append [file nativename $::els::docPath($id)]
 }
-# Build the exec argv to open $dir in Explorer.  A folder path containing a comma
-# or '=' can't go as a bare explorer.exe argument: Tcl's exec doesn't quote those
-# characters and explorer's own comma/equals-delimited command grammar then
-# mis-parses the path and opens the WRONG folder (G-Windows-0).  Route those
-# through the shell `start` verb (cmd.exe, as open_url already does), which takes
-# one quoted path; the common case stays on plain explorer.  "" if none resolves.
-proc els::reveal_argv {dir} {
+# Development-only fallback used when the native helper was not built.  It
+# starts Explorer directly with a dedicated argv element — never cmd.exe — and
+# refuses comma/equals paths that Explorer's own command grammar mis-parses.
+# The packaged product always has win_open_folder and does not use this path.
+proc els::folder_fallback_argv {dir} {
     set dir [file nativename $dir]
-    if {[string match {*[,=]*} $dir]} {
-        set cmd [els::system32 cmd.exe]
-        if {$cmd ne ""} { return [list $cmd /c start "" $dir] }
-    }
+    if {[string match {*[,=]*} $dir]} { return {} }
     set exp [els::windir explorer.exe]   ;# absolute path: never a planted explorer.exe
     if {$exp ne ""} { return [list $exp $dir] }
     return {}
 }
+proc els::open_folder_error {dir detail} {
+    set msg "Cannot open this folder:\n[els::display_path $dir]"
+    if {[string trim $detail] ne ""} { append msg "\n\n[string trim $detail]" }
+    tk_messageBox -parent . -icon error -title els -message $msg
+}
 proc els::open_folder {dir} {
-    set argv [els::reveal_argv $dir]
-    if {[llength $argv]} { catch {exec {*}$argv &} }
+    if {$dir eq ""} { return 0 }
+    set native [file nativename $dir]
+    if {[llength [info commands ::els::win_open_folder]]} {
+        if {[catch {::els::win_open_folder $native} err]} {
+            els::open_folder_error $dir $err
+            return 0
+        }
+        if {$err ne ""} {
+            els::open_folder_error $dir $err
+            return 0
+        }
+        return 1
+    }
+    set argv [els::folder_fallback_argv $dir]
+    if {![llength $argv]} {
+        els::open_folder_error $dir \
+            "Native folder integration is unavailable in this development run."
+        return 0
+    }
+    if {[catch {exec {*}$argv &} err]} {
+        els::open_folder_error $dir $err
+        return 0
+    }
+    return 1
 }
 proc els::tab_reveal {id} {
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} return
@@ -2816,9 +4045,7 @@ proc els::popup_up {menu widget} {
 proc els::popup_enc_menu {} {
     if {$::els::active eq ""} return
     if {![winfo exists .encpop]} { els::build_enc_popup }
-    set canReopen [expr {$::els::docPath($::els::active) ne ""}]
-    .encpop entryconfigure "Reopen with Encoding" \
-        -state [expr {$canReopen ? "normal" : "disabled"}]
+    els::encoding_menu_post .encpop
     els::popup_up .encpop .sb.enc
 }
 proc els::apply_enc {action enc bom} {
@@ -2867,10 +4094,15 @@ proc els::reopen_with {enc bom} {
     if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
     # a NEW encoding voids any earlier "lossy is fine" consent for the old one
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
+    unset -nocomplain ::els::docRecovered($id) ::els::docExtModPause($id)
+    set ::els::docFormatPending($id) 1
+    els::cache_saved_sig $id
     $w edit reset
     $w edit modified 0
+    els::swap_clear $id
     els::update_tab $id
     els::settitle
+    els::disk_probe $id
     els::refresh_view
 }
 # External-change (lost-update) prompt: the file changed on disk since we loaded
@@ -2889,23 +4121,160 @@ proc els::extmod_ask {id} {
         default { return cancel }
     }
 }
+# A target that disappeared or cannot currently be inspected is also an
+# external-state conflict.  Recreating/overwriting it is allowed only after an
+# explicit foreground decision; background auto-save always pauses instead.
+proc els::extstate_ask {id state detail} {
+    set name [file tail $::els::docPath($id)]
+    if {$state eq "missing"} {
+        set message "\"$name\" has been removed since you opened it."
+        set action "Yes - recreate it from this buffer.\nNo - do nothing."
+    } else {
+        set message "\"$name\" cannot currently be read or inspected."
+        set action "Yes - try to overwrite it from this buffer.\nNo - do nothing."
+    }
+    if {$detail ne ""} { append action "\n\nSystem detail: $detail" }
+    return [expr {[tk_messageBox -parent . -icon warning -type yesno -title els \
+        -message $message -detail $action] eq "yes"}]
+}
+# Opening with the wrong encoding can substitute U+FFFD for source bytes.  A
+# dirty save would make those replacements permanent, so require separate,
+# explicit consent even when every resulting character is encodable.
+proc els::decode_lossy_ask {id} {
+    set name [els::doc_name $id]
+    return [expr {[tk_messageBox -parent . -icon warning -type yesno -title els \
+        -message "\"$name\" contains replacement characters from decoding errors." \
+        -detail "Saving will make those replacements permanent and the original bytes cannot be recovered from this file.\n\nYes - save anyway.\nNo - cancel; use Reopen with Encoding or Save As instead."] eq "yes"}]
+}
+# One binary reader for document reloads, opens, and backups.  Keep the channel
+# lifecycle here so an error from fconfigure/read can never strand an open file
+# handle (on Windows that can also make a later atomic replace fail).
+proc els::_read_binary_channel {fh} {
+    fconfigure $fh -translation binary
+    set out ""
+    while {1} {
+        set chunk [read $fh $::els::IO_CHUNK]
+        append out $chunk
+        if {[eof $fh]} { break }
+    }
+    return $out
+}
+proc els::_read_binary_prefix {fh limit} {
+    fconfigure $fh -translation binary
+    set out ""
+    set remaining [expr {$limit + 1}]
+    while {$remaining > 0} {
+        set want [expr {min($remaining, $::els::IO_CHUNK)}]
+        set chunk [read $fh $want]
+        append out $chunk
+        incr remaining -[string length $chunk]
+        if {[eof $fh]} { break }
+    }
+    return $out
+}
+proc els::read_binary_file {path} {
+    set fh [::open $path r]
+    try {
+        return [els::_read_binary_channel $fh]
+    } finally {
+        # Preserve the read/configuration error if closing also happens to fail.
+        catch {close $fh}
+    }
+}
+proc els::read_preflight_size {path} { return [file size $path] }
+# Read no more than OPEN_WARN_SIZE+1 bytes before the large-file decision.  The
+# decision and (when accepted) the remaining uncapped aggregate read use the SAME channel,
+# closing the old stat/read race where a small file could grow after the size
+# check and then be loaded without consent.  Returns a dict with state ok,
+# deferred, cancelled, or failed; I/O errors still raise to the caller.
+proc els::read_binary_guarded {path quiet consent} {
+    # Quiet startup/session/handoff work must not touch an offline share before
+    # the UI is usable.  Persist it locally; explicit Deferred Open is consent
+    # for the potentially blocking network operation.
+    if {$quiet && !$consent && [els::remote_path $path]} {
+        set existed [els::deferred_contains $path]
+        if {$existed || [els::deferred_add $path]} {
+            return [dict create state deferred new [expr {!$existed}]]
+        }
+        return [dict create state failed error "the deferred-open list could not be saved"]
+    }
+    # A cheap pre-stat avoids reading 25 MiB merely to ask an already-known
+    # question.  Do it before opening the channel so a user can leave the prompt
+    # up without pinning a replaceable Windows file handle.
+    if {!$consent && ![catch {els::read_preflight_size $path} knownSize] && \
+            $knownSize > $::els::OPEN_WARN_SIZE} {
+        if {$quiet} {
+            set existed [els::deferred_contains $path]
+            if {$existed || [els::deferred_add $path]} {
+                return [dict create state deferred new [expr {!$existed}]]
+            }
+            return [dict create state failed error "the deferred-open list could not be saved"]
+        }
+        set mb [expr {max(1, int(ceil($::els::OPEN_WARN_SIZE / 1048576.0)))}]
+        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+            -message "\"[file tail $path]\" is larger than $mb MB.\nOpening it may take a while and use a lot of memory. Open it anyway?"]
+        if {$ans ne "yes"} { return [dict create state cancelled] }
+        set consent 1
+    }
+    set fh [::open $path r]
+    try {
+        set prefix [els::_read_binary_prefix $fh $::els::OPEN_WARN_SIZE]
+        if {[string length $prefix] <= $::els::OPEN_WARN_SIZE} {
+            return [dict create state ok bytes $prefix]
+        }
+        if {!$consent} {
+            if {$quiet} {
+                set existed [els::deferred_contains $path]
+                if {$existed || [els::deferred_add $path]} {
+                    return [dict create state deferred new [expr {!$existed}]]
+                }
+                return [dict create state failed error "the deferred-open list could not be saved"]
+            }
+            set mb [expr {max(1, int(ceil($::els::OPEN_WARN_SIZE / 1048576.0)))}]
+            set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+                -message "\"[file tail $path]\" is larger than $mb MB.\nOpening it may take a while and use a lot of memory. Open it anyway?"]
+            if {$ans ne "yes"} { return [dict create state cancelled] }
+        }
+        # Explicit consent removes the guard entirely; do not impose a hidden
+        # second ceiling.  Continue from the already-open channel.
+        append prefix [els::_read_binary_channel $fh]
+        return [dict create state ok bytes $prefix]
+    } finally {
+        catch {close $fh}
+    }
+}
 # Re-read a document's file FRESH from disk (unlike reopen_with, which re-decodes
 # the cached bytes) and replace the buffer, re-detecting encoding/EOL.  Resets the
 # doc to clean, re-caches the on-disk signature (so the R3 baseline matches disk
 # again), and drops the swap.  This is the Reload branch of the external-change
 # prompt and of File ▸ Reload from Disk.
-proc els::reload_from_disk {id} {
+proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return 0 }
     set p $::els::docPath($id)
     if {[catch {
-        set fh [::open $p r]
-        fconfigure $fh -translation binary
-        set raw [read $fh]
-        close $fh
+        set readResult [els::read_binary_guarded $p $quiet $largeConsent]
     } err]} {
-        tk_messageBox -parent . -icon error -title els -message "Cannot reload file:\n$err"
+        els::disk_probe $id
+        if {$quiet} {
+            catch {els::log error "quiet reload failed for $p: $err"}
+            catch {els::status_note "file was not reloaded: [file tail $p]"}
+        } else {
+            tk_messageBox -parent . -icon error -title els -message "Cannot reload file:\n$err"
+        }
         return 0
     }
+    set readState [dict get $readResult state]
+    if {$readState ne "ok"} {
+        if {$readState eq "failed"} {
+            set err [dict get $readResult error]
+            catch {els::log error "quiet reload failed for $p: $err"}
+            catch {els::status_note "file was not reloaded: [file tail $p]"}
+        } elseif {$readState eq "deferred" && [dict get $readResult new]} {
+            catch {els::status_note "large reload deferred - use File > Deferred Opens..."}
+        }
+        return 0
+    }
+    set raw [dict get $readResult bytes]
     set w [els::W $id]
     lassign [els::detect_encoding $raw] enc bom
     set text [els::decode $raw $enc $bom declossy]
@@ -2923,7 +4292,8 @@ proc els::reload_from_disk {id} {
     # re-reading disk can newly introduce (or clear) U+FFFD substitutions -> refresh
     # the decode-lossy marker just as open/reopen_with do (always interactive here)
     if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
-    unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id) ::els::docExtModPause($id)
+    unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id) \
+        ::els::docExtModPause($id) ::els::docFormatPending($id)
     els::cache_saved_sig $id
     unset -nocomplain ::els::docRecovered($id)
     $w edit reset
@@ -2931,6 +4301,7 @@ proc els::reload_from_disk {id} {
     els::swap_clear $id
     els::update_tab $id
     els::settitle
+    els::disk_probe $id
     els::refresh_view
     return 1
 }
@@ -2964,11 +4335,15 @@ proc els::save_with {enc bom} {
     els::update_tab $id
     els::settitle
 }
-proc els::build_eol_popup {} {
-    menu .eolpop -tearoff 0
+proc els::eol_menu {path} {
+    menu $path -tearoff 0
     foreach {lbl v} {"LF (Unix / macOS)" lf "CRLF (Windows)" crlf "CR (classic Mac)" cr} {
-        .eolpop add command -label $lbl -command [list els::set_eol $v]
+        $path add command -label $lbl -command [list els::set_eol $v]
     }
+    return $path
+}
+proc els::build_eol_popup {} {
+    els::eol_menu .eolpop
 }
 proc els::popup_eol_menu {} {
     if {$::els::active eq ""} return
@@ -3002,74 +4377,109 @@ proc els::filetypes {} {
 proc els::new {} {
     els::new_doc
 }
-proc els::open {{p ""} {quiet 0} {noRecent 0}} {
+proc els::open_quiet_failure {path err} {
+    catch {els::log error "quiet open failed for $path: $err"}
+    catch {els::status_note "file not opened: [file tail $path]"}
+}
+proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
+    set ::els::last_open_outcome cancelled
     if {$p eq ""} {
         set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
-        if {$p eq ""} { return }
+        if {$p eq ""} { return "" }
     }
-    if {![catch {file normalize $p} np]} { set p $np }
+    if {![els::remote_path $p] && ![catch {file normalize $p} np]} { set p $np }
     variable active
     variable docPath
     foreach id $::els::docs {
         if {[info exists docPath($id)] && [els::same_path $docPath($id) $p]} {
             els::switch_to $id
             if {!$noRecent} { els::recent_add $p }
+            els::deferred_remove_many [list $p]
+            set ::els::last_open_outcome already
             return $id
         }
     }
     # Large-file guard: the whole file is read, decoded, and held ~4x in RAM with no
     # way to cancel, so a mis-dropped multi-hundred-MB file wedges the editor.  Warn
     # before the read on an interactive open — and BEFORE creating a tab, so a "no"
-    # leaves no stray buffer.  The quiet path (session restore / crash recovery)
-    # opens anyway: prompting would block startup, and silently skipping would drop
-    # the file from the restored session.
-    if {!$quiet && ![catch {file size $p} sz] && $sz > $::els::OPEN_WARN_SIZE} {
-        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
-            -message "\"[file tail $p]\" is large ([expr {$sz / 1048576}] MB).\
-                      \nOpening it may take a while and use a lot of memory. Open it anyway?"]
-        if {$ans ne "yes"} { return "" }
+    # leaves no stray buffer.  A quiet startup/session/handoff path MUST NOT make
+    # that memory decision itself or post a modal from a timer: persist the path in
+    # Deferred Opens instead.  largeConsent is set only by that dialog's explicit
+    # Open selected action; once consented there is deliberately no absolute cap.
+    # The guard reads at most threshold+1 from the actual open channel.  A file
+    # that grows after a stat can no longer slip into an unbounded read.
+    catch {. configure -cursor watch} ; update idletasks
+    set readRc [catch {set readResult [els::read_binary_guarded $p $quiet $largeConsent]} readErr]
+    if {$readRc} {
+        catch {. configure -cursor ""}
+        set ::els::last_open_outcome failed
+        if {$quiet} {
+            els::open_quiet_failure $p $readErr
+        } else {
+            tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$readErr"
+        }
+        return ""
+    }
+    set readState [dict get $readResult state]
+    if {$readState ne "ok"} {
+        catch {. configure -cursor ""}
+        switch $readState {
+            deferred {
+                set ::els::last_open_outcome deferred
+                if {[dict get $readResult new]} {
+                    catch {els::status_note "large file deferred - use File > Deferred Opens..."}
+                }
+            }
+            failed {
+                set ::els::last_open_outcome failed
+                els::open_quiet_failure $p [dict get $readResult error]
+            }
+            default { set ::els::last_open_outcome cancelled }
+        }
+        return ""
     }
     set prevActive $active
     set created 0
-    if {[els::pristine $active]} {
-        set id $active
-    } else {
-        set id [els::new_doc]
-        set created 1
-    }
-    set w [els::W $id]
+    set id ""
+    set w ""
     # a big read/decode/insert blocks the single-threaded UI — show a busy cursor so
     # the freeze reads as "working", not "hung".  Read AND decode/insert are in ONE
     # catch (both can throw — e.g. an out-of-memory on a huge file, the very case
     # this feature guards) and the cursor is cleared UNCONDITIONALLY after it, so no
     # exit path — including an uncaught throw on the quiet session-restore path —
     # can strand a watch cursor on the whole app.
-    catch {. configure -cursor watch} ; update idletasks
     set rc [catch {
-        set fh [::open $p r]
-        fconfigure $fh -translation binary
-        set raw [read $fh]
-        close $fh
+        set raw [dict get $readResult bytes]
         # detect encoding + EOL, decode, normalise the buffer to LF internally
         lassign [els::detect_encoding $raw] enc bom
         set text [els::decode $raw $enc $bom declossy]
         set eol [els::detect_eol $text]
         set text [string map [list \r\n \n \r \n] $text]
+        if {[els::pristine $active]} {
+            set id $active
+        } else {
+            set id [els::new_doc]
+            set created 1
+        }
+        set w [els::W $id]
         $w delete 1.0 end
         $w insert end $text
     } err]
     catch {. configure -cursor ""}
     if {$rc} {
+        set ::els::last_open_outcome failed
         if {!$quiet} {
             tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
+        } else {
+            els::open_quiet_failure $p $err
         }
         # discard only a doc WE created for this open — a reused pre-existing pristine
         # tab is the user's, so just clear any partial insert back to empty; and
         # return focus to the tab that was active before (close_doc's neighbor pick
         # lands on an arbitrary one)
-        if {$created && [llength $::els::docs] > 1} {
+        if {$created && $id ne "" && [llength $::els::docs] > 1} {
             els::close_doc $id
-        } else {
+        } elseif {$w ne ""} {
             catch {$w delete 1.0 end ; $w edit reset ; $w edit modified 0}
         }
         if {$prevActive ne "" && $prevActive in $::els::docs} {
@@ -3104,6 +4514,8 @@ proc els::open {{p ""} {quiet 0} {noRecent 0}} {
     els::settitle
     els::refresh_view
     if {!$noRecent} { els::recent_add $p }
+    els::deferred_remove_many [list $p]
+    set ::els::last_open_outcome opened
     return $id
 }
 # Emit the bytes to the (temp) save channel.  A one-line seam so a test can force
@@ -3116,17 +4528,36 @@ proc els::_save_emit {chan bytes} {
 # MoveFileEx(REPLACE_EXISTING) — atomic on the same NTFS volume — so a crash,
 # disk-full, or I/O error mid-write can NEVER truncate or corrupt the existing
 # file (the old in-place `open w` truncated it the instant it opened).  Returns
-# "" on success, else an error message; on any failure the original is left
-# intact and the temp is cleaned up.  Refuses a read-only target, matching the
-# old behavior.
+# "" on success, else an error message.  A temp-write failure cleans up its
+# incomplete temp; an atomic-replace failure retains the complete temp and leaves
+# the original intact.  Refuses a read-only target, matching the old behavior.
 #
 # Metadata: the native build prefers Win32 ReplaceFileW (src/winfs.c,
-# els::win_replace_file) for the replace, which DOES preserve the target's ACLs,
-# alternate data streams (e.g. the mark-of-the-web), and attributes.  When that
-# command is absent (a dev/tclsh run) the plain `file rename -force` below is used,
-# which does not carry those; a >260-char or locked target falls back to an
-# in-place write (non-atomic only for those rare cases).
+# els::win_replace_file), which normally carries the target's ACLs, alternate
+# data streams (e.g. the mark-of-the-web), and attributes.  Merge errors are
+# deliberately best-effort so content replacement stays atomic; in that rare
+# case some metadata may not carry.  When the command is absent (a dev/tclsh run)
+# the plain `file rename -force` below is used, which does not carry those.  A
+# >260-char or locked target may fail to save, but never falls back to truncating
+# the target in place.
+proc els::_durable_flush {path durable} {
+    if {!$durable || ![llength [info commands ::els::win_fsync]]} { return "" }
+    if {[catch {els::win_fsync [file nativename $path]} err]} {
+        return "DURABILITY: $err"
+    }
+    if {$err ne ""} { return "DURABILITY: $err" }
+    return ""
+}
+proc els::_atomic_rename {from to} {
+    file rename -force $from $to
+}
 proc els::write_atomic {path bytes {tmpHint ""} {durable 0}} {
+    # `file rename -force $tmp $path` treats an existing directory as a
+    # destination container, moving the temp *inside* it and reporting success.
+    # A save target is always a file: reject directories before creating a temp.
+    if {[file isdirectory $path]} {
+        return "the target is a directory"
+    }
     if {[file exists $path] && ![catch {file attributes $path -readonly} ro] && $ro} {
         return "the file is read-only"
     }
@@ -3156,46 +4587,27 @@ proc els::write_atomic {path bytes {tmpHint ""} {durable 0}} {
     # guarantees post-crash CONSISTENCY, not that the replace is PERSISTED when the call
     # returns — so without this a power cut just after the replace can roll the name back
     # to the OLD data (the new, temp-flushed bytes then being an orphaned extent).  Flush
-    # is best-effort (never blocks a save) and native-only.
-    # Prefer ReplaceFileW (native build, src/winfs.c) when replacing an existing file:
-    # atomic AND preserves the target's ACLs, alternate data streams (mark-of-the-web),
-    # and attributes — which a rename-replace drops.
+    # is native-only.  A requested flush failure is a save failure: the target
+    # has the new bytes, but the tab and its recovery swap remain dirty.
+    # Prefer ReplaceFileW (native build, src/winfs.c) when replacing an existing
+    # file: atomic, with best-effort merging of the target's ACLs, alternate data
+    # streams (mark-of-the-web), and attributes — which a rename-replace drops.
     if {[file exists $path] && [llength [info commands ::els::win_replace_file]]} {
-        if {[els::win_replace_file [file nativename $path] [file nativename $tmp]] eq ""} {
-            if {$durable && [llength [info commands ::els::win_fsync]]} {
-                catch {els::win_fsync [file nativename $path]}
-            }
-            return ""
+        if {![catch {els::win_replace_file [file nativename $path] [file nativename $tmp]} replaceErr] \
+                && $replaceErr eq ""} {
+            return [els::_durable_flush $path $durable]
         }
         # ReplaceFileW failed — fall through; the temp is still present.
     }
-    if {![catch {file rename -force $tmp $path}]} {
-        if {$durable && [llength [info commands ::els::win_fsync]]} {
-            catch {els::win_fsync [file nativename $path]}
-        }
-        return ""   ;# plain atomic rename — the common path without the C helper
+    if {![catch {els::_atomic_rename $tmp $path} renameErr]} {
+        return [els::_durable_flush $path $durable]
     }
-    # `file rename -force` cannot overwrite a target on a >260-char path (a locked
-    # target also blocks it).  The temp holds a full new copy and the original is
-    # still intact, so fall back to a direct in-place write — saving never
-    # regresses to "can't save where it used to" (non-atomic only for these rare
-    # cases).  KEEP the temp as a rescue copy THROUGH the in-place write: if that
-    # TRUNC write fails mid-stream (dying USB, media pulled), the original is
-    # truncated but the temp still holds the complete new content — deleting it
-    # first (as this used to) would lose the only good copy.  Delete only on
-    # success; on failure, name the surviving temp so the bytes aren't lost.
-    set err [els::_write_inplace $path $bytes]
-    if {$err eq ""} {
-        if {$durable && [llength [info commands ::els::win_fsync]]} {
-            catch {els::win_fsync [file nativename $path]}
-        }
-        catch {file delete -force $tmp}
-        return ""
-    }
-    return "$err\n(a complete copy of the new content is safe at: $tmp)"
+    # Neither atomic operation worked (long path, lock, ACL, device error...).
+    # The complete temp is the rescue copy; never risk the target with open/TRUNC.
+    return "atomic replacement failed: $renameErr\n(a complete copy of the new content is safe at: $tmp)"
 }
-# Direct in-place write (the pre-atomic behavior): only a fallback for when an
-# atomic rename is impossible (very long path / locked target).
+# Legacy helper retained for compatibility with older tests/extensions.  The
+# save path deliberately never calls it.
 proc els::_write_inplace {path bytes} {
     set fh ""
     if {[catch {
@@ -3354,46 +4766,58 @@ proc els::buf_sig {id} {
     return "$chars:[zlib crc32 [encoding convertto -profile replace utf-8 \
                                     [$w get 1.0 "end - 1 char"]]]"
 }
-# A signature of on-disk bytes "size:mtime:crc" (sampled crc above the cap), used
-# to reconcile a swap's baseline against the file at recovery time.
+# A signature of on-disk bytes "size:mtime:crc", used to reconcile a swap's
+# baseline against the file at recovery time.  CRC always covers every byte.
 proc els::sig_from_bytes {bytes mtime} {
     set size [string length $bytes]
-    if {$size <= $::els::SWAP_FILE_CRC_CAP} {
-        set crc [zlib crc32 $bytes]
-    } else {
-        set crc [zlib crc32 "[string range $bytes 0 65535][string range $bytes end-65535 end]"]
-    }
-    return "$size:$mtime:$crc"
+    return "$size:$mtime:[zlib crc32 $bytes]"
 }
-proc els::file_sig {path} {
-    if {[catch {file stat $path st}]} { return "" }
-    # Single open + single guaranteed close; NO `return` inside the catch (that
-    # makes catch report code 2 and the outer `if` take the error branch — which
-    # silently broke this for >16 MB files).  fh tracked so an I/O fault can't leak.
+proc els::file_sig_probe {path} {
+    if {[catch {file stat $path st} err opts]} {
+        set code {}
+        if {[dict exists $opts -errorcode]} { set code [dict get $opts -errorcode] }
+        set posix [lindex $code 1]
+        set state [expr {$posix in {ENOENT ENOTDIR} ? "missing" : "unreadable"}]
+        return [dict create state $state error $err]
+    }
+    # Single open + guaranteed close.  Keep missing distinct from permission,
+    # sharing and I/O failures so save can ask the right explicit question.
     set fh ""
     set sig ""
-    if {[catch {
+    try {
         set fh [::open $path rb]
-        if {$st(size) <= $::els::SWAP_FILE_CRC_CAP} {
-            set bytes [read $fh]
-        } else {
-            set head [read $fh 65536]
-            seek $fh -65536 end
-            set tail [read $fh 65536]
-            set bytes "$head$tail"   ;# sampled: matches sig_from_bytes' >cap branch
+        fconfigure $fh -translation binary
+        set crc 0
+        set size 0
+        while {1} {
+            set chunk [read $fh 1048576]
+            if {$chunk ne ""} {
+                incr size [string length $chunk]
+                set crc [zlib crc32 $chunk $crc]
+            }
+            if {[eof $fh]} { break }
         }
-        close $fh
-        set fh ""
-        set sig "$st(size):$st(mtime):[zlib crc32 $bytes]"
-    }]} {
+        file stat $path final
+        if {$st(size) != $final(size) || $st(mtime) != $final(mtime) || $size != $final(size)} {
+            error "file changed while its signature was being read"
+        }
+        set sig "$size:$final(mtime):$crc"
+    } on error {err opts} {
+        return [dict create state unreadable error $err]
+    } finally {
         if {$fh ne ""} { catch {close $fh} }
-        return ""
     }
-    return $sig
+    return [dict create state ok sig $sig]
+}
+proc els::file_sig {path} {
+    set probe [els::file_sig_probe $path]
+    if {[dict get $probe state] ne "ok"} { return "" }
+    return [dict get $probe sig]
 }
 # Cache the doc's on-disk signature from the bytes we already hold (the exact
 # loaded/saved bytes) plus the file's mtime -- one consistent source.
 proc els::cache_saved_sig {id} {
+    els::disk_probe_reset $id
     if {$::els::docPath($id) eq ""} {
         set ::els::savedSig($id) ""
         unset -nocomplain ::els::savedSigPath($id)
@@ -3408,20 +4832,13 @@ proc els::doc_saved_sig {id} {
     if {[info exists ::els::savedSig($id)]} { return $::els::savedSig($id) }
     return ""
 }
-# The CONTENT part of a "size:mtime:crc" signature.  The R3 lost-update guard
-# compares on this.  At/under SWAP_FILE_CRC_CAP the crc covers every byte, so the
-# volatile mtime is DROPPED — a byte-identical external rewrite (OneDrive/Dropbox
-# sync, antivirus, a backup tool, or a save-in-place that rewrites the same
-# bytes, all of which bump mtime) does not false-positive as a change.  ABOVE the
-# cap the crc is sampled (head+tail only) and blind to a size-preserving rewrite
-# of the middle, so mtime is the only remaining change signal and is KEPT: for a
-# >16 MiB file a bumped mtime prompts "changed on disk" (the safe direction —
-# overwrite/reload/cancel, no silent clobber) rather than being ignored.
-# Recovery reconciliation keeps the full mtime-bearing comparison regardless.
+# The CONTENT part of a "size:mtime:crc" signature.  Since every CRC covers the
+# full byte stream, volatile mtime is always dropped: byte-identical sync/AV
+# rewrites do not false-positive, while same-size middle rewrites remain visible.
+# Recovery reconciliation can still compare the full mtime-bearing signature.
 proc els::sig_content {sig} {
     set p [split $sig :]
     if {[llength $p] != 3} { return $sig }
-    if {[lindex $p 0] > $::els::SWAP_FILE_CRC_CAP} { return $sig }
     return "[lindex $p 0]:[lindex $p 2]"
 }
 
@@ -3478,6 +4895,9 @@ proc els::swap_flush_doc {id} {
         }
     } else {
         set ::els::swap_fail_streak($id) 0
+        # A recovery whose first replacement write failed keeps the old orphan.
+        # Once any later pass can validate the current-session swap, retire it.
+        catch {els::recover_source_commit $id}
     }
     return $done
 }
@@ -3498,6 +4918,44 @@ proc els::swap_clear {id} {
         catch {file delete -force [els::swap_path [els::session_id] $id]}
     }
     unset -nocomplain ::els::swapSig($id) ::els::dirtySince($id) ::els::swap_fail_streak($id)
+}
+
+# A recovered orphan is not consumed until an independently parsed swap for this
+# session contains the same document identity, metadata, and exact text.  This
+# closes the otherwise fatal window between loading recovery into RAM and the
+# first periodic swap write.
+proc els::recover_replacement_valid {id} {
+    if {$id ni $::els::docs || ![winfo exists [els::W $id]]} { return 0 }
+    set d [els::swap_dir]
+    if {$d eq ""} { return 0 }
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    if {$rec eq ""} { return 0 }
+    foreach {key expected} [list \
+        sessionId [els::session_id] docId $id dirty 1 \
+        path $::els::docPath($id) enc $::els::docEnc($id) \
+        bom $::els::docBom($id) eol $::els::docEol($id) \
+        savedSig [els::doc_saved_sig $id]] {
+        if {![dict exists $rec $key] || [dict get $rec $key] ne $expected} { return 0 }
+    }
+    return [expr {[dict get $rec text] eq [[els::W $id] get 1.0 "end - 1 char"]}]
+}
+proc els::recover_source_commit {id} {
+    if {![info exists ::els::docRecoverySource($id)]} { return 1 }
+    if {![els::recover_replacement_valid $id]} { return 0 }
+    set old $::els::docRecoverySource($id)
+    set current [els::swap_path [els::session_id] $id]
+    if {[els::same_path $old $current]} { return 0 }
+    if {[catch {file delete -force $old}] || [file exists $old]} { return 0 }
+    unset -nocomplain ::els::docRecoverySource($id)
+    return 1
+}
+# A successful foreground save, or an explicit discard/close, supersedes both
+# recovery copies.  Deletion stays best-effort: failure leaves a harmless orphan
+# that can be offered again rather than risking data loss.
+proc els::recover_source_drop {id} {
+    if {![info exists ::els::docRecoverySource($id)]} { return }
+    catch {file delete -force $::els::docRecoverySource($id)}
+    unset -nocomplain ::els::docRecoverySource($id)
 }
 
 # ---- timers --------------------------------------------------------------
@@ -3606,10 +5064,9 @@ proc els::handoff_dir {} {
 # build / acquire our own session lock, so there is no own-lock to exclude.
 proc els::primary_running {} {
     if {[els::single_instance_off]} { return 0 }
-    lassign [els::config_candidates] near appdata
-    set cfg ""
-    if {[file exists $near]} { set cfg $near } elseif {[file exists $appdata]} { set cfg $appdata }
-    if {$cfg eq ""} { return 0 }   ;# first run: no primary yet
+    # A primary already owns a lock even when adjacent els.conf does not yet
+    # exist, so scan the fixed state directory regardless of config-file existence.
+    set cfg [lindex [els::config_candidates] 0]
     set swapdir [file join [file dirname $cfg] swap]
     foreach lp [glob -nocomplain -directory $swapdir *.lock] {
         set sid [file rootname [file tail $lp]]
@@ -3630,11 +5087,15 @@ proc els::primary_running {} {
 # one.  An empty payload still means "raise yourself" (bare relaunch).
 proc els::handoff_send {cfg fileArgs} {
     set hd [file join [file dirname $cfg] handoff]
-    if {[catch {file mkdir $hd}]} { return }
+    if {[catch {file mkdir $hd}]} { return 0 }
     set norm {}
     foreach f $fileArgs {
         if {[string index $f 0] eq "-"} continue
-        if {![catch {file normalize $f} n]} { lappend norm $n }
+        if {[els::remote_path $f]} {
+            lappend norm [els::session_path $f]
+        } elseif {![catch {file normalize $f} n]} {
+            lappend norm $n
+        }
     }
     set target [file join $hd "[pid]-[clock clicks].open"]
     # UTF-8 the payload: write_atomic's channel is binary (iso8859-1), so a path
@@ -3643,8 +5104,74 @@ proc els::handoff_send {cfg fileArgs} {
     # UTF-8 read in handoff_drain would fail, silently dropping the handoff and
     # never opening the double-clicked file.  strict: a valid path always encodes;
     # a pathological one (unpaired surrogate) is dropped rather than corrupted.
-    if {[catch {encoding convertto -profile strict utf-8 [join $norm \n]} payload]} { return }
-    catch {els::write_atomic $target $payload ".ho-[pid]-[clock clicks].tmp"}
+    set record [dict create schema 1 paths $norm attempt 0 notBefore 0]
+    if {[catch {encoding convertto -profile strict utf-8 "ELSHANDOFF v1\n$record"} payload]} { return 0 }
+    if {[string length $payload] > $::els::HANDOFF_MAX_BYTES} { return 0 }
+    set err [els::write_atomic $target $payload ".ho-[pid]-[clock clicks].tmp" 1]
+    if {$err ne ""} {
+        catch {els::log error "could not persist handoff request $target: $err"}
+        return 0
+    }
+    return 1
+}
+# Decode a spool without interpreting malformed bytes as paths.  New writers use
+# a schema'd dict (so retries carry bounded backoff); newline records from older
+# versions remain consumable.
+proc els::handoff_decode {raw} {
+    if {[catch {encoding convertfrom -profile strict utf-8 $raw} data]} {
+        return [dict create state invalid error "invalid UTF-8"]
+    }
+    set magic "ELSHANDOFF v1\n"
+    if {[string range $data 0 [expr {[string length $magic] - 1}]] ne $magic} {
+        if {[string match "ELSHANDOFF *" $data]} {
+            return [dict create state invalid error "unsupported handoff format"]
+        }
+        if {$data eq ""} { set paths {} } else { set paths [split $data \n] }
+        return [dict create state valid paths $paths attempt 0 notBefore 0]
+    }
+    set rec [string range $data [string length $magic] end]
+    if {[catch {
+        dict size $rec
+        if {[llength $rec] != 8} { error "duplicate or incomplete fields" }
+        if {[lsort [dict keys $rec]] ne {attempt notBefore paths schema}} { error "unexpected fields" }
+        if {![string is integer -strict [dict get $rec schema]] || [dict get $rec schema] != 1} { error "unsupported schema" }
+        foreach k {attempt notBefore} {
+            if {![string is integer -strict [dict get $rec $k]] || [dict get $rec $k] < 0} { error "invalid $k" }
+        }
+        set paths [dict get $rec paths]
+        llength $paths
+    } err]} {
+        return [dict create state invalid error $err]
+    }
+    return [dict create state valid paths $paths attempt [dict get $rec attempt] \
+        notBefore [dict get $rec notBefore]]
+}
+proc els::handoff_encode {paths attempt notBefore} {
+    set rec [dict create schema 1 paths $paths attempt $attempt notBefore $notBefore]
+    return [encoding convertto -profile strict utf-8 "ELSHANDOFF v1\n$rec"]
+}
+proc els::handoff_backoff {attempt} {
+    set exponent [expr {min(7, max(0, $attempt))}]
+    return [expr {min(30000, 250 * (1 << $exponent))}]
+}
+proc els::handoff_quarantine {path why} {
+    set bad "$path.invalid-[clock seconds]-[clock clicks]"
+    if {[catch {file rename $path $bad} qerr]} {
+        catch {els::log warn "invalid handoff request $path ($why); quarantine failed: $qerr"}
+        return 0
+    }
+    unset -nocomplain ::els::handoff_seen($path)
+    catch {els::log warn "quarantined invalid handoff request $path as $bad: $why"}
+    return 1
+}
+proc els::handoff_read_file {path} {
+    set fh [::open $path r]
+    try {
+        fconfigure $fh -translation binary
+        return [read $fh [expr {$::els::HANDOFF_MAX_BYTES + 1}]]
+    } finally {
+        catch {close $fh}
+    }
 }
 # Primary: drain the spool — open each handed-off path as a tab and raise the
 # window.  Runs on a light poll while single-instance is active.
@@ -3660,29 +5187,65 @@ proc els::handoff_drain {} {
     if {![winfo exists .tabs]} { return }
     set raise 0
     foreach f [lsort [glob -nocomplain -directory $hd *.open]] {
-        set data "" ; set ok 0
+        set raw ""
         # read as binary, then decode UTF-8 back to the path string (mirrors
         # handoff_send).  try/finally guarantees the channel closes even on a read
         # error — the old utf-8 strict READ threw before close and leaked a channel
         # per non-ASCII spool.  A spool from an older (iso8859-1) els that isn't
         # valid UTF-8 fails to decode and is dropped, not retried.
-        if {![catch {
-            set fh [::open $f r]
-            try { fconfigure $fh -translation binary; set raw [read $fh] } finally { close $fh }
-        }]} {
-            if {![catch {encoding convertfrom -profile strict utf-8 $raw} data]} { set ok 1 }
+        if {[catch {set raw [els::handoff_read_file $f]} readErr]} {
+            # Sharing violations and transient I/O are retryable.  Never consume
+            # the only durable copy merely because this poll could not read it.
+            continue
         }
-        # delete after CONSUMING (reading) the spool, before opening: an
-        # undecodable/poison spool must still be removed so the 500 ms poll cannot
-        # re-drain it forever, and a consumed spool cannot re-open its files.
-        catch {file delete -force $f}
-        set raise 1
-        if {$ok} {
-            foreach p [split $data \n] {
-                # open QUIET: a failing open must never pop a modal from the
-                # background poll timer (or the pre-UI startup drain)
-                if {$p ne "" && [file exists $p]} { catch {els::open $p 1} }
+        if {[string length $raw] > $::els::HANDOFF_MAX_BYTES} {
+            els::handoff_quarantine $f "request exceeds size limit"
+            continue
+        }
+        set rec [els::handoff_decode $raw]
+        if {[dict get $rec state] ne "valid"} {
+            els::handoff_quarantine $f [dict get $rec error]
+            continue
+        }
+        set now [clock milliseconds]
+        set notBefore [dict get $rec notBefore]
+        if {$notBefore > $now + 30000} { set notBefore $now }
+        if {$notBefore > $now} { continue }
+        if {[dict get $rec attempt] == 0 && ![info exists ::els::handoff_seen($f)]} {
+            set ::els::handoff_seen($f) 1
+            set raise 1
+        }
+        set unresolved {}
+        foreach p [dict get $rec paths] {
+            if {$p eq ""} { continue }
+            # open QUIET: a failing open must never pop a modal from the
+            # background poll timer.  Only an actual open/already-open document
+            # or a DURABLY deferred large path acknowledges delivery.
+            if {[catch {els::open $p 1} openErr] || \
+                    $::els::last_open_outcome ni {opened already deferred}} {
+                lappend unresolved $p
             }
+        }
+        if {![llength $unresolved]} {
+            # Delete only after every path is delivered.  A failed delete merely
+            # replays deduplicated opens on the next poll; it never loses one.
+            if {![catch {file delete -force $f}]} {
+                unset -nocomplain ::els::handoff_seen($f)
+            }
+            continue
+        }
+        set attempt [expr {[dict get $rec attempt] + 1}]
+        set next [expr {[clock milliseconds] + [els::handoff_backoff $attempt]}]
+        if {[catch {els::handoff_encode $unresolved $attempt $next} payload]} { continue }
+        if {[string length $payload] > $::els::HANDOFF_MAX_BYTES} {
+            catch {els::log error "handoff retry record exceeds size limit: $f"}
+            continue
+        }
+        # If this atomic rewrite fails, retain the original request.  Paths that
+        # already opened may replay, but open's identity check makes that safe.
+        set err [els::write_atomic $f $payload ".ho-retry-[pid]-[clock clicks].tmp" 1]
+        if {$err ne ""} {
+            catch {els::log warn "could not update handoff retry $f: $err"}
         }
     }
     if {$raise} { els::raise_window }
@@ -3856,9 +5419,10 @@ proc els::swap_sweep {} {
                 catch {file delete -force $f}
             }
         }
-        # handoff spool files a primary never drained (false-positive liveness)
+        # Valid handoff requests are durable delivery promises and never age
+        # out.  Only abandoned temporary/invalid artifacts are sweepable.
         set hd [file join [file dirname $::els::config_path] handoff]
-        foreach f [glob -nocomplain -directory $hd *.open .ho-*.tmp] {
+        foreach f [glob -nocomplain -directory $hd .ho-*.tmp *.invalid-*] {
             if {![catch {file mtime $f} mt] && ($now - $mt) > $::els::STALE_SECS} {
                 catch {file delete -force $f}
             }
@@ -3924,17 +5488,23 @@ proc els::recover_load {rec branch} {
         set fresh 1
         if {$path ne ""} {
             set ::els::docPath($tid) $path
-            # arm the R3 external-change guard from the swap's pre-crash on-disk
-            # signature: without this a recovered tab has no savedSig, so its first
-            # save would skip the lost-update check and silently clobber a file that
-            # changed between the crash and recovery.  "" (untitled) leaves it off.
-            if {[dict exists $rec savedSig] && [dict get $rec savedSig] ne ""} {
-                set ::els::savedSig($tid) [dict get $rec savedSig]
-                set ::els::savedSigPath($tid) $path
-            }
         }
         set ::els::docRaw($tid) ""           ;# new tab: no on-disk bytes cached yet
-        set ::els::docRecovered($tid) 1      ;# mark a separate recovered tab as such
+    }
+    # Every recovered buffer (including one merged onto a restored clean tab) is
+    # excluded from automatic file saves until a foreground save succeeds.  Pin
+    # the lost-update baseline to the pre-crash signature, never to the file that
+    # happened to be opened during session restore.  A changed branch without a
+    # usable signature gets a sentinel that deliberately conflicts with disk.
+    set ::els::docRecovered($tid) 1
+    if {$path ne ""} {
+        set recoveredSig ""
+        if {[dict exists $rec savedSig]} { set recoveredSig [dict get $rec savedSig] }
+        if {$recoveredSig ne "" || $branch eq "changed"} {
+            if {$recoveredSig eq ""} { set recoveredSig __els_recovery_no_baseline__ }
+            set ::els::savedSig($tid) $recoveredSig
+            set ::els::savedSigPath($tid) $path
+        }
     }
     # NB: when merging onto an existing clean tab, its docRaw (loaded from disk by
     # els::open) is LEFT INTACT — clobbering it would blank a later "Reopen with
@@ -3958,9 +5528,11 @@ proc els::recover_load {rec branch} {
     $w edit reset
     $w edit modified 1
     unset -nocomplain ::els::loading($tid)
+    unset -nocomplain ::els::swapSig($tid)
     set ::els::dirtySince($tid) 1
-    els::update_tab $tid
+    els::refresh_tabs
     els::settitle
+    els::disk_probe $tid
     # Keep recovered content EXACTLY as it crashed until the user deliberately
     # engages.  new_doc -> switch_to left this widget keyboard-focused with the caret
     # at the restored cursor, so a stray printable keystroke arriving during the
@@ -3971,23 +5543,44 @@ proc els::recover_load {rec branch} {
     catch {focus .}
     return $tid
 }
-# decision: recover | discard.  Suspends autosave so the running tick can't write
-# a fresh swap of the recovered body before the orphan is cleared.  The orphan
-# swap is deleted only AFTER a successful load (delete-last), so a failed load
-# preserves it for the next attempt.
+# decision: recover | discard.  Loading into RAM is not enough to consume the old
+# orphan: after restoring the caller's suspend state, write and parse a replacement
+# current-session swap first.  If that fails, retain the orphan and let a later
+# periodic pass retry the handoff.
 proc els::recover_apply {plan decision} {
     lassign $plan f rec branch
-    catch {
+    set oldSuspend $::els::swap_suspend
+    set id ""
+    set actionCode [catch {
         set ::els::swap_suspend 1
         switch -- $decision {
             recover {
                 set id [els::recover_load $rec $branch]
-                if {$id ne "" && [winfo exists [els::W $id]]} { catch {file delete -force $f} }
+                if {$id eq "" || ![winfo exists [els::W $id]]} {
+                    error "recovery did not create a document"
+                }
+                set ::els::docRecoverySource($id) $f
             }
-            discard { catch {file delete -force $f} }
+            discard {
+                file delete -force $f
+            }
+            default { error "unknown recovery decision: $decision" }
         }
+    } actionError]
+    set ::els::swap_suspend $oldSuspend
+    if {$actionCode} {
+        catch {els::status_note "recovery action failed; original safety copy was retained"}
+        return 0
     }
-    set ::els::swap_suspend 0
+    if {$decision eq "discard"} { return [expr {![file exists $f]}] }
+
+    # swap_flush_doc may legitimately return 0 when the caller was already
+    # suspended; validity of the parsed replacement, not the return value, is
+    # the deciding condition.
+    catch {els::swap_flush_doc $id}
+    if {[els::recover_source_commit $id]} { return 1 }
+    catch {els::status_note "recovery loaded; original safety copy retained until crash protection succeeds"}
+    return 0
 }
 
 # ---- startup orchestration + the consolidated dialog ----------------------
@@ -4008,7 +5601,10 @@ proc els::recover_label {rec branch} {
     set path [dict get $rec path]
     # no expr ternary on path data: a file named "nan" threw out of expr here,
     # and the swallowed throw silently suppressed the WHOLE recovery dialog
-    if {$path eq ""} { set name "untitled" } else { set name [file tail $path] }
+    # The recovery chooser may contain two same-named files from different
+    # directories; show the human-readable full path so the destructive
+    # Discard action is never presented against an ambiguous basename.
+    if {$path eq ""} { set name "untitled" } else { set name [els::display_path $path] }
     set when ""
     catch {set when [clock format [dict get $rec mtime] -format "%Y-%m-%d %H:%M"]}
     switch -- $branch {
@@ -4040,53 +5636,103 @@ proc els::recover_offer {records} {
     ttk::label $top.f.h -text "els found unsaved changes from a previous session." \
         -font elsUIb -foreground $::els::INK
     ttk::label $top.f.s -font elsUI -foreground $::els::MUTED -justify left \
-        -text "These were autosaved when els closed unexpectedly. Recover them into\neditable tabs (nothing is written to disk until you Save), or discard."
+        -text "These were autosaved when els closed unexpectedly. Select entries to recover\ninto editable tabs (nothing is written until you Save), or discard them."
     grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
     grid $top.f.s -row 1 -column 0 -sticky w -pady {0 12}
     set lf $top.f.list
     ttk::frame $lf
-    grid $lf -row 2 -column 0 -sticky we -pady {0 12}
+    grid $lf -row 2 -column 0 -sticky nsew -pady {0 12}
+    set tree $lf.tree
+    ttk::treeview $tree -columns {file state saved} -show headings -height 8 \
+        -selectmode extended -yscrollcommand [list $lf.vs set]
+    ttk::scrollbar $lf.vs -orient vertical -command [list $tree yview]
+    $tree heading file  -text File          -anchor w
+    $tree heading state -text "Recovery state" -anchor w
+    $tree heading saved -text Saved         -anchor w
+    $tree column file  -width 220 -minwidth 120 -stretch 1 -anchor w
+    $tree column state -width 280 -minwidth 180 -stretch 1 -anchor w
+    $tree column saved -width 135 -minwidth 120 -stretch 0 -anchor w
+    grid $tree  -row 0 -column 0 -sticky nsew
+    grid $lf.vs -row 0 -column 1 -sticky ns
+    grid columnconfigure $lf 0 -weight 1
+    grid rowconfigure $lf 0 -weight 1
     set r 0
     set ::els::_recover_pick [dict create]
+    set initiallySelected {}
     foreach p $records {
         lassign $p f rec branch
         lassign [els::recover_label $rec $branch] name note when
-        set var ::els::_recover_chk($r)
-        set $var [expr {$branch ne "missing"}]   ;# default-check all but vanished originals
-        ttk::checkbutton $lf.c$r -variable $var -text $name -style TCheckbutton
-        ttk::label $lf.n$r -font elsUI -foreground $::els::MUTED -text "  $note $when"
-        grid $lf.c$r -row $r -column 0 -sticky w
-        grid $lf.n$r -row $r -column 1 -sticky w
-        dict set ::els::_recover_pick $r $p
+        set item r$r
+        $tree insert {} end -id $item -values [list $name $note $when]
+        dict set ::els::_recover_pick $item $p
+        if {$branch ne "missing"} { lappend initiallySelected $item }
         incr r
     }
+    if {[llength $initiallySelected]} { $tree selection set $initiallySelected }
+    if {[llength $initiallySelected]} {
+        set first [lindex $initiallySelected 0]
+    } else {
+        set first [lindex [$tree children {}] 0]
+    }
+    if {$first ne ""} { $tree focus $first ; $tree see $first }
     set bf $top.f.btns
     ttk::frame $bf
     grid $bf -row 3 -column 0 -sticky e
-    ttk::button $bf.rec -text "Recover checked" -command [list els::recover_dialog_apply $top recover]
-    ttk::button $bf.dis -text "Discard checked" -command [list els::recover_dialog_apply $top discard]
-    ttk::button $bf.cancel -text "Later" -command [list els::recover_dialog_close $top]
+    ttk::button $bf.rec -text "Recover selected" -style Dialog.TButton -default active \
+        -command [list els::recover_dialog_apply $top recover]
+    ttk::button $bf.dis -text "Discard selected" -style Dialog.TButton \
+        -command [list els::recover_dialog_apply $top discard]
+    ttk::button $bf.cancel -text "Later" -style Dialog.TButton \
+        -command [list els::recover_dialog_close $top]
     grid $bf.rec -row 0 -column 0 -padx {0 6}
     grid $bf.dis -row 0 -column 1 -padx {0 6}
     grid $bf.cancel -row 0 -column 2
+    grid columnconfigure $top.f 0 -weight 1
+    grid rowconfigure $top.f 2 -weight 1
+    # Put recovery actions in their own bindtag ahead of Treeview's class tag.
+    # This gives the action keys deterministic precedence and makes generated
+    # tests exercise the exact same bindings as a focused keyboard user.
+    set tags [bindtags $tree]
+    if {{ElsRecoveryTree} ni $tags} { bindtags $tree [linsert $tags 1 ElsRecoveryTree] }
+    bind ElsRecoveryTree <Control-KeyPress-a> \
+        {els::recover_dialog_select_all %W; break}
+    bind ElsRecoveryTree <Control-KeyPress-A> \
+        {els::recover_dialog_select_all %W; break}
+    bind ElsRecoveryTree <KeyPress-Return> \
+        {els::recover_dialog_key [winfo toplevel %W] recover; break}
+    bind ElsRecoveryTree <KeyPress-KP_Enter> \
+        {els::recover_dialog_key [winfo toplevel %W] recover; break}
+    bind ElsRecoveryTree <KeyPress-Delete> \
+        {els::recover_dialog_key [winfo toplevel %W] discard; break}
     bind $top <Escape> [list els::recover_dialog_close $top]
     wm protocol $top WM_DELETE_WINDOW [list els::recover_dialog_close $top]
     update idletasks
-    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
-    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
-    wm geometry $top +$x+$y
+    set width [winfo reqwidth $top]
+    set height [winfo reqheight $top]
+    wm minsize $top 560 $height
+    wm resizable $top 1 0
+    set x [expr {[winfo rootx .] + ([winfo width .]  - $width) / 2}]
+    set y [expr {[winfo rooty .] + ([winfo height .] - $height) / 3}]
+    wm geometry $top ${width}x${height}+$x+$y
     wm deiconify $top
+    focus $tree
+}
+proc els::recover_dialog_select_all {tree} {
+    if {[winfo exists $tree]} { $tree selection set [$tree children {}] }
+}
+proc els::recover_dialog_key {top decision} {
+    els::recover_dialog_apply $top $decision
 }
 proc els::recover_dialog_apply {top decision} {
-    foreach r [lsort -integer [dict keys $::els::_recover_pick]] {
-        set chk 1
-        catch {set chk [set ::els::_recover_chk($r)]}
-        if {$decision eq "recover" && !$chk} continue   ;# unchecked: leave the swap for later
-        if {$decision eq "discard" && !$chk} continue
-        els::recover_apply [dict get $::els::_recover_pick $r] $decision
+    set tree $top.f.list.tree
+    if {![winfo exists $tree]} { return }
+    set selected [$tree selection]
+    foreach item [$tree children {}] {
+        if {$item ni $selected || ![dict exists $::els::_recover_pick $item]} { continue }
+        els::recover_apply [dict get $::els::_recover_pick $item] $decision
     }
     # releasing the claim markers lets the next launch re-offer any swaps that
-    # were left unchecked (it re-claims them then)
+    # were left unselected (it re-claims them then)
     els::recover_dialog_close $top
 }
 # ---- lossy-save guard ----------------------------------------------------
@@ -4180,11 +5826,13 @@ $choice"
     ttk::frame $top.b
     set btns {}
     if {"utf8" in $actions} {
-        ttk::button $top.b.utf8 -text "Save as UTF-8" -command {set ::els::lossy_answer utf8}
+        ttk::button $top.b.utf8 -text "Save as UTF-8" -default active \
+            -command {set ::els::lossy_answer utf8}
         lappend btns $top.b.utf8
     }
     ttk::button $top.b.lossy  -text "Save anyway" -command {set ::els::lossy_answer lossy}
     ttk::button $top.b.cancel -text Cancel        -command {set ::els::lossy_answer cancel}
+    if {"utf8" ni $actions} { $top.b.cancel configure -default active }
     lappend btns $top.b.lossy $top.b.cancel
     pack {*}$btns -side left -padx 4
     pack $top.msg -padx 16 -pady {14 10}
@@ -4198,7 +5846,7 @@ $choice"
     if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
     wm deiconify $top
     raise $top
-    focus [lindex $btns 0]
+    if {"utf8" in $actions} { focus $top.b.utf8 } else { focus $top.b.cancel }
     grab $top
     set ::els::lossy_answer ""
     vwait ::els::lossy_answer
@@ -4226,8 +5874,8 @@ proc els::status_note_clear {} {
 
 # ---- backups: previous versions ---------------------------------------------
 # Every save that OVERWRITES an existing file first preserves that file's
-# current content in <configdir>/backups/ (next to els.conf -- which is next
-# to the exe for a portable install).  Bounded: a ring of BK_RING versions per
+# current content in <configdir>/backups/ (next to els.conf, hence next to the
+# exe in a packaged run).  Bounded: a ring of BK_RING versions per
 # file, a new backup is skipped while the newest is younger than BK_MININT
 # seconds (so an auto-save burst keeps the pre-burst version instead of
 # churning), files over BK_MAXSIZE are not backed up, and anything older than
@@ -4313,7 +5961,7 @@ proc els::backup_keep {path} {
                 set target [file join $dir "$stem.$stamp-$n.bak"]
                 incr n
             }
-            set fh [::open $path rb] ; set bytes [read $fh] ; close $fh
+            set bytes [els::read_binary_file $path]
             set werr [els::write_atomic $target $bytes]
             if {$werr ne ""} { error $werr }
             # prune the ring to the newest BK_RING entries (by mtime, F14)
@@ -4364,6 +6012,7 @@ proc els::autosave_flush_doc {id} {
     if {!$::els::autosave} { return }
     if {$id eq "" || $id ni $::els::docs} { return }
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return }
+    if {[info exists ::els::docRecovered($id)]} { return }    ;# foreground save must settle recovery
     if {[info exists ::els::docLossyPause($id)]} { return }   ;# awaiting a manual save
     if {[info exists ::els::docExtModPause($id)]} { return }  ;# file changed on disk: manual save
     if {![els::doc_dirty $id]} { return }
@@ -4376,7 +6025,7 @@ proc els::autosave_all {} {
 # Save a document (default: the active one).  quiet=1 is the auto-save mode:
 # no dialog may ever appear -- an unencodable character pauses auto-saving for
 # the document and a write error becomes a statusbar note.
-proc els::save {{id ""} {quiet 0}} {
+proc els::save {{id ""} {quiet 0} {force 0}} {
     variable active
     variable docPath
     if {$id eq ""} { set id $active }
@@ -4385,17 +6034,26 @@ proc els::save {{id ""} {quiet 0}} {
         if {$quiet} { return 0 }      ;# auto-save never invents a filename
         return [els::saveas]
     }
+    # Ctrl+S on an already-clean, named document is a true no-op.  In
+    # particular, do not transcode bytes that were substituted during decode.
+    # Save As passes force=1 because creating a new copy is intentional.
+    if {!$force && ![els::doc_dirty $id] \
+            && ![info exists ::els::docFormatPending($id)]} {
+        els::disk_probe $id
+        return 1
+    }
     # External-change guard (R3): if the file on disk no longer matches what we
     # last loaded/saved, another program rewrote it (git checkout, a formatter, a
     # sync client, a second els) — overwriting would silently destroy that change.
     # savedSigPath pins the baseline to a specific path so a Save As onto a
-    # different file never false-positives.  A vanished/unreadable target (cur "")
-    # is NOT treated as a change: write_atomic just recreates it.
+    # different file never false-positives.  Missing and unreadable targets are
+    # conflicts too: only an explicit foreground decision may overwrite them.
     set saved [els::doc_saved_sig $id]
     if {$saved ne "" && [info exists ::els::savedSigPath($id)] \
             && $::els::savedSigPath($id) eq $docPath($id)} {
-        set cur [els::file_sig $docPath($id)]
-        if {$cur ne "" && [els::sig_content $cur] ne [els::sig_content $saved]} {
+        set probe [els::file_sig_probe $docPath($id)]
+        set state [dict get $probe state]
+        if {$state eq "ok" && [els::sig_content [dict get $probe sig]] ne [els::sig_content $saved]} {
             if {$quiet} {
                 # autosave: NEVER prompt from a background timer.  Pause quiet
                 # saves for this doc until a manual save settles it (mirrors the
@@ -4410,9 +6068,26 @@ proc els::save {{id ""} {quiet 0}} {
                 reload    { els::reload_from_disk $id ; return 0 }
                 cancel    { return 0 }
             }
+        } elseif {$state ne "ok"} {
+            if {$quiet} {
+                set ::els::docExtModPause($id) 1
+                els::status_note "auto-save paused: [file tail $docPath($id)] is $state (save manually)"
+                return 0
+            }
+            set detail ""
+            if {[dict exists $probe error]} { set detail [dict get $probe error] }
+            if {![els::extstate_ask $id $state $detail]} { return 0 }
         }
     }
     unset -nocomplain ::els::docExtModPause($id)
+    if {[info exists ::els::docDecodeLossy($id)]} {
+        if {$quiet} {
+            set ::els::docLossyPause($id) 1
+            els::status_note "auto-save paused: decoded bytes were replaced in [file tail $docPath($id)] (save manually)"
+            return 0
+        }
+        if {![els::decode_lossy_ask $id]} { return 0 }
+    }
     set w [els::W $id]
     set text [$w get 1.0 "end - 1 char"]
     # re-apply the document's original EOL (buffer is LF-internal)
@@ -4474,11 +6149,23 @@ proc els::save {{id ""} {quiet 0}} {
     # durable: fsync the bytes to the platter — a saved document is the user's data
     # and must survive power loss, not just a process crash (see els::write_atomic)
     if {[set err [els::write_atomic $docPath($id) $bytes "" 1]] ne ""} {
+        if {[string match "DURABILITY:*" $err]} {
+            # Atomic replacement already committed the new bytes; only the
+            # durability guarantee failed.  Rebase the external-change guard so
+            # a retry does not accuse our own write, but keep dirty/recovery/lossy
+            # state and ensure the crash-recovery swap remains available.
+            set ::els::docRaw($id) $bytes
+            els::cache_saved_sig $id
+            set ::els::dirtySince($id) 1
+            unset -nocomplain ::els::swapSig($id)
+            catch {els::swap_flush_doc $id}
+        }
         if {$quiet} {
             els::status_note "auto-save failed: [file tail $docPath($id)]"
         } else {
             tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
         }
+        els::disk_probe $id
         return 0
     }
     $w edit modified 0
@@ -4492,42 +6179,82 @@ proc els::save {{id ""} {quiet 0}} {
     # the U+FFFD (if any) are now the file's real content, not a decode artifact:
     # docRaw was just refreshed to the written bytes, so the marker no longer applies
     unset -nocomplain ::els::docDecodeLossy($id)
+    unset -nocomplain ::els::docFormatPending($id)
+    els::recover_source_drop $id ;# safely on disk: the pre-recovery orphan is obsolete
     els::swap_clear $id   ;# the file is safely on disk now -> drop the swap
     els::update_tab $id
     els::settitle
+    els::disk_probe $id
     return 1
 }
 proc els::saveas {} {
     variable active
     variable docPath
     if {$active eq ""} { return }
-    set p [tk_getSaveFile -parent . -filetypes [els::filetypes] \
-               -defaultextension .txt \
-               -initialfile [els::doc_name $active]]
-    if {$p eq ""} { return 0 }
-    if {![catch {file normalize $p} np]} { set p $np }
-    # refuse to point this tab at a file already open in another tab: otherwise
-    # the two buffers diverge and saving one silently clobbers the other
-    foreach id $::els::docs {
-        if {$id ne $active && [info exists docPath($id)] && \
-                [els::same_path $docPath($id) $p]} {
-            tk_messageBox -parent . -icon warning -title els \
-                -message "That file is already open in another tab.\
-                          \nClose it there first, or choose a different name."
+    # Native dialogs pump nested events; active can change while the picker is
+    # open.  Capture the invoking document and suspend swap/handoff work across
+    # the whole transaction so no temporary target path leaks into recovery.
+    set id $active
+    set oldSuspend $::els::swap_suspend
+    set ::els::swap_suspend 1
+    try {
+        set p [tk_getSaveFile -parent . -filetypes [els::filetypes] \
+                   -defaultextension .txt \
+                   -initialfile [els::doc_name $id]]
+        if {$p eq "" || $id ni $::els::docs} { return 0 }
+        if {![catch {file normalize $p} np]} { set p $np }
+        # refuse to point this tab at a file already open in another tab:
+        # otherwise the two buffers diverge and silently clobber one another
+        foreach other $::els::docs {
+            if {$other ne $id && [info exists docPath($other)] && \
+                    [els::same_path $docPath($other) $p]} {
+                tk_messageBox -parent . -icon warning -title els \
+                    -message "That file is already open in another tab.\
+                              \nClose it there first, or choose a different name."
+                return 0
+            }
+        }
+        set oldPath $docPath($id)
+        set oldModified [[els::W $id] edit modified]
+        # save can change format/consent state before I/O (or raw/signatures
+        # after an atomic write whose fsync fails).  Save As is transactional:
+        # if it returns failure, restore every such field, including absence.
+        set metaNames {docEnc docBom docEol docRaw savedSig savedSigPath \
+                       docExtModPause docDecodeLossy docLossyOk docLossyPause \
+                       docFormatPending docRecovered swapSig dirtySince \
+                       swap_fail_streak}
+        set oldMeta {}
+        foreach name $metaNames {
+            set slot "::els::${name}($id)"
+            if {[info exists $slot]} {
+                dict set oldMeta $name [list 1 [set $slot]]
+            } else {
+                dict set oldMeta $name [list 0 ""]
+            }
+        }
+        set docPath($id) $p
+        set saveCode [catch {els::save $id 0 1} saveResult saveOpts]
+        if {$saveCode || !$saveResult} {
+            set docPath($id) $oldPath
+            foreach name $metaNames {
+                set slot "::els::${name}($id)"
+                lassign [dict get $oldMeta $name] existed value
+                if {$existed} { set $slot $value } else { unset -nocomplain $slot }
+            }
+            [els::W $id] edit modified $oldModified
+            els::refresh_tabs
+            els::settitle
+            els::disk_probe $id
+            if {$saveCode} { return -options $saveOpts $saveResult }
             return 0
         }
+        els::refresh_tabs
+        els::recent_add $p
+        els::disk_probe $id
+        return 1
+    } finally {
+        set ::els::swap_suspend $oldSuspend
     }
-    set oldPath $docPath($active)
-    set docPath($active) $p
-    if {![els::save]} {
-        set docPath($active) $oldPath
-        els::update_tab $active
-        els::settitle
-        return 0
-    }
-    els::update_tab $active
-    els::recent_add $p
-    return 1
 }
 proc els::session_restore {} {
     if {!$::els::restore_session} { return 0 }
@@ -4535,16 +6262,25 @@ proc els::session_restore {} {
     set ::els::session_pending {}
     set restored {}
     foreach p [els::session_sanitize $::els::session_files] {
-        # a file that is missing OR fails to open right now (a disconnected drive,
-        # a network share still coming up, a file briefly locked by a backup tool)
-        # is NOT dropped from the session — it is remembered as pending so the next
-        # save_geometry keeps it and the next launch retries it
-        if {![file exists $p]} { lappend ::els::session_pending $p ; continue }
+        # A local file that is missing, or any file that fails to open right now
+        # (a disconnected drive or a file briefly locked by a backup tool), is not
+        # dropped from the session.  Obvious network paths take the separate durable
+        # Deferred Opens route in quiet open, without probing the share at startup.
+        if {![els::remote_path $p] && ![file exists $p]} {
+            lappend ::els::session_pending $p
+            continue
+        }
         # noRecent=1: restoring the saved session must not push every restored tab
         # to the top of Open Recent (it would evict the user's genuine recents on
         # a plain restart) — a recent entry is earned by opening, not by restore (F38)
         set id [els::open $p 1 1]
-        if {$id ne ""} { lappend restored [list $p $id] } else { lappend ::els::session_pending $p }
+        if {$id ne ""} {
+            lappend restored [list $p $id]
+        } elseif {![els::deferred_contains $p]} {
+            # A deferred large file already has its own durable queue.  pending is
+            # only for files that could not be read right now, so don't duplicate it.
+            lappend ::els::session_pending $p
+        }
     }
     if {![llength $restored]} { return 0 }
     set target ""
@@ -4595,7 +6331,14 @@ proc els::about {} {
     pack  .about.body.tag -anchor center -pady {0 12}
     label .about.body.copy -text "© 2026 Vincent Vercauteren" \
         -font elsUI -fg $::els::MUTED -bg $bg -anchor center
-    pack  .about.body.copy -anchor center -pady {0 10}
+    pack  .about.body.copy -anchor center -pady {0 14}
+    label .about.body.ackh -text "Acknowledgements" \
+        -font elsUIb -fg $::els::INK -bg $bg -anchor center
+    pack  .about.body.ackh -anchor center
+    label .about.body.ack \
+        -text "Made possible by Tcl/Tk 9, MinGW-w64, GCC, zlib, and LibTomMath.\nWith thanks to their maintainers and communities." \
+        -font elsUI -fg $::els::MUTED -bg $bg -anchor center -justify center
+    pack  .about.body.ack -anchor center -pady {3 14}
     label .about.body.ver -text "version $::els::version" \
         -font elsUI -fg $::els::MUTED -bg $bg -anchor center
     pack  .about.body.ver -anchor center -pady {0 2}
@@ -4754,12 +6497,220 @@ proc els::quit {} {
     # persists into it for the next launch) rather than being orphaned in the spool
     # until a later launch or the stale sweep
     catch {els::handoff_drain}
+    els::find_shutdown
     els::save_geometry
+    els::disk_watch_deactivate
     els::swap_shutdown   ;# committed exit: stop autosave, delete our swaps + lock
     exit
 }
 
 # ---- find / replace -----------------------------------------------------
+# Worker files live only beneath the executable-adjacent state directory.  The
+# helper deliberately returns "" rather than falling back elsewhere: an
+# unobservable/unmanaged worker is never an acceptable substitute.
+proc els::find_token {} {
+    set seed "[els::session_token]:[clock microseconds]:[clock clicks]:[expr {rand()}]"
+    return [format %08x%08x%08x%08x \
+        [zlib crc32 $seed] [zlib crc32 "a:$seed"] \
+        [zlib crc32 "b:$seed"] [zlib crc32 "c:$seed"]]
+}
+
+proc els::find_native_ready {} {
+    if {[llength [info commands ::els::win_worker_spawn_watch]] \
+            && [llength [info commands ::els::win_worker_watch]] \
+            && [llength [info commands ::els::win_worker_status]] \
+            && [llength [info commands ::els::win_worker_kill]] \
+            && [llength [info commands ::els::win_path_reparse]]} { return 1 }
+    # A source/development run loads the reviewed extension beside the source.
+    # The packaged exe registers the same commands statically before main.tcl.
+    if {![string match {//zipfs:/*} $::els::boot_script]} {
+        set dll [file join [file dirname $::els::boot_script] build winfs.dll]
+        if {[file exists $dll] && [file type $dll] eq "file"} { catch {load $dll Winfs} }
+    }
+    return [expr {[llength [info commands ::els::win_worker_spawn_watch]] \
+        && [llength [info commands ::els::win_worker_watch]] \
+        && [llength [info commands ::els::win_worker_status]] \
+        && [llength [info commands ::els::win_worker_kill]] \
+        && [llength [info commands ::els::win_path_reparse]]}]
+}
+
+# True only for an existing, ordinary filesystem object of the requested type.
+# `file type` catches Tcl links; the native attribute check also catches Windows
+# junctions and every other reparse point before a worker path is trusted.
+proc els::find_path_plain {path expectedType} {
+    if {[catch {file lstat $path st}] || $st(type) ne $expectedType} { return 0 }
+    if {$::tcl_platform(platform) eq "windows"} {
+        if {![els::find_native_ready] \
+                || [catch {els::win_path_reparse [file nativename $path]} reparse] \
+                || $reparse} { return 0 }
+    }
+    return 1
+}
+
+proc els::find_root {{create 1}} {
+    if {$::els::config_path eq "" || $::els::selftest} { return "" }
+    set root [file join [file dirname $::els::config_path] .els-find]
+    if {$create && ![file exists $root]} {
+        if {[catch {file mkdir $root}]} { return "" }
+    }
+    if {![els::find_path_plain $root directory] \
+            || [catch {set root [file normalize $root]}]} { return "" }
+    # Recheck the normalized spelling too: normalization may traverse a link.
+    if {![els::find_path_plain $root directory]} { return "" }
+    return $root
+}
+
+proc els::find_worker_command {} {
+    if {$::els::find_worker_command_override ne ""} {
+        return $::els::find_worker_command_override
+    }
+    if {[string match {//zipfs:/*} $::els::boot_script]} {
+        return [list [els::association_exe] --find-worker]
+    }
+    return [list [info nameofexecutable] $::els::boot_script --find-worker]
+}
+
+proc els::find_write_control {path value} {
+    set raw [encoding convertto -profile strict utf-8 $value]
+    if {[string length $raw] > $::elsworker::CONTROL_MAX} { error "find control file too large" }
+    set tmp "$path.tmp-[pid]-[clock clicks]"
+    set f [::open $tmp {WRONLY CREAT EXCL TRUNC}]
+    fconfigure $f -translation binary
+    try { puts -nonewline $f $raw } finally { close $f }
+    if {![els::find_path_plain [file dirname $path] directory] \
+            || ![els::find_path_plain $tmp file]} {
+        catch {file delete $tmp}
+        error "find control path is not contained"
+    }
+    file rename $tmp $path
+}
+
+proc els::find_job_dir_name {seq token} {
+    return "find-[els::session_id]-$seq-$token"
+}
+proc els::find_job_name_ok {name} {
+    return [regexp {^find-[a-z0-9_]+-[0-9]+-[0-9a-f]{16}-[0-9]+-[0-9a-f]{32}$} $name]
+}
+proc els::find_snapshot_name_ok {name {allowTemp 0}} {
+    set base {^snapshot-[a-z0-9_]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}\.utf8$}
+    if {[regexp $base $name]} { return 1 }
+    return [expr {$allowTemp && [regexp \
+        {^snapshot-[a-z0-9_]+-[0-9]+-[0-9a-f]{16}-[0-9a-f]{32}\.utf8\.tmp-[0-9]+-[0-9-]+$} $name]}]
+}
+
+proc els::find_job_dir_ok {dir} {
+    set root [els::find_root 0]
+    if {$root eq "" || ![els::find_path_plain $dir directory] \
+            || [catch {set nd [file normalize $dir]}] \
+            || [file dirname $nd] ne $root \
+            || ![els::find_job_name_ok [file tail $nd]] \
+            || ![els::find_path_plain $nd directory]} { return "" }
+    return $nd
+}
+
+proc els::find_snapshot_path_ok {path {allowTemp 0}} {
+    set root [els::find_root 0]
+    if {$root eq "" || [catch {set np [file normalize $path]}] \
+            || [file dirname $np] ne $root \
+            || ![els::find_snapshot_name_ok [file tail $np] $allowTemp] \
+            || ![els::find_path_plain $np file]} { return 0 }
+    return 1
+}
+
+proc els::find_job_file_ok {job leaf} {
+    if {![dict exists $job dir] || [file tail $leaf] ne $leaf} { return 0 }
+    set dir [els::find_job_dir_ok [dict get $job dir]]
+    if {$dir eq ""} { return 0 }
+    set path [file join $dir $leaf]
+    return [expr {[file dirname $path] eq $dir && [els::find_path_plain $path file]}]
+}
+
+proc els::find_cleanup_job {job} {
+    if {$job eq "" || ![dict exists $job dir]} { return }
+    set nd [els::find_job_dir_ok [dict get $job dir]]
+    if {$nd eq ""} { return }
+    set allowed {go request.dict snapshot.utf8 matches.idx replacement.utf8 result.ready}
+    if {[catch {set leaves [glob -nocomplain -directory $nd *]}]} { return }
+    foreach p $leaves {
+        set leaf [file tail $p]
+        if {$leaf ni $allowed && ![regexp {^(go|request\.dict|result\.ready)\.tmp-[0-9]+-[0-9-]+$} $leaf]} {
+            catch {els::log warn "refusing to remove unexpected find-worker file $p"}
+            return
+        }
+        if {![els::find_path_plain $p file]} {
+            catch {els::log warn "refusing to remove non-regular find-worker file $p"}
+            return
+        }
+    }
+    foreach p $leaves {
+        # Recheck each leaf immediately before deletion; cleanup races fail
+        # closed and never recurse through an attacker-swapped directory.
+        if {![els::find_path_plain $nd directory] || ![els::find_path_plain $p file]} { return }
+        if {[catch {file delete $p}]} { return }
+    }
+    if {[els::find_path_plain $nd directory] \
+            && ![catch {set rest [glob -nocomplain -directory $nd *]}] \
+            && ![llength $rest]} { catch {file delete $nd} }
+}
+
+proc els::find_result_drop {} {
+    if {$::els::find_highlight_after ne ""} {
+        after cancel $::els::find_highlight_after
+        set ::els::find_highlight_after ""
+    }
+    if {$::els::find_result_job ne ""} { els::find_cleanup_job $::els::find_result_job }
+    set ::els::find_highlight_state {}
+    set ::els::find_result_job {}
+    set ::els::find_index_path ""
+    set ::els::find_total 0
+    set ::els::find_matches {}
+    set ::els::find_current -1
+}
+
+proc els::find_snapshot_abort {} {
+    if {$::els::find_snapshot_after ne ""} {
+        after cancel $::els::find_snapshot_after
+        set ::els::find_snapshot_after ""
+    }
+    if {$::els::find_snapshot_build ne ""} {
+        set b $::els::find_snapshot_build
+        if {[dict exists $b chan]} { catch {close [dict get $b chan]} }
+        if {[dict exists $b tmp]} {
+            set p [dict get $b tmp]
+            if {[els::find_snapshot_path_ok $p 1]} { catch {file delete $p} }
+        }
+        set ::els::find_snapshot_build {}
+    }
+}
+
+proc els::find_snapshot_drop {} {
+    els::find_snapshot_abort
+    if {$::els::find_snapshot ne "" && [dict exists $::els::find_snapshot path]} {
+        set p [dict get $::els::find_snapshot path]
+        if {[els::find_snapshot_path_ok $p]} { catch {file delete $p} }
+    }
+    set ::els::find_snapshot {}
+}
+
+proc els::find_prune_stale {} {
+    set root [els::find_root 0]
+    if {$root eq ""} { return }
+    set cutoff [expr {[clock seconds] - 86400}]
+    set own "find-[els::session_id]-"
+    if {[catch {set entries [glob -nocomplain -directory $root *]}]} { return }
+    foreach p $entries {
+        set leaf [file tail $p]
+        if {[string match "$own*" $leaf]} { continue }
+        if {[catch {file mtime $p} mt] || $mt >= $cutoff} { continue }
+        if {[els::find_job_name_ok $leaf] && [els::find_path_plain $p directory]} {
+            els::find_cleanup_job [dict create dir $p]
+        } elseif {[els::find_snapshot_name_ok $leaf 1] \
+                && [els::find_path_plain $p file]} {
+            catch {file delete $p}
+        }
+    }
+}
+
 proc els::build_findbar {} {
     ttk::frame .find -padding {8 6 8 0}
 
@@ -4767,19 +6718,19 @@ proc els::build_findbar {} {
     ttk::label .find.fr.l -text "Find" -font elsUI -width 7 -anchor w
     ttk::entry .find.fr.q -textvariable ::els::find_q -font elsUI
     ttk::frame .find.fr.ctrl
-    ttk::checkbutton .find.fr.case  -text "Aa" -style Find.Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.fr.case  -text "Aa" -style Find.Toolbutton -takefocus 1 \
         -variable ::els::find_case  -command els::find_update
-    ttk::checkbutton .find.fr.word  -text "W"  -style Find.Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.fr.word  -text "W"  -style Find.Toolbutton -takefocus 1 \
         -variable ::els::find_word  -command els::find_update
-    ttk::checkbutton .find.fr.regex -text ".*" -style Find.Toolbutton -takefocus 0 \
+    ttk::checkbutton .find.fr.regex -text ".*" -style Find.Toolbutton -takefocus 1 \
         -variable ::els::find_regex -command els::find_update
-    ttk::button .find.fr.help -text "?" -style Find.TButton -width 2 -takefocus 0 \
+    ttk::button .find.fr.help -text "?" -style Find.TButton -width 2 -takefocus 1 \
         -state normal -command els::regex_help
-    ttk::button .find.fr.prev -text "↑" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step -1}
-    ttk::button .find.fr.next -text "↓" -style Find.TButton -width 2 -takefocus 0 -command {els::find_step 1}
+    ttk::button .find.fr.prev -text "↑" -style Find.TButton -width 2 -takefocus 1 -command {els::find_step -1}
+    ttk::button .find.fr.next -text "↓" -style Find.TButton -width 2 -takefocus 1 -command {els::find_step 1}
     ttk::label  .find.fr.n -textvariable ::els::find_count -font elsUI \
         -foreground $::els::MUTED -width 16 -anchor e   ;# room for large counts
-    ttk::button .find.fr.x -text "×" -style Find.TButton -width 2 -takefocus 0 -command els::find_hide
+    ttk::button .find.fr.x -text "×" -style Find.TButton -width 2 -takefocus 1 -command els::find_hide
     grid .find.fr.l    -row 0 -column 0 -padx 1 -sticky we
     grid .find.fr.q    -row 0 -column 1 -padx 1 -sticky we
     grid .find.fr.ctrl -row 0 -column 2 -padx 1 -sticky e
@@ -4798,10 +6749,10 @@ proc els::build_findbar {} {
     ttk::label .find.rr.l -text "Replace" -font elsUI -width 7 -anchor w
     ttk::entry .find.rr.r -textvariable ::els::find_r -font elsUI
     ttk::frame .find.rr.ctrl
-    ttk::checkbutton .find.rr.adapt -text "Adapt case" -style FindAction.Toolbutton -takefocus 0 \
-        -variable ::els::find_adapt
-    ttk::button .find.rr.rep -text "Replace" -style FindAction.TButton -takefocus 0 -command els::find_replace_one
-    ttk::button .find.rr.all -text "All"     -style FindAction.TButton -takefocus 0 -command els::find_replace_all
+    ttk::checkbutton .find.rr.adapt -text "Adapt case" -style FindAction.Toolbutton -takefocus 1 \
+        -variable ::els::find_adapt -command els::find_replacement_changed
+    ttk::button .find.rr.rep -text "Replace" -style FindAction.TButton -takefocus 1 -command els::find_replace_one
+    ttk::button .find.rr.all -text "All"     -style FindAction.TButton -takefocus 1 -command els::find_all_action
     grid .find.rr.l    -row 0 -column 0 -padx 1 -sticky we
     grid .find.rr.r    -row 0 -column 1 -padx 1 -sticky we
     grid .find.rr.ctrl -row 0 -column 2 -padx 1 -sticky e
@@ -4841,6 +6792,7 @@ proc els::build_findbar {} {
     bind .find.fr.q <Down>         { els::find_history_recall -1 ; break }
     bind .find.fr.q <Escape>       { els::find_hide    ; break }
     bind .find.rr.r <Return>       { els::find_replace_one ; break }
+    bind .find.rr.r <KeyRelease>   { if {"%K" ni {Return KP_Enter Escape}} { els::find_replacement_changed } }
     bind .find.rr.r <Escape>       { els::find_hide    ; break }
     # Ctrl+H is the Replace accelerator; without this, the ttk::entry TEntry class
     # binding (Control-h -> Backspace) fires first and eats a character from the
@@ -4850,6 +6802,31 @@ proc els::build_findbar {} {
 
     els::entry_clear_button .find.fr.q ::els::find_q
     els::entry_clear_button .find.rr.r ::els::find_r
+    # Escape closes the bar from every focusable control, not only its entries.
+    # Install after the clear-button children exist so the whole subtree shares
+    # one deterministic dismissal path.
+    els::bindtree .find <Escape> {els::find_hide ; break}
+
+    # Textvariable traces cover paste, IME, programmatic writes, and option
+    # changes that do not generate the entry KeyRelease binding.  Rebuilding the
+    # test UI must not accumulate duplicate observers.
+    foreach v {find_q find_case find_word find_regex} {
+        catch {trace remove variable ::els::$v write els::find_query_trace}
+        trace add variable ::els::$v write els::find_query_trace
+    }
+    foreach v {find_r find_adapt} {
+        catch {trace remove variable ::els::$v write els::find_replacement_trace}
+        trace add variable ::els::$v write els::find_replacement_trace
+    }
+}
+
+proc els::find_query_trace {args} {
+    if {[info exists ::els::find_mode] && $::els::find_mode ne ""} { els::find_schedule }
+}
+proc els::find_replacement_trace {args} {
+    if {[info exists ::els::find_mode] && $::els::find_mode ne ""} {
+        els::find_replacement_changed
+    }
 }
 
 # In-entry clear button: a small "×" hugging the entry's right edge, shown
@@ -5122,6 +7099,10 @@ proc els::find_hide {} {
     # re-tagging the buffer and teleporting the caret to a match
     after cancel $find_after
     set find_after ""
+    els::find_cancel hidden
+    els::find_output_abort
+    els::find_result_drop
+    els::find_snapshot_drop
     # drop the cached spans: they are plain string indices that do not float
     # with edits, and F3 on a hidden bar must never jump to (or replace) stale
     # coordinates — possibly in a different document
@@ -5136,280 +7117,1098 @@ proc els::find_hide {} {
     }
 }
 
-# The search pattern + `search` args for the current query/options; "" when the
-# query is empty.  (NOT an expr ternary anywhere: expr canonicalizes operands
-# that look like numbers, so a query of "007" would silently become "7".)
-proc els::find_spec {} {
-    variable find_q ; variable find_case ; variable find_word ; variable find_regex
-    if {$find_q eq ""} { return "" }
-    set useRegex $find_regex
-    set pat $find_q
-    if {$find_word} {
-        set useRegex 1
-        if {$find_regex} {
-            # group so the boundaries bind the WHOLE pattern, not just the
-            # first/last alternative of an alternation like foo|bar
-            set pat "\\m(?:$find_q)\\M"
+proc els::find_worker_spec {} {
+    # A blank literal query means "no search".  In Regex mode it is the valid
+    # empty expression, matching every character boundary just like Tcl regsub.
+    if {$::els::find_q eq "" && !$::els::find_regex} { return "" }
+    set pat $::els::find_q
+    set regexMode $::els::find_regex
+    if {!$regexMode} { set pat [els::re_escape $pat] }
+    if {$::els::find_word} {
+        if {$::els::find_regex} {
+            set pat "\\m(?:$pat)\\M"
         } else {
-            set p [els::re_escape $find_q]
-            # A word character is alnum-or-underscore, and \m/\M only match at a
-            # word char edge, so an operator query ("++", "->", "foo)") with a
-            # non-word first/last char would be unsatisfiable.  Assert the
-            # boundary only where the query edge IS a word char (VS Code /
-            # Notepad++ behaviour): "++" is then findable as a delimited token.
-            set L ""; if {[regexp {^[[:alnum:]_]} $find_q]} { set L {\m} }
-            set R ""; if {[regexp {[[:alnum:]_]$} $find_q]} { set R {\M} }
-            set pat "${L}(?:$p)${R}"   ;# ${L} not $L: $L(...) would parse as an array ref
+            set L ""; if {[regexp {^[[:alnum:]_]} $::els::find_q]} { set L {\m} }
+            set R ""; if {[regexp {[[:alnum:]_]$} $::els::find_q]} { set R {\M} }
+            set pat "${L}(?:$pat)${R}"
         }
     }
-    set sargs {-all}
-    if {$useRegex}   { lappend sargs -regexp }
-    if {!$find_case} { lappend sargs -nocase }
-    return [list $pat $sargs]
-}
-# Search the buffer FRESH and return the valid {start end} pairs ("bad" for a
-# malformed pattern).  Centralised so find_update and Replace All can never
-# disagree — Replace All must NEVER walk `tag ranges findAll` instead: Tk merges
-# abutting ranges of one tag, so N adjacent matches would collapse into ONE
-# replacement, silently deleting text.
-#
-# `limit` caps the number of VALID matches returned (0 = unlimited).  A common
-# substring on one very long line yields hundreds of thousands of hits, each
-# costing two widget index operations here — uncapped that froze the UI for the
-# whole scan on every keystroke (robustness R5).  find_update passes FIND_MAXHITS
-# so incremental highlight stays bounded; Replace All passes 0 because it MUST
-# see and rewrite every match — a capped Replace All would silently skip text.
-# Truncation is recorded in ::els::find_truncated so the count can show "N+".
-proc els::find_scan {w {limit 0}} {
-    set ::els::find_truncated 0
-    set spec [els::find_spec]
-    if {$spec eq ""} { return {} }
-    lassign $spec pat sargs
-    if {[catch {set starts [$w search {*}$sargs -count ::els::find_lens -- $pat 1.0 end]}]} {
-        return bad
-    }
-    set ::els::find_scan_doc $::els::active
-    set ::els::find_scan_chars [$w count -chars 1.0 end]
-    set out {}
-    set last [$w index "end - 1 char"]
-    set i 0
-    foreach s $starts {
-        set L [lindex $::els::find_lens $i]
-        incr i
-        # skip zero-width matches (x*, ^, \d* on non-digits, …): they are
-        # invisible, navigate to nothing, and Replace All would turn each into an
-        # insert between every character, corrupting the buffer
-        if {$L <= 0} { continue }
-        set e [$w index "$s + $L chars"]
-        # the widget's mandatory final newline is searchable but is NOT part of
-        # the document: drop any match that extends past the last real character
-        # (else \s "matches" in a whitespace-free file and Replace All edits —
-        # and saves — text that was never in the document)
-        if {[$w compare $e > $last]} { continue }
-        lappend out [list $s $e]
-        # flag truncation only when a genuine (limit+1)th match exists — scan one
-        # past the cap, then drop it — so a buffer with EXACTLY $limit matches shows
-        # the true count, not a spurious "N+"
-        if {$limit > 0 && [llength $out] > $limit} {
-            set out [lrange $out 0 end-1]
-            set ::els::find_truncated 1
-            break
-        }
-    }
-    return $out
-}
-# Does the text at s..e still satisfy the current query?  A cheap staleness
-# probe for cached match spans: plain string indices do not float with edits.
-proc els::find_span_ok {w s e} {
-    variable find_q ; variable find_case ; variable find_word ; variable find_regex
-    if {[catch {$w get $s $e} txt]} { return 0 }
-    if {!$find_regex && !$find_word} {
-        if {$find_case} { return [string equal $txt $find_q] }
-        return [string equal -nocase $txt $find_q]
-    }
-    set spec [els::find_spec]
-    if {$spec eq ""} { return 0 }
-    lassign $spec pat sargs
-    set fl {}
-    if {"-nocase" in $sargs} { lappend fl -nocase }
-    if {[catch {regexp {*}$fl -- "\\A(?:$pat)\\Z" $txt} ok]} { return 0 }
-    return $ok
+    return [dict create pattern $pat nocase [expr {!$::els::find_case}] \
+        regex_mode $regexMode]
 }
 
-# re-run the search in the active doc, tag all matches, pick the current one
+proc els::find_signature {{kind search}} {
+    set sig [list $::els::find_q $::els::find_case $::els::find_word $::els::find_regex]
+    if {$kind ne "search"} { lappend sig $::els::find_r $::els::find_adapt }
+    return $sig
+}
+
+proc els::find_set_all_button {busy} {
+    set ::els::find_replace_all_busy [expr {$busy ? 1 : 0}]
+    if {![winfo exists .find.rr.all]} { return }
+    if {$::els::find_replace_all_busy} {
+        .find.rr.all configure -text Cancel -command {els::find_cancel user}
+    } else {
+        .find.rr.all configure -text All -command els::find_all_action
+    }
+}
+
+proc els::find_finish_kind {kind} {
+    if {$kind eq "replace-all"} { els::find_set_all_button 0 }
+}
+
+proc els::find_pending_drop {} {
+    set kind ""
+    if {$::els::find_pending ne "" && [dict exists $::els::find_pending kind]} {
+        set kind [dict get $::els::find_pending kind]
+    }
+    set ::els::find_pending {}
+    els::find_finish_kind $kind
+}
+
+proc els::find_pending_fail {message} {
+    els::find_pending_drop
+    set ::els::find_count $message
+}
+
+proc els::find_reap_tick {} {
+    set ::els::find_reap_after ""
+    set keep {}
+    set now [clock milliseconds]
+    foreach job $::els::find_retired {
+        if {![dict exists $job watch] || [dict get $job watch] eq ""} {
+            if {$now < [dict get $job no_watch_until]} { lappend keep $job } \
+            else { els::find_cleanup_job $job }
+            continue
+        }
+        if {[catch {els::win_worker_status [dict get $job watch]} status]} {
+            lappend keep $job
+        } elseif {$status eq "running"} {
+            lappend keep $job
+        } else {
+            els::find_cleanup_job $job
+        }
+    }
+    set ::els::find_retired $keep
+    if {[llength $keep]} { set ::els::find_reap_after [after 25 els::find_reap_tick] }
+}
+
+proc els::find_retire_job {job {kill 1}} {
+    if {$job eq ""} { return }
+    if {[dict exists $job watch] && [dict get $job watch] ne ""} {
+        if {$kill} { catch {els::win_worker_kill [dict get $job watch]} }
+    } elseif {![dict exists $job no_watch_until]} {
+        dict set job no_watch_until [expr {[clock milliseconds] + 5500}]
+    }
+    lappend ::els::find_retired $job
+    if {$::els::find_reap_after eq ""} {
+        set ::els::find_reap_after [after 0 els::find_reap_tick]
+    }
+}
+
+proc els::find_replacement_in_flight {} {
+    if {$::els::find_replace_all_busy} { return 1 }
+    if {$::els::find_pending ne "" \
+            && [dict get $::els::find_pending kind] ne "search"} { return 1 }
+    if {$::els::find_job ne "" \
+            && [dict get $::els::find_job kind] ne "search"} { return 1 }
+    if {$::els::find_validation ne "" \
+            && [dict get [dict get $::els::find_validation job] kind] ne "search"} { return 1 }
+    if {$::els::find_output_read ne ""} { return 1 }
+    return 0
+}
+
+proc els::find_restore_search {message} {
+    if {$::els::find_mode eq ""} { return }
+    set ::els::find_count $message
+    if {$::els::active ne "" && [info exists ::els::docEpoch($::els::active)] \
+            && [els::find_worker_spec] ne ""} { els::find_schedule }
+}
+
+proc els::find_cancel {{reason cancel}} {
+    set restoreSearch [els::find_replacement_in_flight]
+    set ::els::find_pending {}
+    if {$::els::find_poll_after ne ""} {
+        after cancel $::els::find_poll_after
+        set ::els::find_poll_after ""
+    }
+    if {$::els::find_job ne ""} {
+        els::find_retire_job $::els::find_job 1
+        set ::els::find_job {}
+    }
+    els::find_validation_abort
+    els::find_output_abort
+    els::find_set_all_button 0
+    if {$restoreSearch && $reason in {user changed}} {
+        els::find_restore_search "Cancelled"
+    } elseif {$reason eq "user" && $::els::find_mode ne ""} {
+        set ::els::find_count "Cancelled"
+    }
+}
+
+proc els::find_validation_abort {} {
+    if {$::els::find_validation_after ne ""} {
+        after cancel $::els::find_validation_after
+        set ::els::find_validation_after ""
+    }
+    if {$::els::find_validation ne ""} {
+        set v $::els::find_validation
+        if {[dict exists $v chan]} { catch {close [dict get $v chan]} }
+        if {[dict exists $v job]} { els::find_cleanup_job [dict get $v job] }
+        set ::els::find_validation {}
+    }
+}
+
+proc els::find_output_abort {} {
+    if {$::els::find_output_after ne ""} {
+        after cancel $::els::find_output_after
+        set ::els::find_output_after ""
+    }
+    if {$::els::find_output_read ne ""} {
+        set o $::els::find_output_read
+        if {[dict exists $o chan]} { catch {close [dict get $o chan]} }
+        if {[dict exists $o job]} { els::find_cleanup_job [dict get $o job] }
+        set ::els::find_output_read {}
+    }
+    els::find_set_all_button 0
+}
+
+proc els::find_context_leave {id} {
+    incr ::els::find_generation
+    els::find_cancel context
+    els::find_result_drop
+    els::find_snapshot_drop
+}
+
+proc els::find_doc_mutated {id} {
+    if {$::els::find_snapshot ne "" && [dict get $::els::find_snapshot doc] eq $id} {
+        els::find_snapshot_drop
+    } elseif {$::els::find_snapshot_build ne "" \
+            && [dict get $::els::find_snapshot_build doc] eq $id} {
+        els::find_snapshot_abort
+    }
+    if {$::els::find_applying} { return }
+    if {$id eq $::els::active && $::els::find_mode ne ""} {
+        incr ::els::find_generation
+        els::find_cancel edit
+        els::find_result_drop
+        set w [els::W $id]
+        catch {$w tag remove findAll 1.0 end}
+        catch {$w tag remove findOne 1.0 end}
+        els::find_schedule
+    }
+}
+
+proc els::find_doc_closed {id} {
+    if {$id eq $::els::active} { els::find_context_leave $id }
+}
+
+proc els::find_replacement_changed {} {
+    if {[els::find_replacement_in_flight]} {
+        incr ::els::find_generation
+        els::find_cancel changed
+    }
+}
+
+proc els::find_snapshot_ensure {} {
+    if {$::els::find_pending eq ""} { return }
+    set p $::els::find_pending
+    set id [dict get $p doc]
+    set epoch [dict get $p epoch]
+    if {$::els::find_snapshot ne "" \
+            && [dict get $::els::find_snapshot doc] eq $id \
+            && [dict get $::els::find_snapshot epoch] == $epoch \
+            && [els::find_snapshot_path_ok [dict get $::els::find_snapshot path]]} {
+        els::find_start_worker $p
+        return
+    }
+    if {$::els::find_snapshot_build ne "" \
+            && [dict get $::els::find_snapshot_build doc] eq $id \
+            && [dict get $::els::find_snapshot_build epoch] == $epoch} { return }
+    els::find_snapshot_drop
+    set root [els::find_root]
+    set w [els::W $id]
+    if {$root eq "" || ![winfo exists $w]} {
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set chars [lindex [$w count -chars 1.0 "end - 1 char"] 0]
+    if {$chars > $::els::FIND_INPUT_MAX} {
+        els::find_pending_fail "Document too large to search"
+        return
+    }
+    set token [els::find_token]
+    set path [file join $root "snapshot-[els::session_id]-$token.utf8"]
+    set tmp "$path.tmp-[pid]-[clock clicks]"
+    if {[catch {set f [::open $tmp {WRONLY CREAT EXCL TRUNC}]} err]} {
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    fconfigure $f -translation binary
+    if {![els::find_path_plain $root directory] || ![els::find_snapshot_path_ok $tmp 1]} {
+        catch {close $f}
+        catch {file delete $tmp}
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set ::els::find_snapshot_build [dict create doc $id epoch $epoch path $path tmp $tmp \
+        chan $f offset 0 chars $chars bytes 0 crc 0]
+    set ::els::find_snapshot_after [after idle els::find_snapshot_step]
+}
+
+proc els::find_snapshot_step {} {
+    set ::els::find_snapshot_after ""
+    if {$::els::find_snapshot_build eq ""} { return }
+    set b $::els::find_snapshot_build
+    set id [dict get $b doc]
+    set w [els::W $id]
+    if {![winfo exists $w] || ![info exists ::els::docEpoch($id)] \
+            || $::els::docEpoch($id) != [dict get $b epoch]} {
+        els::find_snapshot_abort
+        els::find_pending_drop
+        if {$id eq $::els::active && $::els::find_mode ne ""} { els::find_schedule }
+        return
+    }
+    set offset [dict get $b offset]
+    set chars [dict get $b chars]
+    if {$offset < $chars} {
+        set take [expr {min($::els::FIND_SLICE_CHARS, $chars - $offset)}]
+        if {[catch {
+            set text [$w get "1.0 + $offset chars" "1.0 + [expr {$offset + $take}] chars"]
+            set raw [encoding convertto -profile strict utf-8 $text]
+        } err]} {
+            els::find_snapshot_abort
+            els::find_pending_fail "Document cannot be encoded for search"
+            return
+        }
+        set bytes [expr {[dict get $b bytes] + [string length $raw]}]
+        if {$bytes > $::els::FIND_INPUT_MAX} {
+            els::find_snapshot_abort
+            els::find_pending_fail "Document too large to search"
+            return
+        }
+        if {[catch {puts -nonewline [dict get $b chan] $raw}]} {
+            set ::els::find_snapshot_build $b
+            els::find_snapshot_abort
+            els::find_pending_fail "Find snapshot write failed"
+            return
+        }
+        dict set b bytes $bytes
+        dict set b crc [zlib crc32 $raw [dict get $b crc]]
+        dict set b offset [expr {$offset + $take}]
+        set ::els::find_snapshot_build $b
+        set ::els::find_snapshot_after [after idle els::find_snapshot_step]
+        return
+    }
+    if {[catch {close [dict get $b chan]}]} {
+        set ::els::find_snapshot_build $b
+        els::find_snapshot_abort
+        els::find_pending_fail "Find snapshot write failed"
+        return
+    }
+    dict unset b chan
+    if {![info exists ::els::docEpoch($id)] || $::els::docEpoch($id) != [dict get $b epoch]} {
+        set ::els::find_snapshot_build $b
+        els::find_snapshot_abort
+        els::find_pending_drop
+        if {$id eq $::els::active && $::els::find_mode ne ""} { els::find_schedule }
+        return
+    }
+    if {![els::find_snapshot_path_ok [dict get $b tmp] 1] \
+            || [catch {file rename [dict get $b tmp] [dict get $b path]}] \
+            || ![els::find_snapshot_path_ok [dict get $b path]]} {
+        set ::els::find_snapshot_build $b
+        els::find_snapshot_abort
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set ::els::find_snapshot [dict create doc $id epoch [dict get $b epoch] \
+        path [dict get $b path] chars $chars bytes [dict get $b bytes] crc [dict get $b crc]]
+    set ::els::find_snapshot_build {}
+    if {$::els::find_pending ne ""} { els::find_start_worker $::els::find_pending }
+}
+
+proc els::find_start_worker {pending} {
+    if {$pending eq ""} { return }
+    if {[dict get $pending generation] != $::els::find_generation} {
+        if {$::els::find_pending eq $pending} { els::find_pending_drop }
+        return
+    }
+    set snap $::els::find_snapshot
+    if {$snap eq "" || [dict get $snap doc] ne [dict get $pending doc] \
+            || [dict get $snap epoch] != [dict get $pending epoch] \
+            || ![els::find_snapshot_path_ok [dict get $snap path]]} {
+        els::find_snapshot_ensure
+        return
+    }
+    if {![els::find_native_ready]} {
+        els::find_pending_fail "Find unavailable (worker control missing)"
+        return
+    }
+    set root [els::find_root]
+    if {$root eq ""} { els::find_pending_fail "Find unavailable" ; return }
+    set seq [incr ::els::find_job_seq]
+    set token [els::find_token]
+    set dir [file join $root [els::find_job_dir_name $seq $token]]
+    if {[catch {file mkdir $dir} err] || [els::find_job_dir_ok $dir] eq ""} {
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set job [dict merge $pending [dict create dir $dir token $token watch "" started [clock milliseconds]]]
+    set linked 0
+    if {![catch {file link -hard [file join $dir snapshot.utf8] [dict get $snap path]}]} {
+        set linked 1
+    } elseif {![catch {file copy [dict get $snap path] [file join $dir snapshot.utf8]}]} {
+        set linked 1
+    }
+    if {!$linked || ![els::find_job_file_ok $job snapshot.utf8] \
+            || [catch {file size [file join $dir snapshot.utf8]} snapSize] \
+            || $snapSize != [dict get $snap bytes]} {
+        els::find_cleanup_job $job
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set kind [dict get $pending kind]
+    set deadline [expr {$kind eq "search" ? $::els::FIND_SEARCH_MS : $::els::FIND_REPLACE_MS}]
+    set request [dict create version $::elsworker::VERSION token $token kind $kind \
+        pattern [dict get $pending pattern] nocase [dict get $pending nocase] \
+        regex_mode [dict get $pending regex_mode] replacement [dict get $pending replacement] \
+        adapt [dict get $pending adapt] source_chars [dict get $snap chars] \
+        source_bytes [dict get $snap bytes] source_crc [dict get $snap crc] \
+        match_limit $::els::FIND_MAXINDEX output_limit $::els::FIND_OUTPUT_MAX \
+        deadline_ms $deadline hint_start [dict get $pending hint_start] hint_end [dict get $pending hint_end]]
+    if {[catch {els::find_write_control [file join $dir request.dict] $request} err]} {
+        els::find_cleanup_job $job
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    if {![els::find_job_file_ok $job request.dict]} {
+        els::find_cleanup_job $job
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set cmd [concat [els::find_worker_command] [list $dir $token]]
+    set cwd [file dirname [lindex $cmd 0]]
+    if {[catch {set watch [els::win_worker_spawn_watch $cmd $cwd]} err] \
+            || ![string match {worker-*} $watch]} {
+        els::find_cleanup_job $job
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    dict set job watch $watch
+    dict set job deadline_at [expr {[clock milliseconds] + $deadline + 1000}]
+    if {[catch {els::find_write_control [file join $dir go] \
+            [dict create version $::elsworker::VERSION token $token command go]} err]} {
+        els::find_retire_job $job 1
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    if {![els::find_job_file_ok $job go]} {
+        els::find_retire_job $job 1
+        els::find_pending_fail "Find unavailable"
+        return
+    }
+    set ::els::find_job $job
+    set ::els::find_pending {}
+    set ::els::find_poll_after [after 20 els::find_poll]
+}
+
+proc els::find_poll {} {
+    set ::els::find_poll_after ""
+    if {$::els::find_job eq ""} { return }
+    set job $::els::find_job
+    if {[clock milliseconds] > [dict get $job deadline_at]} {
+        set ::els::find_job {}
+        els::find_retire_job $job 1
+        els::find_finish_kind [dict get $job kind]
+        set ::els::find_count "Search timed out"
+        if {[dict get $job kind] ne "search"} {
+            els::find_restore_search "Search timed out"
+        }
+        return
+    }
+    if {[catch {els::win_worker_status [dict get $job watch]} status]} {
+        set ::els::find_job {}
+        els::find_retire_job $job 1
+        els::find_finish_kind [dict get $job kind]
+        set ::els::find_count "Find worker failed"
+        if {[dict get $job kind] ne "search"} {
+            els::find_restore_search "Find worker failed"
+        }
+        return
+    }
+    if {$status eq "running"} {
+        set ::els::find_poll_after [after 20 els::find_poll]
+        return
+    }
+    if {[llength $status] != 2 || [lindex $status 0] ne "exited" \
+            || ![string is entier -strict [lindex $status 1]] \
+            || [lindex $status 1] < 0} {
+        set ::els::find_job {}
+        els::find_retire_job $job 1
+        els::find_finish_kind [dict get $job kind]
+        set ::els::find_count "Find worker failed"
+        if {[dict get $job kind] ne "search"} {
+            els::find_restore_search "Find worker failed"
+        }
+        return
+    }
+    set ::els::find_job {}
+    set exitCode [lindex $status 1]
+    els::find_process_result $job $exitCode
+}
+
+proc els::find_result_fail {job message} {
+    els::find_cleanup_job $job
+    els::find_finish_kind [dict get $job kind]
+    if {[dict get $job generation] == $::els::find_generation && $::els::find_mode ne ""} {
+        set ::els::find_count $message
+        if {[dict get $job kind] ne "search"} { els::find_restore_search $message }
+    }
+}
+
+proc els::find_process_result {job exitCode} {
+    if {[dict get $job generation] != $::els::find_generation \
+            || [dict get $job doc] ne $::els::active \
+            || ![info exists ::els::docEpoch([dict get $job doc])] \
+            || $::els::docEpoch([dict get $job doc]) != [dict get $job epoch]} {
+        els::find_cleanup_job $job
+        els::find_finish_kind [dict get $job kind]
+        return
+    }
+    set path [file join [dict get $job dir] result.ready]
+    set keys {changed_count error kind match_bytes match_count match_crc match_truncated \
+        output_bytes output_chars output_crc source_bytes source_chars source_crc status token version}
+    if {[catch {
+        if {![els::find_job_file_ok $job result.ready]} { error "result is not a plain job file" }
+        set raw [::elsworker::read_regular $path $::elsworker::CONTROL_MAX]
+        set result [::elsworker::exact_dict [::elsworker::decode_utf8 $raw] $keys]
+        if {[dict get $result version] != $::elsworker::VERSION \
+                || [dict get $result token] ne [dict get $job token] \
+                || [dict get $result kind] ne [dict get $job kind]} { error "result identity mismatch" }
+        foreach k {changed_count match_bytes match_count match_crc match_truncated output_bytes \
+                    output_chars output_crc source_bytes source_chars source_crc} {
+            if {![string is entier -strict [dict get $result $k]] || [dict get $result $k] < 0} {
+                error "invalid result number"
+            }
+        }
+        set status [dict get $result status]
+        set resultKind [dict get $result kind]
+        set count [dict get $result match_count]
+        set bytes [dict get $result match_bytes]
+        set truncated [dict get $result match_truncated]
+        set changed [dict get $result changed_count]
+        set outputBytes [dict get $result output_bytes]
+        set outputChars [dict get $result output_chars]
+        set outputCrc [dict get $result output_crc]
+        if {$status ni {ok bad-pattern limit stale error} \
+                || [string length [dict get $result error]] > 4096 \
+                || $truncated ni {0 1} \
+                || $count > $::els::FIND_MAXINDEX \
+                || $bytes != $count * $::els::FIND_RECORD_BYTES \
+                || $changed > $count \
+                || [dict get $result match_crc] > 0xffffffff \
+                || $outputCrc > 0xffffffff \
+                || [dict get $result source_crc] > 0xffffffff \
+                || $outputBytes > $::els::FIND_OUTPUT_MAX \
+                || $outputChars > $::els::FIND_OUTPUT_MAX \
+                || $outputChars > $outputBytes \
+                || ($truncated && $count != $::els::FIND_MAXINDEX)} {
+            error "result invariant mismatch"
+        }
+        if {[dict get $result source_chars] != [dict get $::els::find_snapshot chars] \
+                || [dict get $result source_bytes] != [dict get $::els::find_snapshot bytes] \
+                || [dict get $result source_crc] != [dict get $::els::find_snapshot crc]} {
+            error "result source mismatch"
+        }
+        set outputPath [file join [dict get $job dir] replacement.utf8]
+        set outputPresent [expr {![catch {file lstat $outputPath outputStat}]}]
+        if {$outputPresent && ![els::find_job_file_ok $job replacement.utf8]} {
+            error "replacement output is not a plain job file"
+        }
+        if {$status ne "ok"} {
+            if {$changed != 0 || $outputBytes != 0 || $outputChars != 0 \
+                    || $outputCrc != 0 || $outputPresent} {
+                error "failed result contains replacement output"
+            }
+            switch -- $status {
+                bad-pattern {
+                    if {$count != 0 || $truncated} { error "bad-pattern result invariant mismatch" }
+                }
+                stale {
+                    if {$resultKind ne "replace-one" || $count != 0 || $truncated} {
+                        error "stale result invariant mismatch"
+                    }
+                }
+                limit {
+                    if {$resultKind ne "replace-all" || !$truncated \
+                            || $count != $::els::FIND_MAXINDEX} {
+                        error "limit result invariant mismatch"
+                    }
+                }
+            }
+        } else {
+            if {[dict get $result error] ne ""} { error "successful result contains an error" }
+            switch -- $resultKind {
+                search {
+                    if {$changed != 0 || $outputBytes != 0 || $outputChars != 0 \
+                            || $outputCrc != 0 || $outputPresent} {
+                        error "search result contains replacement output"
+                    }
+                }
+                replace-one {
+                    if {$count != 1 || $truncated || !$outputPresent} {
+                        error "replace-one result invariant mismatch"
+                    }
+                }
+                replace-all {
+                    if {$truncated || !$outputPresent} {
+                        error "replace-all result invariant mismatch"
+                    }
+                }
+            }
+        }
+    } err]} {
+        els::find_result_fail $job "Find worker returned invalid data"
+        return
+    }
+    set status [dict get $result status]
+    if {$status ne "ok" || $exitCode != 0} {
+        switch -- $status {
+            bad-pattern { set message "bad pattern" }
+            limit       { set message "Too many matches" }
+            stale       { set message "Search changed" }
+            default     { set message "Find worker failed" }
+        }
+        els::find_result_fail $job $message
+        return
+    }
+    set count [dict get $result match_count]
+    set bytes [dict get $result match_bytes]
+    set idx [file join [dict get $job dir] matches.idx]
+    if {![els::find_job_file_ok $job matches.idx] \
+            || [catch {file size $idx} idxSize] || $idxSize != $bytes} {
+        els::find_result_fail $job "Find worker returned invalid data"
+        return
+    }
+    if {[catch {set f [::open $idx rb]}]} {
+        els::find_result_fail $job "Find worker returned invalid data"
+        return
+    }
+    set ::els::find_validation [dict create job $job result $result chan $f bytes 0 crc 0 \
+        carry "" records 0 prev_start -1 prev_end -1]
+    set ::els::find_validation_after [after idle els::find_validation_step]
+}
+
+proc els::find_decimal {digits} {
+    if {![regexp {^[0-9]{20}$} $digits]} { error "invalid fixed decimal" }
+    set ceiling [format %020d $::els::FIND_INPUT_MAX]
+    if {[string compare $digits $ceiling] > 0} { error "fixed decimal exceeds source limit" }
+    set trimmed [string trimleft $digits 0]
+    if {$trimmed eq ""} { return 0 }
+    if {[scan $trimmed %d value] != 1} { error "invalid fixed decimal" }
+    return $value
+}
+
+proc els::find_validation_step {} {
+    set ::els::find_validation_after ""
+    if {$::els::find_validation eq ""} { return }
+    set v $::els::find_validation
+    if {[catch {set chunk [read [dict get $v chan] $::els::FIND_SLICE_BYTES]}]} {
+        catch {close [dict get $v chan]}
+        set ::els::find_validation {}
+        els::find_result_fail [dict get $v job] "Find worker returned invalid data"
+        return
+    }
+    if {$chunk ne ""} {
+        dict incr v bytes [string length $chunk]
+        dict set v crc [zlib crc32 $chunk [dict get $v crc]]
+        set data "[dict get $v carry]$chunk"
+        set pos 0
+        set n [string length $data]
+        while {$n - $pos >= $::els::FIND_RECORD_BYTES} {
+            set rec [string range $data $pos [expr {$pos + $::els::FIND_RECORD_BYTES - 1}]]
+            if {![regexp {^([0-9]{20}) ([0-9]{20})\n$} $rec -> sd ed]} {
+                catch {close [dict get $v chan]}
+                set ::els::find_validation {}
+                els::find_result_fail [dict get $v job] "Find worker returned invalid data"
+                return
+            }
+            if {[catch {
+                set s [els::find_decimal $sd]
+                set e [els::find_decimal $ed]
+            }]} {
+                catch {close [dict get $v chan]}
+                set ::els::find_validation {}
+                els::find_result_fail [dict get $v job] "Find worker returned invalid data"
+                return
+            }
+            set sourceChars [dict get [dict get $v result] source_chars]
+            set records [dict get $v records]
+            if {$s < 0 || $e < $s || $e > $sourceChars \
+                    || ($records > 0 && (([dict get $v prev_start] == [dict get $v prev_end] && $s <= [dict get $v prev_start]) \
+                    || ([dict get $v prev_start] != [dict get $v prev_end] && $s < [dict get $v prev_end])))} {
+                catch {close [dict get $v chan]}
+                set ::els::find_validation {}
+                els::find_result_fail [dict get $v job] "Find worker returned invalid data"
+                return
+            }
+            set job [dict get $v job]
+            if {$records == 0 && [dict get $job kind] eq "replace-one" \
+                    && ($s != [dict get $job hint_start] \
+                        || $e != [dict get $job hint_end])} {
+                catch {close [dict get $v chan]}
+                set ::els::find_validation {}
+                els::find_result_fail $job "Find worker returned invalid data"
+                return
+            }
+            dict set v prev_start $s
+            dict set v prev_end $e
+            dict incr v records
+            incr pos $::els::FIND_RECORD_BYTES
+        }
+        dict set v carry [string range $data $pos end]
+        set ::els::find_validation $v
+        set ::els::find_validation_after [after idle els::find_validation_step]
+        return
+    }
+    if {[catch {close [dict get $v chan]}]} {
+        set ::els::find_validation {}
+        els::find_result_fail [dict get $v job] "Find worker returned invalid data"
+        return
+    }
+    set result [dict get $v result]
+    if {[dict get $v carry] ne "" || [dict get $v records] != [dict get $result match_count] \
+            || [dict get $v bytes] != [dict get $result match_bytes] \
+            || [dict get $v crc] != [dict get $result match_crc]} {
+        set ::els::find_validation {}
+        els::find_result_fail [dict get $v job] "Find worker returned invalid data"
+        return
+    }
+    set ::els::find_validation {}
+    els::find_result_verified [dict get $v job] $result
+}
+
+proc els::find_result_verified {job result} {
+    if {[dict get $job generation] != $::els::find_generation \
+            || [dict get $job doc] ne $::els::active \
+            || $::els::docEpoch([dict get $job doc]) != [dict get $job epoch] \
+            || [find_signature [dict get $job kind]] ne [dict get $job signature]} {
+        els::find_cleanup_job $job
+        els::find_finish_kind [dict get $job kind]
+        return
+    }
+    if {[dict get $job kind] eq "search"} {
+        els::find_adopt_search $job $result
+    } else {
+        els::find_output_start $job $result
+    }
+}
+
+proc els::find_record_offsets {path ordinal} {
+    if {$ordinal < 0} { error "negative match ordinal" }
+    if {![els::find_path_plain $path file]} { error "match index is not a plain file" }
+    set f [::open $path rb]
+    try {
+        seek $f [expr {$ordinal * $::els::FIND_RECORD_BYTES}] start
+        set rec [read $f $::els::FIND_RECORD_BYTES]
+    } finally { close $f }
+    if {![regexp {^([0-9]{20}) ([0-9]{20})\n$} $rec -> sd ed]} { error "invalid match record" }
+    return [list [els::find_decimal $sd] [els::find_decimal $ed]]
+}
+
+proc els::find_nearest_ordinal {offset} {
+    set lo 0
+    set hi [expr {$::els::find_total - 1}]
+    set answer 0
+    while {$lo <= $hi} {
+        set mid [expr {($lo + $hi) / 2}]
+        lassign [els::find_record_offsets $::els::find_index_path $mid] s e
+        if {$s >= $offset} { set answer $mid ; set hi [expr {$mid - 1}] } \
+        else { set lo [expr {$mid + 1}] }
+    }
+    return $answer
+}
+
+proc els::find_adopt_search {job result} {
+    set count [dict get $result match_count]
+    set ::els::find_truncated [expr {$count > $::els::FIND_MAXHITS}]
+    set ::els::find_index_truncated [dict get $result match_truncated]
+    set w [els::W [dict get $job doc]]
+    $w tag remove findAll 1.0 end
+    $w tag remove findOne 1.0 end
+    set ::els::find_matches {}
+    if {$count == 0} {
+        set ::els::find_count "No results"
+        els::find_cleanup_job $job
+        return
+    }
+    set ::els::find_result_job $job
+    set ::els::find_index_path [file join [dict get $job dir] matches.idx]
+    set ::els::find_total $count
+    set insertOffset [lindex [$w count -chars 1.0 insert] 0]
+    if {[catch {set current [els::find_nearest_ordinal $insertOffset]}]} {
+        els::find_result_drop
+        set ::els::find_count "Find index unavailable"
+        return
+    }
+    els::find_highlight $current
+    set limit [expr {min($count, $::els::FIND_MAXHITS)}]
+    set ::els::find_highlight_state [dict create job $job ordinal 0 limit $limit]
+    set ::els::find_highlight_after [after idle els::find_highlight_step]
+}
+
+proc els::find_highlight_step {} {
+    set ::els::find_highlight_after ""
+    if {$::els::find_highlight_state eq ""} { return }
+    set h $::els::find_highlight_state
+    set job [dict get $h job]
+    if {$::els::find_result_job eq "" || [dict get $job generation] != $::els::find_generation \
+            || [dict get $job doc] ne $::els::active} {
+        set ::els::find_highlight_state {}
+        return
+    }
+    set w [els::W [dict get $job doc]]
+    set ordinal [dict get $h ordinal]
+    set stop [expr {min([dict get $h limit], $ordinal + 250)}]
+    set ranges {}
+    for {set i $ordinal} {$i < $stop} {incr i} {
+        if {[catch {lassign [els::find_record_offsets $::els::find_index_path $i] s e}]} {
+            set ::els::find_highlight_state {}
+            els::find_result_drop
+            set ::els::find_count "Find index unavailable"
+            return
+        }
+        set si [$w index "1.0 + $s chars"]
+        set ei [$w index "1.0 + $e chars"]
+        lappend ::els::find_matches [list $si $ei]
+        if {$e > $s} { lappend ranges $si $ei }
+    }
+    if {[llength $ranges]} { $w tag add findAll {*}$ranges }
+    dict set h ordinal $stop
+    set ::els::find_highlight_state $h
+    if {$stop < [dict get $h limit]} {
+        set ::els::find_highlight_after [after idle els::find_highlight_step]
+    } else {
+        set ::els::find_highlight_state {}
+    }
+}
+
+proc els::find_output_start {job result} {
+    set path [file join [dict get $job dir] replacement.utf8]
+    if {![els::find_job_file_ok $job replacement.utf8] \
+            || [catch {file size $path} outputSize] \
+            || $outputSize != [dict get $result output_bytes] \
+            || [dict get $result output_bytes] > $::els::FIND_OUTPUT_MAX} {
+        els::find_result_fail $job "Find worker returned invalid data"
+        return
+    }
+    if {[catch {set f [::open $path rb]}]} {
+        els::find_result_fail $job "Find worker returned invalid data"
+        return
+    }
+    set ::els::find_output_read [dict create job $job result $result chan $f \
+        bytes 0 crc 0 carry "" text ""]
+    set ::els::find_output_after [after idle els::find_output_step]
+}
+
+proc els::find_decode_chunk {data final} {
+    if {$final} {
+        return [list [encoding convertfrom -profile strict utf-8 $data] ""]
+    }
+    set n [string length $data]
+    for {set trim 0} {$trim <= 3 && $trim <= $n} {incr trim} {
+        if {$trim == 0} {
+            set body $data; set tail ""
+        } else {
+            set body [string range $data 0 end-$trim]
+            set tail [string range $data end-[expr {$trim - 1}] end]
+        }
+        if {![catch {set text [encoding convertfrom -profile strict utf-8 $body]}]} {
+            return [list $text $tail]
+        }
+    }
+    error "invalid UTF-8 in replacement output"
+}
+
+proc els::find_output_step {} {
+    set ::els::find_output_after ""
+    if {$::els::find_output_read eq ""} { return }
+    set o $::els::find_output_read
+    if {[catch {set chunk [read [dict get $o chan] $::els::FIND_SLICE_BYTES]}]} {
+        catch {close [dict get $o chan]}
+        set ::els::find_output_read {}
+        els::find_result_fail [dict get $o job] "Find worker returned invalid data"
+        return
+    }
+    if {$chunk ne ""} {
+        dict incr o bytes [string length $chunk]
+        dict set o crc [zlib crc32 $chunk [dict get $o crc]]
+        if {[catch {lassign [els::find_decode_chunk "[dict get $o carry]$chunk" 0] text carry}]} {
+            catch {close [dict get $o chan]}
+            set ::els::find_output_read {}
+            els::find_result_fail [dict get $o job] "Find worker returned invalid data"
+            return
+        }
+        dict append o text $text
+        dict set o carry $carry
+        set ::els::find_output_read $o
+        set ::els::find_output_after [after idle els::find_output_step]
+        return
+    }
+    if {[catch {close [dict get $o chan]}]} {
+        set ::els::find_output_read {}
+        els::find_result_fail [dict get $o job] "Find worker returned invalid data"
+        return
+    }
+    if {[catch {lassign [els::find_decode_chunk [dict get $o carry] 1] tail _}]} {
+        set ::els::find_output_read {}
+        els::find_result_fail [dict get $o job] "Find worker returned invalid data"
+        return
+    }
+    dict append o text $tail
+    set result [dict get $o result]
+    set text [dict get $o text]
+    set ::els::find_output_read {}
+    if {[dict get $o bytes] != [dict get $result output_bytes] \
+            || [dict get $o crc] != [dict get $result output_crc] \
+            || [string length $text] != [dict get $result output_chars]} {
+        els::find_result_fail [dict get $o job] "Find worker returned invalid data"
+        return
+    }
+    els::find_commit_replacement [dict get $o job] $result $text
+}
+
+proc els::find_commit_replacement {job result output} {
+    set id [dict get $job doc]
+    if {$id ne $::els::active || ![info exists ::els::docEpoch($id)] \
+            || $::els::docEpoch($id) != [dict get $job epoch] \
+            || [els::find_signature [dict get $job kind]] ne [dict get $job signature] \
+            || $::els::find_mode eq ""} {
+        els::find_cleanup_job $job
+        els::find_finish_kind [dict get $job kind]
+        return
+    }
+    set n [dict get $result changed_count]
+    set kind [dict get $job kind]
+    set w [els::W $id]
+    if {$kind eq "replace-one"} {
+        set start [dict get $job hint_start]
+        set end [dict get $job hint_end]
+        set si [$w index "1.0 + $start chars"]
+        set ei [$w index "1.0 + $end chars"]
+        set unchanged [expr {[$w get $si $ei] eq $output}]
+    } else {
+        set unchanged [expr {[$w get 1.0 "end - 1 char"] eq $output}]
+    }
+    if {$unchanged} { set n 0 }
+    if {$n == 0} {
+        els::find_cleanup_job $job
+        els::find_finish_kind $kind
+        if {$kind eq "replace-all"} {
+            set ::els::find_count "Replaced 0"
+        } else {
+            # Replace still advances when the replacement is identical.  Move
+            # the caret beyond this span (or wrap a terminal zero-width match),
+            # then rebuild a complete search/index so F3 never strands on the
+            # discarded pre-replacement result.
+            set next $end
+            if {$end == $start} {
+                if {$start < [dict get $result source_chars]} {
+                    set next [expr {$start + 1}]
+                } else {
+                    set next 0
+                }
+            }
+            $w mark set insert "1.0 + $next chars"
+            els::find_request search
+        }
+        return
+    }
+    set oldAuto [$w cget -autoseparators]
+    set rc [catch {
+        $w configure -autoseparators 0
+        $w edit separator
+        set ::els::find_applying 1
+        if {$kind eq "replace-one"} {
+            $w replace $si $ei $output
+            $w mark set insert "$si + [string length $output] chars"
+        } else {
+            $w replace 1.0 "end - 1 char" $output
+        }
+        set ::els::find_applying 0
+        $w edit separator
+    } err opts]
+    set ::els::find_applying 0
+    catch {$w configure -autoseparators $oldAuto}
+    els::find_cleanup_job $job
+    els::find_finish_kind $kind
+    if {$rc} {
+        set ::els::find_count "Replace failed"
+        return
+    }
+    els::swap_touch
+    els::find_result_drop
+    if {$kind eq "replace-all"} {
+        set ::els::find_count "Replaced $n"
+    } else {
+        els::find_request search
+    }
+}
+
+proc els::find_request {kind {hintStart 0} {hintEnd 0}} {
+    if {$::els::find_mode eq ""} { return }
+    set id $::els::active
+    if {$id eq "" || ![info exists ::els::docEpoch($id)]} { return }
+    # An explicit request supersedes any edit/key debounce already in flight.
+    # Otherwise that old timer can fire while a replacement worker is running,
+    # increment the generation, and correctly-but-surprisingly reject the
+    # replacement as stale.
+    after cancel $::els::find_after
+    set ::els::find_after ""
+    incr ::els::find_generation
+    els::find_cancel superseded
+    els::find_result_drop
+    set w [els::W $id]
+    catch {$w tag remove findAll 1.0 end}
+    catch {$w tag remove findOne 1.0 end}
+    set spec [els::find_worker_spec]
+    if {$spec eq ""} { set ::els::find_count "" ; return }
+    if {[catch {
+        set pbytes [string length [encoding convertto -profile strict utf-8 [dict get $spec pattern]]]
+        set rbytes [string length [encoding convertto -profile strict utf-8 $::els::find_r]]
+    }] || $pbytes > $::elsworker::FIELD_MAX || $rbytes > $::elsworker::FIELD_MAX} {
+        set ::els::find_count "Search field too large"
+        return
+    }
+    set ::els::find_pending [dict merge $spec [dict create generation $::els::find_generation \
+        doc $id epoch $::els::docEpoch($id) signature [els::find_signature $kind] kind $kind \
+        replacement $::els::find_r adapt $::els::find_adapt \
+        hint_start $hintStart hint_end $hintEnd]]
+    if {$kind eq "replace-all"} { els::find_set_all_button 1 }
+    set ::els::find_count [expr {$kind eq "search" ? "Searching..." : "Replacing..."}]
+    els::find_snapshot_ensure
+}
+
+proc els::find_test_wait {{limit 35000}} {
+    if {!$::els::find_test_sync} { return }
+    set until [expr {[clock milliseconds] + $limit}]
+    while {[clock milliseconds] < $until} {
+        update
+        if {$::els::find_pending eq "" && $::els::find_job eq "" \
+                && $::els::find_snapshot_build eq "" && $::els::find_validation eq "" \
+                && $::els::find_output_read eq "" && $::els::find_highlight_state eq ""} { return }
+        after 1
+    }
+    error "timed out waiting for isolated find worker"
+}
+
+proc els::find_all_action {} {
+    if {$::els::find_replace_all_busy} {
+        incr ::els::find_generation
+        els::find_cancel user
+    } else {
+        els::find_replace_all
+    }
+}
+
+proc els::find_shutdown {} {
+    set ::els::find_shutdown 1
+    incr ::els::find_generation
+    els::find_cancel shutdown
+    els::find_result_drop
+    els::find_snapshot_drop
+    set until [expr {[clock milliseconds] + 2500}]
+    while {[llength $::els::find_retired] && [clock milliseconds] < $until} {
+        if {$::els::find_reap_after ne ""} { after cancel $::els::find_reap_after ; set ::els::find_reap_after "" }
+        els::find_reap_tick
+        if {[llength $::els::find_retired]} { after 10 }
+    }
+}
+
+# Public helper retained for unit-level case-template tests; production
+# replacement work calls the same pure worker implementation out of process.
+proc els::adapt_case {match repl} {
+    return [::elsworker::adapt_case $::els::find_adapt $match $repl]
+}
+
+# Public find operations are asynchronous in production and synchronously drain
+# only under the invisible white-box test harness.  Stable UI entry points keep
+# menus and bindings independent of the isolated-worker protocol.
 proc els::find_update {} {
-    variable find_matches ; variable find_count ; variable find_mode
-    # the bar is hidden: a late debounce / stray caller must not re-tag matches
-    # or move the caret on a search the user already dismissed
-    if {$find_mode eq ""} { return }
+    if {$::els::find_mode eq ""} { return }
     set w [els::T]
     if {$w eq ""} { return }
     catch {.find.fr.help configure -state normal}
     catch {.find.fr.help state !disabled}
-    $w tag remove findAll 1.0 end
-    $w tag remove findOne 1.0 end
-    set find_matches {}
-    if {$::els::find_q eq ""} { set find_count "" ; return }
-    set scan [els::find_scan $w $::els::FIND_MAXHITS]
-    if {$scan eq "bad"} { set find_count "bad pattern" ; return }
-    if {![llength $scan]} { set find_count "No results" ; return }
-    set find_matches $scan
-    # one batched tag-add over all ranges, not one call per match: the flat
-    # {s e s e …} form is the multi-range syntax `tag add` accepts, and it turns
-    # the O(matches) per-match loop that froze the UI on long lines into a single
-    # widget call (robustness R5).  findAll is display-only, so Tk merging
-    # abutting ranges here is harmless — Replace All never reads this tag.
-    $w tag add findAll {*}[concat {*}$scan]
-    set n [llength $find_matches]
-    set ins [$w index insert]
-    set cur 0
-    for {set j 0} {$j < $n} {incr j} {
-        if {[$w compare [lindex [lindex $find_matches $j] 0] >= $ins]} { set cur $j ; break }
-    }
-    els::find_highlight $cur
+    els::find_request search
+    els::find_test_wait
 }
 
 proc els::find_highlight {idx} {
-    variable find_matches ; variable find_current ; variable find_count
+    if {$::els::find_total <= 0 || $::els::find_index_path eq ""} { return }
     set w [els::T]
-    set n [llength $find_matches]
-    if {$n == 0} { return }
-    set idx [expr {($idx % $n + $n) % $n}]
-    set find_current $idx
+    if {$w eq ""} { return }
+    set n $::els::find_total
+    set idx [expr {(($idx % $n) + $n) % $n}]
+    if {[catch {lassign [els::find_record_offsets $::els::find_index_path $idx] s e}]} {
+        incr ::els::find_generation
+        els::find_result_drop
+        set ::els::find_count "Find index unavailable"
+        return
+    }
+    set si [$w index "1.0 + $s chars"]
+    set ei [$w index "1.0 + $e chars"]
     $w tag remove findOne 1.0 end
-    lassign [lindex $find_matches $idx] s e
-    $w tag add findOne $s $e
-    $w mark set insert $s
-    $w see $s
-    # "+" when the scan was capped at FIND_MAXHITS: there are more matches than
-    # the N we track/highlight/step through (robustness R5)
-    set more "" ; if {$::els::find_truncated} { set more "+" }
-    set find_count "[expr {$idx + 1}] of $n$more"
+    if {$e > $s} { $w tag add findOne $si $ei }
+    $w mark set insert $si
+    $w see $si
+    set ::els::find_current $idx
+    set more [expr {$::els::find_index_truncated ? "+" : ""}]
+    set ::els::find_count "[expr {$idx + 1}] of $n$more"
     els::update_pos
     els::update_current_line
-    els::draw_gutter   ;# the caret moved — refresh the gutter band + visible nums
+    els::draw_gutter
 }
 
 proc els::find_step {dir} {
-    variable find_matches ; variable find_current ; variable find_mode
-    if {$find_mode eq ""} { return }   ;# bar hidden (F3): nothing to step
-    set w [els::T]
-    if {$w eq ""} { return }
-    # Cached spans are plain string indices — they do NOT float with edits.
-    # Re-scan instead of stepping when they could be stale: different doc, the
-    # buffer length changed since the scan, or the target span no longer matches
-    # the query (a same-length edit).  find_update lands on the match nearest
-    # the caret, which is the natural continuation.
-    if {![llength $find_matches] \
-            || $::els::active ne $::els::find_scan_doc \
-            || [$w count -chars 1.0 end] != $::els::find_scan_chars} {
+    if {$::els::find_mode eq ""} { return }
+    if {$::els::find_result_job eq "" || $::els::find_total <= 0 \
+            || [dict get $::els::find_result_job doc] ne $::els::active \
+            || $::els::docEpoch($::els::active) != [dict get $::els::find_result_job epoch] \
+            || [els::find_signature search] ne [dict get $::els::find_result_job signature]} {
         els::find_update
         return
     }
-    set n [llength $find_matches]
-    set idx [expr {(($find_current + $dir) % $n + $n) % $n}]
-    lassign [lindex $find_matches $idx] s e
-    if {![els::find_span_ok $w $s $e]} { els::find_update ; return }
-    # stepping past either end wraps — say so, instead of silently teleporting
-    # across the end-of-file border
-    set wrapped [expr {($dir > 0 && $idx <= $find_current) || \
-                       ($dir < 0 && $idx >= $find_current)}]
-    els::find_highlight $idx
-    if {$wrapped && $n > 1} { append ::els::find_count "  (wrapped)" }
-}
-
-# Make a match's case template carry to its replacement (when Adapt case is on).
-proc els::adapt_case {match repl} {
-    # [[:alpha:]] not [A-Za-z]: toupper/tolower/totitle below are Unicode-aware,
-    # so an all-Cyrillic/Greek match must not be skipped by an ASCII-only guard
-    if {!$::els::find_adapt || $match eq "" || ![regexp {[[:alpha:]]} $match]} { return $repl }
-    # Title BEFORE upper: a single capital ('I', a sentence-opening 'A') satisfies
-    # BOTH templates, and Title is the natural (quieter) reading — checking upper
-    # first upcased the whole replacement ('I' -> 'WE').  Lower stays first so a
-    # non-letter-led lowercase run ("1cat") still reads as lower, not Title.
-    if {$match eq [string tolower $match]} { return [string tolower $repl] }
-    if {$match eq [string totitle $match]} { return [string totitle $repl] }
-    if {$match eq [string toupper $match]} { return [string toupper $repl] }
-    return $repl
-}
-# The replacement text for the match at s..e: expands regex backreferences
-# (\1, \2, …) when Regex is on, then applies adapt-case.
-proc els::repl_for {w s e} {
-    variable find_q ; variable find_r ; variable find_regex ; variable find_word ; variable find_case
-    set matched [$w get $s $e]
-    set repl $find_r
-    if {$find_regex} {
-        if {$find_word} { set pat "\\m(?:$find_q)\\M" } else { set pat $find_q }
-        # -line, because the widget search matched under Tk's implicit
-        # -linestop -lineanchor (text(n) `search -regexp`): a plain-mode
-        # re-match lets `.`/`[^...]` swallow newlines PAST the widget match —
-        # the tail arithmetic below then truncates the replacement, silently
-        # deleting the matched text — and a trailing `$` never re-matches at
-        # all, silently writing the original text back.
-        set fl {-line} ; if {!$find_case} { lappend fl -nocase }
-        # Re-match WITH trailing context, anchored at the match start: a
-        # context-dependent construct (lookahead (?=...), \M at a word edge)
-        # cannot re-match against the excised match text alone, so the
-        # "replacement" would silently write the original text back.  2000 chars
-        # of context bounds the cost on huge buffers; a lookahead needing more
-        # degrades to leaving the match untouched.
-        set ctx [$w get $s "$e + 2000 chars"]
-        set out ""
-        if {[catch {regsub {*}$fl -- "\\A(?:$pat)" $ctx $find_r out} nsub] || $nsub == 0} {
-            set repl $matched          ;# could not re-match: leave the text as-is
-        } else {
-            set tail [expr {[string length $ctx] - [string length $matched]}]
-            set repl [string range $out 0 end-$tail]
-        }
+    set old $::els::find_current
+    if {$::els::find_index_truncated \
+            && (($dir > 0 && $old == $::els::find_total - 1) \
+            || ($dir < 0 && $old == 0))} {
+        set ::els::find_count "[expr {$old + 1}] of $::els::find_total+  (navigation limit)"
+        return
     }
-    return [els::adapt_case $matched $repl]
+    set idx [expr {(($old + $dir) % $::els::find_total + $::els::find_total) % $::els::find_total}]
+    set wrapped [expr {($dir > 0 && $idx <= $old) || ($dir < 0 && $idx >= $old)}]
+    els::find_highlight $idx
+    if {$wrapped && $::els::find_total > 1} { append ::els::find_count "  (wrapped)" }
 }
 
 proc els::find_replace_one {} {
-    set w [els::T]
-    if {$w eq ""} { return }
-    # Use the findOne TAG range, which floats with edits, not the cached
-    # find_matches index, which does not: a direct buffer edit (the find bar can
-    # stay open while you type in the document) leaves the cached index pointing
-    # at the wrong span, so Replace would overwrite unrelated text.
-    set range [$w tag ranges findOne]
-    if {[llength $range] != 2} { els::find_step 1 ; return }
-    lassign $range s e
-    set repl [els::repl_for $w $s $e]
-    $w edit separator
-    $w replace $s $e $repl
-    $w mark set insert "$s + [string length $repl] chars"
-    els::swap_touch   ;# a button-driven edit doesn't fire <KeyRelease> -> latch it
-    els::find_update
+    if {$::els::find_mode eq "" || [els::T] eq ""} { return }
+    if {$::els::find_result_job eq "" || $::els::find_total <= 0} {
+        els::find_update
+        if {$::els::find_result_job eq "" || $::els::find_total <= 0} { return }
+    }
+    if {[catch {lassign [els::find_record_offsets $::els::find_index_path \
+            $::els::find_current] s e}]} { return }
+    els::find_request replace-one $s $e
+    els::find_test_wait
 }
 
 proc els::find_replace_all {} {
-    set w [els::T]
-    if {$w eq ""} { return }
-    # Search FRESH at replace time and walk the result in reverse (earlier
-    # indices stay valid while later text is replaced; no edits happen between
-    # the scan and the walk).  NEVER via `tag ranges findAll`: Tk merges
-    # abutting ranges of one tag, so N adjacent matches ("aa" find a) would
-    # collapse into ONE range and a single replacement would eat the rest.
-    set scan [els::find_scan $w]
-    if {$scan eq "bad" || ![llength $scan]} { return }
-    $w edit separator
-    set n 0
-    foreach m [lreverse $scan] {
-        lassign $m s e
-        set repl [els::repl_for $w $s $e]
-        # repl_for degrades to the original text when its re-match fails (e.g. a
-        # lookahead whose context a later reverse-order rewrite already destroyed);
-        # skip those spans so an identity write never dirties the undo stack or
-        # inflates the "Replaced N" count.
-        if {$repl eq [$w get $s $e]} { continue }
-        $w replace $s $e $repl
-        incr n
-    }
-    $w edit separator
-    els::swap_touch   ;# button-driven edit -> latch dirtySince + schedule a flush
-    els::find_update
-    set ::els::find_count "Replaced $n"
+    if {$::els::find_mode eq "" || [els::T] eq ""} { return }
+    els::find_request replace-all
+    els::find_test_wait
 }
 
 # ---- go to line + whitespace --------------------------------------------
@@ -5430,7 +8229,8 @@ proc els::goto_line {} {
     ttk::entry $top.f.e -width 10 -font elsMono \
         -validate key -validatecommand {string is digit %P}
     ttk::frame $top.f.b
-    ttk::button $top.f.b.ok     -text "Go"     -style Dialog.TButton -command [list els::goto_do $top]
+    ttk::button $top.f.b.ok     -text "Go"     -style Dialog.TButton -default active \
+        -command [list els::goto_do $top]
     ttk::button $top.f.b.cancel -text "Cancel" -style Dialog.TButton -command [list destroy $top]
     pack $top.f.b.ok $top.f.b.cancel -side left -padx 3
     grid $top.f.l -row 0 -column 0 -sticky w
@@ -5673,6 +8473,7 @@ proc els::startup_probe {report} {
         recovered $::els::last_recover \
         swap_dir [els::swap_dir] \
         active_path [els::session_current_active] \
+        deferred $::els::deferred_files \
         title [wm title .] \
         argv $::argv \
         argv0 $::argv0]
@@ -5765,10 +8566,11 @@ proc els::main {} {
         # args to it (it opens them + raises) and exit BEFORE building any UI or
         # acquiring our own lock.  Skipped for probes and ELS_NO_SINGLE_INSTANCE.
         if {!$startupProbe && [els::primary_running]} {
-            lassign [els::config_candidates] near appdata
-            if {[file exists $near]} { set cfg $near } else { set cfg $appdata }
-            els::handoff_send $cfg $fileArgs
-            exit 0
+            set cfg [lindex [els::config_candidates] 0]
+            # Exit only after the request is durably spooled.  If the handoff
+            # directory is unwritable/full, fall through and open locally rather
+            # than silently discarding the launch.
+            if {[els::handoff_send $cfg $fileArgs]} { exit 0 }
         }
         els::build
         if {$startupProbe} {
@@ -5777,9 +8579,8 @@ proc els::main {} {
             # startup error to stderr + exit instead of a modal dialog — the test
             # then fails on a missing report rather than hanging behind a dialog.
             catch {wm attributes . -alpha 0.0}
-            # child toplevels too: the first-run Welcome dialog (and a recovery
-            # offer) inherit no alpha and used to flash as a REAL opaque window
-            # on the desktop during every suite run
+            # child toplevels too: a recovery offer inherits no alpha and could
+            # otherwise flash as a real opaque window during a suite run
             set ::els::probe_quiet 1
             proc ::bgerror {msg args} { catch {puts stderr "els startup-probe: $msg"} ; exit 3 }
             catch {interp bgerror {} ::bgerror}
@@ -5798,17 +8599,15 @@ proc els::main {} {
         set openedArgs 0
         foreach f $fileArgs {
             if {[string index $f 0] ne "-"} {
-                els::open $f
-                set openedArgs 1
+                # Startup arguments are not yet an interactive event-loop action:
+                # never load a large one silently or surface an early modal.
+                els::open $f 1
+                if {$::els::last_open_outcome in {opened already deferred}} {
+                    set openedArgs 1
+                }
             }
         }
-        # first run (no config in either location): ask where to keep settings,
-        # a moment after the main window is up (never a startup-time modal vwait)
-        if {$::els::config_path eq ""} {
-            after 250 els::config_first_run   ;# recovery runs once the user picks a config dir
-        } else {
-            after 80 [list els::recover_boot $openedArgs]   ;# session restore + crash recovery
-        }
+        after 80 [list els::recover_boot $openedArgs]   ;# session restore + crash recovery
         if {$startupProbe} {
             # ELS_PROBE_LINGER keeps the probe alive longer before reporting, so
             # a SECOND process can hand a file off to it (single-instance test).

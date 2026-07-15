@@ -11,8 +11,7 @@ set TMP  [file join $ROOT tests _tmp readme_shots]
 set OUT  [file join $ROOT docs img]
 
 # wish + tclsh come from z's shared runtime, passed in by `z readme-shots`
-# (els carries no private .toolchain).  twapi is found by shot.tcl via the
-# TCLLIBPATH this process already inherits from the z front door.
+# (els carries no private .toolchain).
 set WISH  [lindex $argv 0]
 set TCLSH [lindex $argv 1]
 if {$WISH eq "" || $TCLSH eq ""} { error "usage: readme_shots.tcl <wish> <tclsh>" }
@@ -36,20 +35,20 @@ proc capture {scene out {title ""}} {
     set old [pwd]
     set hadTitle [info exists ::env(ELS_SHOT_TITLE)]
     if {$hadTitle} { set oldTitle $::env(ELS_SHOT_TITLE) }
-    set changedTitle [expr {$title ne ""}]
-    if {$changedTitle} { set ::env(ELS_SHOT_TITLE) $title }
-    cd $::ROOT
-    if {[catch {exec {*}$cmd 2>@1} result]} {
-        cd $old
-        if {$changedTitle} {
-            if {$hadTitle} { set ::env(ELS_SHOT_TITLE) $oldTitle } else { unset ::env(ELS_SHOT_TITLE) }
-        }
-        puts $result
-        error "capture failed for $scene"
-    }
+    set hadStaged [info exists ::env(ELS_SHOT_STAGED)]
+    if {$hadStaged} { set oldStaged $::env(ELS_SHOT_STAGED) }
+    set ::env(ELS_SHOT_STAGED) 1
+    if {$title ne ""} { set ::env(ELS_SHOT_TITLE) $title } else { unset -nocomplain ::env(ELS_SHOT_TITLE) }
+    set rc [catch {
+        cd $::ROOT
+        exec {*}$cmd 2>@1
+    } result opts]
     cd $old
-    if {$changedTitle} {
-        if {$hadTitle} { set ::env(ELS_SHOT_TITLE) $oldTitle } else { unset ::env(ELS_SHOT_TITLE) }
+    if {$hadTitle} { set ::env(ELS_SHOT_TITLE) $oldTitle } else { unset -nocomplain ::env(ELS_SHOT_TITLE) }
+    if {$hadStaged} { set ::env(ELS_SHOT_STAGED) $oldStaged } else { unset -nocomplain ::env(ELS_SHOT_STAGED) }
+    if {$rc} {
+        puts $result
+        return -options $opts "capture failed for $scene: $result"
     }
     puts $result
 }
@@ -118,7 +117,6 @@ proc readme_stage_editor {} {
     set w [els::T]
     $w mark set insert 5.34
     $w see 1.0
-    focus $w
     els::refresh_view
 }
 
@@ -136,6 +134,21 @@ proc readme_stage_find {} {
     catch {.find.fr.q selection clear}
     els::ws_refresh
     els::find_update
+    # Search is intentionally isolated in a child process.  Do not publish a
+    # timing-dependent "Searching..." screenshot: keep servicing the event loop
+    # until this fixed scene has its exact result, with a hard timeout so a
+    # broken worker fails the screenshot task instead of hanging it.
+    set deadline [expr {[clock milliseconds] + 7000}]
+    while {$::els::find_result_job eq "" || $::els::find_total != 4} {
+        if {[clock milliseconds] >= $deadline} {
+            error "README Find scene did not settle: $::els::find_count"
+        }
+        update
+        after 10
+    }
+    if {$::els::find_count ne "1 of 4"} {
+        error "README Find scene has unexpected result: $::els::find_count"
+    }
 }
 
 proc readme_stage_about {} {
@@ -154,7 +167,6 @@ proc readme_stage_focus {} {
     $w mark set insert 9.30
     els::set_focus_mode 0     ;# apply the dimming (persist 0 — don't touch config)
     $w see 1.0
-    focus $w
     els::refresh_view
 }
 
@@ -168,13 +180,17 @@ proc readme_stage {} {
     }
     update idletasks
     update
+    set target [expr {$::README_SCENE eq "about" ? ".about" : "."}]
+    if {![winfo exists $target]} { error "README capture target does not exist: $target" }
+    if {![winfo ismapped $target]} { error "README capture target is not mapped: $target" }
+    set ::ELS_SHOT_TARGET $target
+    set ::ELS_SHOT_READY 1
 }
 
-# Read the staged config from this temp dir instead of the developer's real
-# els.conf (next-to-program / %LOCALAPPDATA%): pinning config_path before main
-# skips first-run resolution and the location dialog, so the screenshots show a
-# clean, deterministic session rather than whatever tabs, recent files, or window
-# geometry the developer's own config happens to hold.
+# Read the staged config from this temp dir instead of the developer's real,
+# source-adjacent els.conf. Pinning config_path before main gives the screenshots
+# a clean, deterministic session rather than whatever tabs, recent files, or
+# window geometry the developer's own config happens to hold.
 set ::els::config_path [file join $::README_TMP els.conf]
 els::main
 after 220 readme_stage

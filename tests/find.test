@@ -9,7 +9,6 @@ proc find_reset {} {
     set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::find_matches {} ; set ::els::find_current -1
     set ::els::find_truncated 0
-    set ::els::find_scan_doc "" ; set ::els::find_scan_chars -1
     # the find procs are only live while the bar is shown; mirror that here
     # (find_update/find_step deliberately no-op when find_mode is "")
     set ::els::find_mode find
@@ -145,8 +144,9 @@ test replace-1.5 {Replace All with no matches changes nothing} -setup {find_rese
     set w [els::T] ; $w insert end "hello world"
     set ::els::find_q zzz ; set ::els::find_r Q ; els::find_update
     els::find_replace_all
-    $w get 1.0 "end - 1 char"
-} -result {hello world}
+    list [$w get 1.0 "end - 1 char"] $::els::find_count \
+        $::els::find_replace_all_busy [.find.rr.all cget -text]
+} -result {{hello world} {Replaced 0} 0 All}
 
 test find-2.3 {search history is capped at the 16 newest terms} -setup {find_reset} -body {
     for {set i 1} {$i <= 20} {incr i} { els::find_history_push "term$i" }
@@ -258,18 +258,18 @@ test wrapfeedback-a.1 {stepping past the last match announces the wrap; normal s
 
 # ---- R5: find/replace long-line guard -------------------------------------
 # The historical freeze: a common substring on ONE very long line yields tens of
-# thousands of matches, each costing per-hit index arithmetic + an individual
-# tag-add.  find_update now caps the tracked/highlighted set at FIND_MAXHITS and
-# batches the tag-add, so incremental search stays bounded regardless of match
-# count; Replace All stays uncapped because it must rewrite every match.
+# thousands of matches.  The isolated worker now records an exact disk-backed
+# global index while the UI caps and batches only the displayed FIND_MAXHITS
+# ranges.  Keep a generous end-to-end bound here to catch an accidental hang;
+# responsiveness itself is asserted with an event-loop heartbeat in ui-4.12.
 
-test perf-4.1 {a common substring on one very long line is capped, not a UI freeze} -setup {find_reset} -body {
+test perf-4.1 {a common substring highlights only 5000 but reports the exact global total} -setup {find_reset} -body {
     set w [els::T]
     $w insert end [string repeat "ab" 40000]        ;# one 80k-char line, 40k matches
     set ::els::find_q ab
-    set us [lindex [time {els::find_update}] 0]      ;# microseconds for the whole pass
+    set us [lindex [time {els::find_update}] 0]      ;# test mode drains the whole worker pass
     list [llength $::els::find_matches] $::els::find_truncated \
-         [string match "* of 5000+" $::els::find_count] [expr {$us < 4000000}]
+         [string match "* of 40000" $::els::find_count] [expr {$us < 8000000}]
 } -result {5000 1 1 1}
 
 test perf-4.2 {the findAll highlight is capped to FIND_MAXHITS ranges, not every match} -setup {find_reset} -body {
@@ -304,12 +304,12 @@ test perf-4.5 {exactly FIND_MAXHITS matches is NOT flagged as truncated (no spur
          [string match "*+" $::els::find_count]
 } -result {5000 0 0}
 
-test perf-4.6 {one past the cap IS flagged, tracking exactly FIND_MAXHITS with a "+"} -setup {find_reset} -body {
+test perf-4.6 {one past the display cap is flagged but keeps the exact navigable total} -setup {find_reset} -body {
     set w [els::T]
     $w insert end [string repeat "a " [expr {$::els::FIND_MAXHITS + 1}]]
     set ::els::find_q a ; els::find_update
     list [llength $::els::find_matches] $::els::find_truncated \
-         [string match "* of 5000+" $::els::find_count]
+         [string match "* of 5001" $::els::find_count]
 } -result {5000 1 1}
 
 # ---- bug-hunt wave 2: repl_for must re-match with the widget's line rules ----
@@ -371,14 +371,12 @@ test replline-5.7 {negated classes stop at newlines like the widget search} -set
 
 # ---- bug-hunt wave 2: find/replace polish (F27, F29, F30) ------------------
 
-test replcount-6.1 {Replace All counts only spans it actually changed (a degraded re-match is not "Replaced")} -setup {find_reset} -body {
-    # reverse-order rewrite of the 2nd "foo" destroys the 1st's lookahead context,
-    # so repl_for degrades the 1st span to the original text -> only 1 real change
+test replcount-6.1 {Replace All stages against the original snapshot, preserving lookahead semantics} -setup {find_reset} -body {
     set w [els::T] ; $w insert end "foofoofoo"
     set ::els::find_regex 1 ; set ::els::find_q {foo(?=foo)} ; set ::els::find_r X
     els::find_update ; els::find_replace_all
     list [$w get 1.0 "end - 1 char"] $::els::find_count
-} -result {fooXfoo {Replaced 1}}
+} -result {XXfoo {Replaced 2}}
 
 test replcount-6.2 {replacing text with itself writes nothing, does not dirty, counts 0} -setup {find_reset} -body {
     set w [els::T] ; $w insert end "foo foo" ; $w edit modified 0
@@ -386,6 +384,17 @@ test replcount-6.2 {replacing text with itself writes nothing, does not dirty, c
     els::find_update ; els::find_replace_all
     list [$w get 1.0 "end - 1 char"] $::els::find_count [$w edit modified]
 } -result {{foo foo} {Replaced 0} 0}
+
+test replcount-6.3 {no-op Replace advances and restores a complete retained search index} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "foo foo" ; $w edit reset ; $w edit modified 0
+    set ::els::find_q foo ; set ::els::find_r foo
+    els::find_update ; els::find_replace_one
+    set restored [list [$w get 1.0 "end - 1 char"] $::els::find_count \
+        $::els::find_total [expr {$::els::find_result_job ne ""}]]
+    els::find_step 1
+    list $restored $::els::find_count [$w edit modified] [catch {$w edit undo}]
+} -result {{{foo foo} {2 of 2} 2 1} {1 of 2  (wrapped)} 0 1}
 
 test adaptcase-6.1 {a single capital reads as Title case, not ALL-CAPS} \
         -setup {find_reset ; set ::els::find_adapt 1} -body {
@@ -451,3 +460,551 @@ test regexamp-6.1 {regex replace: & is the whole match, \& is a literal & (F32)}
     els::find_update ; els::find_replace_all
     list $expanded [$w get 1.0 "end - 1 char"]
 } -result {{a[12]b} {a[&]b}}
+
+# ---- isolated worker / global index / staged replacement -----------------
+test worker-find-7.1 {F3 navigates beyond the 5000 display cap through the global index} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    $w insert end [string repeat "x " 5002]
+    set ::els::find_q x
+    els::find_update
+    els::find_highlight 4998
+    set counts [list $::els::find_count]
+    els::find_step 1 ; lappend counts $::els::find_count
+    els::find_step 1 ; lappend counts $::els::find_count
+    list [llength $::els::find_matches] $::els::find_total $counts \
+         [[els::T] get {*}[[els::T] tag ranges findOne]]
+} -result {5000 5002 {{4999 of 5002} {5000 of 5002} {5001 of 5002}} x}
+
+test worker-find-7.2 {zero-width patterns terminate and Replace All mirrors Tcl regsub progress} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    set ok {}
+    foreach {pattern source repl} {
+        {^}     "a\nb"  {>}
+        {$}     "a\nb"  {<}
+        {(?:)}  {abc}    {_}
+        {x*}    {abc}    {Q}
+        {(?=b)} {abc}    {X}
+    } {
+        $w replace 1.0 "end - 1 char" $source
+        $w edit reset ; $w edit modified 0
+        set ::els::find_regex 1 ; set ::els::find_q $pattern ; set ::els::find_r $repl
+        set expected [regsub -all -line -- $pattern $source $repl]
+        els::find_update
+        els::find_replace_all
+        lappend ok [expr {[$w get 1.0 "end - 1 char"] eq $expected}]
+    }
+    set ok
+} -result {1 1 1 1 1}
+
+test worker-find-7.3 {lookahead can inspect more than 2000 characters without degraded replacement} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    set tail "[string repeat a 3000]bar"
+    $w insert end "foo$tail"
+    set ::els::find_regex 1
+    # Tcl's ARE implementation deliberately caps counted-repeat bounds; use a
+    # literal long lookahead so the context (not an invalid {3000} bound) is the
+    # thing under test.
+    set ::els::find_q "foo(?=$tail)"
+    set ::els::find_r X
+    els::find_update ; els::find_replace_all
+    list [string range [$w get 1.0 "end - 1 char"] 0 3] \
+         [string length [$w get 1.0 "end - 1 char"]] $::els::find_count
+} -result {Xaaa 3004 {Replaced 1}}
+
+test worker-find-7.4 {replacement subspec expansion agrees exhaustively with native Tcl regsub} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    set source a12b
+    set pattern {(1)(2)(x)?}
+    set specs [list {<&>} {\0} {\1-\2-\3-\9} {\&} {\\} {\q} "tail\\" {\\1}]
+    # Unicode decimal digits are ordinary replacement characters, not Tcl's
+    # ASCII-only \0..\9 group syntax.
+    lappend specs "\\\u0661"
+    set ok {}
+    foreach sub $specs {
+        $w replace 1.0 "end - 1 char" $source
+        $w edit reset ; $w edit modified 0
+        set ::els::find_regex 1 ; set ::els::find_q $pattern ; set ::els::find_r $sub
+        set expected [regsub -all -line -- $pattern $source $sub]
+        els::find_update ; els::find_replace_all
+        lappend ok [expr {[$w get 1.0 "end - 1 char"] eq $expected}]
+    }
+    set ok
+} -result {1 1 1 1 1 1 1 1 1}
+
+test worker-find-7.5 {successful Replace All is exactly one undo unit and one redo unit} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    $w insert end "one one one" ; $w edit separator
+    set ::els::find_q one ; set ::els::find_r two
+    els::find_update ; els::find_replace_all
+    set changed [$w get 1.0 "end - 1 char"]
+    $w edit undo ; set undone [$w get 1.0 "end - 1 char"]
+    $w edit redo ; set redone [$w get 1.0 "end - 1 char"]
+    list $changed $undone $redone
+} -result {{two two two} {one one one} {two two two}}
+
+test worker-find-7.6 {snapshot round-trips NUL, BMP, astral, and multiline text at Text offsets} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    set source "A\0\u00e9\U0001f600\nZ"
+    $w insert end $source
+    set ::els::find_q "\U0001f600\n" ; set ::els::find_r "\u03a9\n"
+    els::find_update
+    set before [list $::els::find_total $::els::find_count]
+    els::find_replace_all
+    list $before [expr {[$w get 1.0 "end - 1 char"] eq "A\0\u00e9\u03a9\nZ"}]
+} -result {{1 {1 of 1}} 1}
+
+test worker-find-7.7 {snapshot cache is reused across query changes at the same doc epoch} \
+        -setup {find_reset} -body {
+    [els::T] insert end "foo bar"
+    set ::els::find_q foo ; els::find_update
+    set first [dict get $::els::find_snapshot path]
+    set epoch $::els::docEpoch($::els::active)
+    set ::els::find_q bar ; els::find_update
+    list [expr {$first eq [dict get $::els::find_snapshot path]}] \
+         [expr {$epoch == $::els::docEpoch($::els::active)}] $::els::find_count
+} -result {1 1 {1 of 1}}
+
+test worker-find-7.8 {docEpoch observes all content commands and ignores tags/marks/modified bookkeeping} \
+        -setup {find_reset} -body {
+    set w [els::T] ; set id $::els::active ; set e {}
+    lappend e $::els::docEpoch($id)
+    $w insert end abc ; lappend e $::els::docEpoch($id)
+    $w delete 1.2 1.3 ; lappend e $::els::docEpoch($id)
+    $w replace 1.0 1.1 X ; lappend e $::els::docEpoch($id)
+    $w edit undo ; lappend e $::els::docEpoch($id)
+    $w edit redo ; lappend e $::els::docEpoch($id)
+    $w tag add sel 1.0 1.1 ; $w mark set insert 1.1 ; $w edit modified 0
+    lappend e $::els::docEpoch($id)
+    list [lrange $e 0 3] \
+         [expr {[lindex $e 4] > [lindex $e 3]}] \
+         [expr {[lindex $e 5] > [lindex $e 4]}] \
+         [expr {[lindex $e 6] == [lindex $e 5]}]
+} -result {{0 1 2 3} 1 1 1}
+
+test worker-find-7.9 {lowered match/output limits fail closed without an edit or undo unit} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a a a" ; $w edit reset ; $w edit modified 0
+    set ::els::FIND_MAXINDEX 2
+    set ::els::find_q a ; set ::els::find_r b
+    els::find_update
+    set indexed [list $::els::find_total $::els::find_index_truncated $::els::find_count]
+    els::find_replace_all
+    set matchFail [list [$w get 1.0 "end - 1 char"] [$w edit modified] [catch {$w edit undo}]]
+    set ::els::FIND_MAXINDEX 1000000 ; set ::els::FIND_OUTPUT_MAX 3
+    els::find_update ; els::find_replace_all
+    list $indexed $matchFail [$w get 1.0 "end - 1 char"] [$w edit modified]
+} -result {{2 1 {1 of 2+}} {{a a a} 0 1} {a a a} 0}
+
+test worker-find-7.10 {a truncated global index refuses false wrap at both hard boundaries} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "a a a"
+    set ::els::FIND_MAXINDEX 2 ; set ::els::find_q a
+    els::find_update
+    els::find_highlight 1 ; els::find_step 1
+    set forward [list $::els::find_current $::els::find_count]
+    els::find_highlight 0 ; els::find_step -1
+    set backward [list $::els::find_current $::els::find_count]
+    list $forward $backward
+} -result {{1 {2 of 2+  (navigation limit)}} {0 {1 of 2+  (navigation limit)}}}
+
+test worker-find-7.11 {individually changing replacements that cancel globally are a true no-op} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end aaa ; $w edit reset ; $w edit modified 0
+    # A zero-width first match inserts "a"; progress then reaches the terminal
+    # "aa" match, which contracts to one "a".  Together with the untouched
+    # prefix, the aggregate staged output still equals the immutable source.
+    set ::els::find_regex 1 ; set ::els::find_q {(?=aaa)|aa$} ; set ::els::find_r a
+    els::find_update ; els::find_replace_all
+    list [$w get 1.0 "end - 1 char"] $::els::find_count \
+         [$w edit modified] [catch {$w edit undo}]
+} -result {aaa {Replaced 0} 0 1}
+
+test worker-find-7.12 {an identical Replace advances to a fresh search without an edit} \
+        -setup {find_reset} -body {
+    set w [els::T]
+    $w insert end "cat cat"
+    $w edit reset
+    $w edit modified 0
+    $w mark set insert 1.0
+    set ::els::find_q cat
+    set ::els::find_r cat
+    els::find_update
+    els::find_replace_one
+    list [$w get 1.0 "end - 1 char"] [$w edit modified] \
+        [catch {$w edit undo}] [$w index insert] $::els::find_current \
+        $::els::find_total $::els::find_count
+} -result {{cat cat} 0 1 1.4 1 2 {2 of 2}}
+
+# A deterministic child that accepts the watch-before-go handshake but never
+# publishes a result.  It drives heartbeat, crash, timeout, cancel, and stale
+# lifecycle tests without evaluating user regex in the UI interpreter.
+proc phasec_fake_worker {mode} {
+    set path [file join $::ELS_TMP phasec-fake-worker.tcl]
+    set f [open $path w]
+    puts $f {
+set mode [lindex $argv 0]
+set dir [lindex $argv 1]
+set until [expr {[clock milliseconds] + 5000}]
+while {![file exists [file join $dir go]] && [clock milliseconds] < $until} { after 10 }
+if {![file exists [file join $dir go]]} { exit 3 }
+if {$mode eq "crash"} { exit 9 }
+after 30000
+exit 0
+}
+    close $f
+    return [list [info nameofexecutable] $path $mode]
+}
+proc phasec_wait_until {script {limit 3000}} {
+    set until [expr {[clock milliseconds] + $limit}]
+    while {[clock milliseconds] < $until} {
+        update
+        if {[uplevel 1 $script]} { return 1 }
+        after 5
+    }
+    return 0
+}
+proc phasec_worker_wait_token {token {limit 7000}} {
+    set until [expr {[clock milliseconds] + $limit}]
+    while {[clock milliseconds] < $until} {
+        set status [els::win_worker_status $token]
+        if {[lindex $status 0] eq "exited"} { return $status }
+        after 20
+    }
+    error "worker did not self-exit"
+}
+
+proc phasec_make_junction {link target} {
+    set ps [auto_execok powershell]
+    if {$ps eq ""} { error "PowerShell is required for the Windows junction test" }
+    set ::env(ELS_TEST_LINK) [file nativename $link]
+    set ::env(ELS_TEST_TARGET) [file nativename $target]
+    exec {*}$ps -NoLogo -NoProfile -NonInteractive -Command {
+        New-Item -ItemType Junction -Path $env:ELS_TEST_LINK -Target $env:ELS_TEST_TARGET | Out-Null
+    }
+}
+proc phasec_remove_junction {link} {
+    set ps [auto_execok powershell]
+    if {$ps eq ""} { return }
+    set ::env(ELS_TEST_LINK) [file nativename $link]
+    catch {exec {*}$ps -NoLogo -NoProfile -NonInteractive -Command {
+        Remove-Item -LiteralPath $env:ELS_TEST_LINK -Force
+    }}
+}
+
+test worker-life-8.1 {a delayed worker leaves the UI heartbeat live and Cancel kills it cleanly} \
+        -setup {find_reset} -body {
+    set ::els::find_test_sync 0
+    set ::els::find_worker_command_override [phasec_fake_worker sleep]
+    [els::T] insert end "alpha"
+    set ::els::find_q alpha
+    set ::phasec_beat 0
+    proc ::phasec_tick {} { incr ::phasec_beat ; set ::phasec_after [after 10 ::phasec_tick] }
+    ::phasec_tick
+    els::find_request replace-all
+    set started [phasec_wait_until {expr {$::els::find_job ne ""}}]
+    after 150 {set ::phasec_done 1} ; vwait ::phasec_done
+    set button [.find.rr.all cget -text]
+    els::find_cancel user
+    set restoreScheduled [expr {$::els::find_after ne "" && $::els::find_count eq "Cancelled"}]
+    after cancel $::els::find_after ; set ::els::find_after ""
+    set reaped [phasec_wait_until {expr {![llength $::els::find_retired]}}]
+    after cancel $::phasec_after ; rename ::phasec_tick {}
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+    list $started [expr {$::phasec_beat > 5}] $button $restoreScheduled \
+         $reaped [[els::T] get 1.0 "end - 1 char"]
+} -cleanup {
+    catch {after cancel $::phasec_after}; catch {rename ::phasec_tick {}}
+    catch {els::find_cancel cleanup}
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+} -result {1 1 Cancel 1 1 alpha}
+
+test worker-life-8.2 {worker crash and timeout leave source, dirty state, and undo stack untouched} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end alpha ; $w edit reset ; $w edit modified 0
+    set ::els::find_q alpha ; set ::els::find_r beta
+    set ::els::find_worker_command_override [phasec_fake_worker crash]
+    els::find_update
+    set crash [list [$w get 1.0 "end - 1 char"] [$w edit modified] [catch {$w edit undo}]]
+    set ::els::find_worker_command_override [phasec_fake_worker sleep]
+    set ::els::FIND_SEARCH_MS 50
+    els::find_update
+    set timed [string match {*timed out*} $::els::find_count]
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+    list $crash $timed [$w get 1.0 "end - 1 char"] [$w edit modified]
+} -cleanup {
+    catch {els::find_cancel cleanup}
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+} -result {{alpha 0 1} 1 alpha 0}
+
+test worker-life-8.3 {edit during an idle-sliced snapshot invalidates it before worker launch} \
+        -setup {find_reset} -body {
+    set ::els::find_test_sync 0 ; set ::els::FIND_SLICE_CHARS 2
+    set w [els::T] ; $w insert end "abcdefgh"
+    set ::els::find_q cd
+    els::find_request search
+    after cancel $::els::find_snapshot_after ; set ::els::find_snapshot_after ""
+    els::find_snapshot_step
+    set partial [expr {$::els::find_snapshot_build ne ""}]
+    $w replace 1.0 1.1 Z
+    after cancel $::els::find_after ; set ::els::find_after ""
+    list $partial [expr {$::els::find_snapshot_build eq ""}] \
+         [expr {$::els::find_job eq ""}] [expr {$::els::find_snapshot eq ""}]
+} -result {1 1 1 1}
+
+test worker-life-8.4 {query change and tab close cancel applicable jobs without touching either document} \
+        -setup {find_reset} -body {
+    set ::els::find_test_sync 0
+    set ::els::find_worker_command_override [phasec_fake_worker sleep]
+    set w [els::T] ; $w insert end alpha ; $w edit modified 0
+    set ::els::find_q alpha ; els::find_request search
+    set first [phasec_wait_until {expr {$::els::find_job ne ""}}]
+    set g $::els::find_generation
+    set ::els::find_q beta ; els::find_request search
+    set superseded [expr {$::els::find_generation > $g}]
+    els::find_cancel cleanup
+    set reaped1 [phasec_wait_until {expr {![llength $::els::find_retired]}}]
+    set ::els::find_q alpha ; els::find_request search
+    set second [phasec_wait_until {expr {$::els::find_job ne ""}}]
+    els::close_doc $::els::active
+    set reaped2 [phasec_wait_until {expr {![llength $::els::find_retired]}}]
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+    list $first $superseded $reaped1 $second $reaped2 \
+         [expr {$::els::active ne ""}] [[els::T] get 1.0 "end - 1 char"]
+} -cleanup {
+    catch {els::find_cancel cleanup}
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+} -result {1 1 1 1 1 1 {}}
+
+test worker-life-8.5 {spawned but never authorized source worker self-exits without result or normal startup} \
+        -setup {find_reset} -body {
+    set seq [incr ::els::find_job_seq] ; set token [els::find_token]
+    set dir [file join [els::find_root] [els::find_job_dir_name $seq $token]]
+    file mkdir $dir
+    set cmd [concat [els::find_worker_command] [list $dir $token]]
+    set pid [lindex [exec {*}$cmd &] 0]
+    set watch [els::win_worker_watch $pid]
+    # Deliberately omit the tokenized `go` file: regex evaluation and normal
+    # editor startup are both forbidden before authorization.
+    set final [phasec_worker_wait_token $watch]
+    set files [glob -nocomplain -directory $dir *]
+    set result [file exists [file join $dir result.ready]]
+    els::find_cleanup_job [dict create dir $dir]
+    list [lindex $final 0] [lindex $final 1] [llength $files] $result
+} -cleanup {
+    if {[info exists watch]} { catch {els::win_worker_kill $watch} }
+    if {[info exists dir]} { catch {els::find_cleanup_job [dict create dir $dir]} }
+} -result {exited 3 0 0}
+
+test worker-life-8.6 {programmatic replacement changes cancel replacement work but preserve search results} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "alpha alpha"
+    set ::els::find_q alpha ; els::find_update
+    set searchDir [dict get $::els::find_result_job dir]
+    set ::els::find_r beta
+    set searchStayed [expr {$::els::find_result_job ne "" \
+        && [dict get $::els::find_result_job dir] eq $searchDir}]
+
+    set ::els::find_test_sync 0
+    set ::els::find_worker_command_override [phasec_fake_worker sleep]
+    els::find_request replace-all
+    set started [phasec_wait_until {expr {$::els::find_job ne ""}}]
+    set ::els::find_r gamma
+    set ::els::find_worker_command_override {}
+    set restored [phasec_wait_until {expr {$::els::find_result_job ne "" \
+        && $::els::find_total == 2 && ![llength $::els::find_retired]}} 7000]
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+    list $searchStayed $started $restored $::els::find_count [$w get 1.0 "end - 1 char"]
+} -cleanup {
+    catch {els::find_cancel cleanup}
+    catch {file delete -force [file join $::ELS_TMP phasec-fake-worker.tcl]}
+} -result {1 1 1 {1 of 2} {alpha alpha}}
+
+test worker-life-8.7 {textvariable traces run programmatic query and option changes} \
+        -setup {find_reset} -body {
+    [els::T] insert end "Alpha alpha"
+    set ::els::find_q alpha
+    set queried [phasec_wait_until {expr {$::els::find_total == 2}} 7000]
+    set ::els::find_case 1
+    set narrowed [phasec_wait_until {expr {$::els::find_total == 1}} 7000]
+    list $queried $narrowed $::els::find_count
+} -result {1 1 {1 of 1}}
+
+test worker-life-8.8 {worker roots and job directories reject Windows junction reparse points} \
+        -constraints powershellAvailable -setup {find_reset} -body {
+    set oldConfig $::els::config_path
+    set base [file join $::ELS_TMP phasec-root-[pid]]
+    set target [file join $base target]
+    file mkdir $target
+    set link [file join $base .els-find]
+    phasec_make_junction $link $target
+    set ::els::config_path [file join $base els.conf]
+    set rootRejected [expr {[els::find_root] eq ""}]
+    set ::els::config_path $oldConfig
+    phasec_remove_junction $link
+    file delete -force $base
+
+    set root [els::find_root]
+    set token [els::find_token] ; set seq [incr ::els::find_job_seq]
+    set jobLink [file join $root [els::find_job_dir_name $seq $token]]
+    set jobTarget [file join $::ELS_TMP phasec-job-target-[pid]]
+    file mkdir $jobTarget
+    raw_write [file join $jobTarget sentinel.txt] keep
+    phasec_make_junction $jobLink $jobTarget
+    els::find_cleanup_job [dict create dir $jobLink]
+    set jobRejected [file exists [file join $jobTarget sentinel.txt]]
+    phasec_remove_junction $jobLink
+    file delete -force $jobTarget
+    unset -nocomplain ::env(ELS_TEST_LINK) ::env(ELS_TEST_TARGET)
+    list $rootRejected $jobRejected
+} -cleanup {
+    if {[info exists oldConfig]} { set ::els::config_path $oldConfig }
+    if {[info exists link]} { catch {phasec_remove_junction $link} }
+    if {[info exists jobLink]} { catch {phasec_remove_junction $jobLink} }
+    if {[info exists base] && [file exists $base]} { catch {file delete -force $base} }
+    if {[info exists jobTarget] && [file exists $jobTarget]} { catch {file delete -force $jobTarget} }
+    unset -nocomplain ::env(ELS_TEST_LINK) ::env(ELS_TEST_TARGET)
+} -result {1 1}
+
+test worker-life-8.9 {pending, validation, and output cancellation all schedule search restoration} \
+        -setup {find_reset} -body {
+    [els::T] insert end alpha ; set ::els::find_q alpha
+
+    set ::els::find_pending [dict create kind replace-all]
+    set ::els::find_count "Replacing..."
+    els::find_cancel changed
+    set pending [list [expr {$::els::find_after ne ""}] $::els::find_count]
+    after cancel $::els::find_after ; set ::els::find_after ""
+
+    set root [els::find_root]
+    set token [els::find_token] ; set seq [incr ::els::find_job_seq]
+    set vdir [file join $root [els::find_job_dir_name $seq $token]] ; file mkdir $vdir
+    raw_write [file join $vdir matches.idx] ""
+    set vf [open [file join $vdir matches.idx] rb]
+    set vjob [dict create dir $vdir kind replace-all]
+    set ::els::find_validation [dict create job $vjob chan $vf]
+    set ::els::find_count "Replacing..."
+    els::find_cancel changed
+    set validation [list [expr {$::els::find_after ne ""}] $::els::find_count \
+        [catch {read $vf}] [file exists $vdir]]
+    after cancel $::els::find_after ; set ::els::find_after ""
+
+    set token [els::find_token] ; set seq [incr ::els::find_job_seq]
+    set odir [file join $root [els::find_job_dir_name $seq $token]] ; file mkdir $odir
+    raw_write [file join $odir replacement.utf8] x
+    set of [open [file join $odir replacement.utf8] rb]
+    set ojob [dict create dir $odir kind replace-all]
+    set ::els::find_output_read [dict create job $ojob chan $of]
+    set ::els::find_count "Replacing..."
+    els::find_cancel changed
+    set output [list [expr {$::els::find_after ne ""}] $::els::find_count \
+        [catch {read $of}] [file exists $odir]]
+    after cancel $::els::find_after ; set ::els::find_after ""
+    list $pending $validation $output
+} -cleanup {
+    catch {close $vf} ; catch {close $of}
+    catch {els::find_cancel cleanup}
+    if {[info exists vdir]} { catch {els::find_cleanup_job [dict create dir $vdir]} }
+    if {[info exists odir]} { catch {els::find_cleanup_job [dict create dir $odir]} }
+} -result {{1 Cancelled} {1 Cancelled 1 0} {1 Cancelled 1 0}}
+
+test worker-protocol-9.1 {duplicate control keys, wrong result token, and wrong index CRC fail closed} \
+        -setup {find_reset} -body {
+    set duplicate [catch {::elsworker::exact_dict {a 1 a 2} {a}}]
+    set w [els::T] ; $w insert end alpha ; $w edit reset ; $w edit modified 0
+    set ::els::find_q alpha ; els::find_update
+    set snap $::els::find_snapshot
+    set ::els::find_generation 50
+    set token [els::find_token]
+    set seq [incr ::els::find_job_seq]
+    set dir [file join [els::find_root] [els::find_job_dir_name $seq $token]]
+    file mkdir $dir
+    set job [dict create dir $dir token $token generation 50 doc $::els::active \
+        epoch $::els::docEpoch($::els::active) kind search signature [els::find_signature]]
+    set result [dict create version 1 token WRONG status ok kind search \
+        source_chars [dict get $snap chars] source_bytes [dict get $snap bytes] source_crc [dict get $snap crc] \
+        match_count 0 match_truncated 0 match_bytes 0 match_crc 0 changed_count 0 \
+        output_chars 0 output_bytes 0 output_crc 0 error {}]
+    els::find_write_control [file join $dir result.ready] $result
+    els::find_process_result $job 0
+    set wrongToken [string match {*invalid data*} $::els::find_count]
+
+    set token [els::find_token] ; set seq [incr ::els::find_job_seq]
+    set dir [file join [els::find_root] [els::find_job_dir_name $seq $token]] ; file mkdir $dir
+    set job [dict create dir $dir token $token generation 50 doc $::els::active \
+        epoch $::els::docEpoch($::els::active) kind search signature [els::find_signature]]
+    set rec [format "%020d %020d\n" 0 5]
+    raw_write [file join $dir matches.idx] $rec
+    set result [dict replace $result token $token match_count 1 match_bytes 42 match_crc 123]
+    els::find_write_control [file join $dir result.ready] $result
+    els::find_process_result $job 0
+    els::find_test_wait
+    set wrongCrc [string match {*invalid data*} $::els::find_count]
+    list $duplicate $wrongToken $wrongCrc [$w get 1.0 "end - 1 char"] [$w edit modified]
+} -result {1 1 1 alpha 0}
+
+test worker-protocol-9.2 {replace-one index must authenticate the exact hinted commit span} \
+        -setup {find_reset} -body {
+    set w [els::T] ; $w insert end alpha ; $w edit reset ; $w edit modified 0
+    set ::els::find_q alpha ; set ::els::find_r beta ; els::find_update
+    set snap $::els::find_snapshot
+    els::find_result_drop
+    set token [els::find_token] ; set seq [incr ::els::find_job_seq]
+    set dir [file join [els::find_root] [els::find_job_dir_name $seq $token]] ; file mkdir $dir
+    # Internally coherent, but it authenticates 1..5 while the parent will only
+    # ever commit the requested 0..5 hint.
+    set rec [format "%020d %020d\n" 1 5]
+    raw_write [file join $dir matches.idx] $rec
+    set out [encoding convertto -profile strict utf-8 beta]
+    raw_write [file join $dir replacement.utf8] $out
+    set job [dict create dir $dir token $token generation $::els::find_generation \
+        doc $::els::active epoch $::els::docEpoch($::els::active) kind replace-one \
+        signature [els::find_signature replace-one] hint_start 0 hint_end 5]
+    set result [dict create version 1 token $token status ok kind replace-one \
+        source_chars [dict get $snap chars] source_bytes [dict get $snap bytes] \
+        source_crc [dict get $snap crc] match_count 1 match_truncated 0 \
+        match_bytes 42 match_crc [zlib crc32 $rec] changed_count 1 \
+        output_chars 4 output_bytes [string length $out] output_crc [zlib crc32 $out] error {}]
+    els::find_write_control [file join $dir result.ready] $result
+    set ::els::find_count "Replacing..."
+    els::find_process_result $job 0
+    els::find_test_wait
+    set rejected [string match {*invalid data*} $::els::find_count]
+    after cancel $::els::find_after ; set ::els::find_after ""
+    list $rejected [$w get 1.0 "end - 1 char"] [$w edit modified] \
+         [catch {$w edit undo}] [expr {$::els::find_result_job eq ""}]
+} -cleanup {
+    after cancel $::els::find_after ; set ::els::find_after ""
+    if {[info exists dir]} { catch {els::find_cleanup_job [dict create dir $dir]} }
+} -result {1 alpha 0 1 1}
+
+test worker-protocol-9.3 {a late match-index self-check failure clears staged output} \
+        -setup {find_reset} -body {
+    set dir [file join $::ELS_TMP phasec-late-verify-[pid]]
+    file mkdir $dir
+    rename ::elsworker::record ::elsworker::record_real
+    # Simulate a short write detected only after replacement.utf8 was staged.
+    proc ::elsworker::record {f crcVar start end} {}
+    set source alpha
+    set raw [encoding convertto -profile strict utf-8 $source]
+    set request [dict create kind replace-all pattern alpha replacement beta \
+        nocase 0 regex_mode 0 adapt 0 match_limit 10 output_limit 1000 \
+        hint_start 0 hint_end 0 deadline_ms 5000 source_chars [string length $source] \
+        source_bytes [string length $raw] source_crc [zlib crc32 $raw]]
+    set result [::elsworker::run_job $dir 0123456789abcdef $request $source]
+    list [dict get $result status] [dict get $result changed_count] \
+        [dict get $result output_chars] [dict get $result output_bytes] \
+        [dict get $result output_crc] [file exists [file join $dir replacement.utf8]] \
+        [file size [file join $dir matches.idx]]
+} -cleanup {
+    catch {rename ::elsworker::record {}}
+    if {[llength [info commands ::elsworker::record_real]]} {
+        rename ::elsworker::record_real ::elsworker::record
+    }
+    if {[info exists dir]} { catch {file delete -force $dir} }
+} -result {error 0 0 0 0 0 0}

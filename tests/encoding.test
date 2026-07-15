@@ -516,7 +516,7 @@ test declossy-1.3 {reopen-with a mismatched encoding flags the tab; a clean reop
     set ::els::docRaw($id) "ok\xFFbad"                    ;# 0xFF invalid as UTF-8
     els::reopen_with utf-8 0
     set flagged [info exists ::els::docDecodeLossy($id)]
-    set marked  [string match "*(replaced)*" [els::tab_text $id]]
+    set marked  [string match "*�*" [els::tab_text $id]]
     els::reopen_with iso8859-1 0                          ;# accepts every byte -> not lossy
     set cleared [expr {![info exists ::els::docDecodeLossy($id)]}]
     list $flagged $marked $cleared
@@ -526,10 +526,47 @@ test declossy-1.4 {saving clears the decode-lossy marker (the chars become real 
     set p [els_tmpfile declossy2.txt "hi\n"]
     els::open $p ; set id $::els::active
     set ::els::docDecodeLossy($id) 1                      ;# pretend a lossy decode on open
-    set before [string match "*(replaced)*" [els::tab_text $id]]
+    set before [string match "*�*" [els::tab_text $id]]
     [els::W $id] insert end "x" ; els::save
     list $before [info exists ::els::docDecodeLossy($id)]
 } -result {1 0}
+
+test declossy-1.4a {clean Save is byte-exact no-op for a truncated UTF-16 decode} -setup {els_reset} -body {
+    set original "\xFF\xFE\x41"                 ;# BOM + one incomplete UTF-16 code unit
+    set p [write_raw declossy_truncated.txt $original]
+    els::open $p ; set id $::els::active
+    set marked [info exists ::els::docDecodeLossy($id)]
+    set ::els_test_mbcount 0
+    set rc [els::save $id]
+    list $marked $rc $::els_test_mbcount [els::doc_dirty $id] \
+         [expr {[raw_read $p] eq $original}]
+} -result {1 1 0 0 1}
+
+test declossy-1.4b {dirty lossy-decoded Save requires consent and cancellation preserves source bytes} -setup {els_reset} -body {
+    set original "\xFF\xFE\x41"
+    set p [write_raw declossy_decision.txt $original]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "edited"
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer no
+    set declined [els::save $id]
+    set kept [expr {[raw_read $p] eq $original && [els::doc_dirty $id] && \
+                    [info exists ::els::docDecodeLossy($id)]}]
+    set ::els_test_mbanswer yes
+    set accepted [els::save $id]
+    list $declined $kept $accepted $::els_test_mbcount \
+         [els::doc_dirty $id] [info exists ::els::docDecodeLossy($id)]
+} -result {0 1 1 2 0 0}
+
+test declossy-1.4c {quiet Save of a dirty lossy-decoded document pauses without prompting} -setup {els_reset} -body {
+    set original "\xFF\xFE\x41"
+    set p [write_raw declossy_quiet.txt $original]
+    els::open $p ; set id $::els::active
+    [els::W $id] insert end "edited"
+    set ::els_test_mbcount 0
+    set rc [els::save $id 1]
+    list $rc $::els_test_mbcount [info exists ::els::docLossyPause($id)] \
+         [els::doc_dirty $id] [expr {[raw_read $p] eq $original}]
+} -result {0 0 1 1 1}
 
 test declossy-1.5 {reload_from_disk refreshes the decode-lossy marker (no reload false-negative)} -setup {els_reset} -body {
     set p [els_tmpfile declossy3.txt "clean\n"]
@@ -542,7 +579,7 @@ test declossy-1.5 {reload_from_disk refreshes the decode-lossy marker (no reload
     proc els::detect_encoding {raw} { return {utf-8 0} }
     els::reload_from_disk $id
     set flag [info exists ::els::docDecodeLossy($id)]
-    set mark [string match "*(replaced)*" [els::tab_text $id]]
+    set mark [string match "*�*" [els::tab_text $id]]
     raw_write $p "all clean now" ; els::reload_from_disk $id     ;# clean -> marker clears
     set cleared [expr {![info exists ::els::docDecodeLossy($id)]}]
     list $before $flag $mark $cleared

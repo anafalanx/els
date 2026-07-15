@@ -2,16 +2,16 @@
 
 The canonical instructions for this repo live in `AGENTS.md`; read it first.
 
-`els` is hosted under `C:\z\_els`. Use z as the public front door:
+`els` is hosted under `C:\dev\_els`. Use z as the public front door:
 run `z test`, `z build`, `z check`, or `z tasks` from `_els`, or
 `z in els <task>` from the z workspace root. els is a full z project: it builds
-against z's shared runtime payloads under `<z>/r` (Tcl/Tk 9, the UCRT64
+against z's shared runtime payloads under `<z>/.z/r` (Tcl/Tk 9, the UCRT64
 gcc, twapi) and carries no private `.toolchain`. `z tasks env` prints the
 resolved payload roots.
 
 Most important: this repo uses the full Tcl 9 and Tk 9 manual that ships in
 z's Tcl/Tk payload, at `<TCLTK>/manual/INDEX.md` — where `<TCLTK>` is the
-path `z tasks env` reports (currently `C:\z\r\tcltk\9.0.3`). It is the
+path `z tasks env` reports (currently `C:\dev\.z\r\tcltk\9.0.3`). It is the
 authoritative Tcl/Tk reference for this codebase. Before writing or changing
 Tcl/Tk code, open the manual pages relevant to your change. Prefer it over
 training-data recall, which may be stale or describe Tcl 8.x.

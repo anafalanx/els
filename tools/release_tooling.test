@@ -1,0 +1,857 @@
+#!/usr/bin/env tclsh
+# Focused release-set tests.  The public invocation runs the suite in a child and
+# requires a private completion sentinel, so an accidental early `exit 0` can
+# never make release-check accept a partially evaluated tooling suite.
+
+set script [file normalize [info script]]
+set root [file dirname [file dirname $script]]
+if {[lindex $argv 0] ne "--child"} {
+    if {[llength $argv]} { puts stderr "usage: release_tooling.test"; exit 2 }
+    file mkdir [file join $root build]
+    set stage [file tempdir [file join $root build _release-tooling-tests-]]
+    set sentinel [file join $stage completed.txt]
+    set token "[pid]-[clock microseconds]-[clock clicks]"
+    set rc [catch {
+        exec [info nameofexecutable] $script --child $sentinel $token >@ stdout 2>@ stderr
+    } err opts]
+    if {$rc} {
+        catch {file delete -force -- $stage}
+        puts stderr "release tooling child failed: $err"
+        exit 1
+    }
+    set expected "els-release-tooling-complete-v1\n$token\n"
+    set actual ""
+    if {[file isfile $sentinel]} {
+        set fh [open $sentinel r]
+        try { fconfigure $fh -translation binary; set actual [read $fh] } finally { close $fh }
+    }
+    set cleanupRc [catch {file delete -force -- $stage} cleanupErr]
+    if {$actual ne $expected} {
+        puts stderr "release tooling child returned without its exact completion sentinel"
+        exit 1
+    }
+    if {$cleanupRc} {
+        puts stderr "release tooling child stage cleanup failed: $cleanupErr"
+        exit 1
+    }
+    puts "release tooling child completion sentinel verified"
+    exit 0
+}
+if {[llength $argv] != 3 || ![regexp {^[0-9]+-[0-9]+-[0-9]+$} [lindex $argv 2]]} {
+    puts stderr "invalid private release tooling child invocation"
+    exit 2
+}
+set sentinel [file normalize [lindex $argv 1]]
+set sentinelToken [lindex $argv 2]
+if {[file exists $sentinel]} { puts stderr "release tooling sentinel already exists"; exit 1 }
+set argv {}
+
+package require tcltest 2.5
+set ::release_tooling_seen_tests {}
+set ::release_tooling_expected_tests {
+    promotion-1.1 promotion-1.2 promotion-1.3 promotion-1.4 promotion-1.5
+    promotion-1.6 promotion-1.7 promotion-1.8 promotion-1.9 promotion-1.10 promotion-1.11
+    lock-1.1 lock-1.2 lock-1.3 lock-1.4
+    paths-1.1 paths-1.2 paths-1.3 paths-1.4 environment-1.1 environment-1.2
+    signing-copy-1.1 signing-copy-1.2 arguments-1.1 manifest-1.1 checksum-1.1
+    notices-1.1 provenance-1.1 provenance-1.2 provenance-1.3 provenance-1.4
+    provenance-1.5 signer-1.1 signer-1.2 run-1.1 probe-1.1
+    native-test-1.1 native-test-1.2 capture-1.1
+}
+rename ::tcltest::test ::tcltest::_release_tooling_test
+proc ::tcltest::test {name description args} {
+    lappend ::release_tooling_seen_tests $name
+    uplevel 1 [list ::tcltest::_release_tooling_test $name $description {*}$args]
+}
+namespace import ::tcltest::test
+
+source [file join $root tools tasks.tcl]
+set tmp [file join $root build "_release_tooling_test-[pid]-[clock clicks]"]
+
+proc write_test_file {path text} {
+    file mkdir [file dirname $path]
+    set fh [open $path {WRONLY CREAT TRUNC}]
+    try {
+        fconfigure $fh -translation binary
+        puts -nonewline $fh $text
+    } finally {
+        close $fh
+    }
+}
+proc read_test_file {path} {
+    set fh [open $path r]
+    try {
+        fconfigure $fh -translation binary
+        return [read $fh]
+    } finally {
+        close $fh
+    }
+}
+proc make_candidate {path prefix} {
+    write_test_file $path "$prefix-executable"
+    set hash [sha256_file $path]
+    set values [dict create \
+        artifact_file [file tail $path] \
+        artifact_bytes [file size $path] \
+        artifact_sha256 $hash]
+    write_manifest "$path.provenance.txt" $values
+    write_text_atomic "$path.sha256" "$hash *[file tail $path]\n"
+}
+proc reset_release_tmp {} {
+    file delete -force $::tmp
+    file mkdir $::tmp
+}
+proc release_litter {dir} {
+    set out {}
+    foreach path [glob -nocomplain -directory $dir *] {
+        if {[string match *.new-* [file tail $path]] ||
+            [string match *.promotion-* [file tail $path]] ||
+            [string match *.promotion-journal [file tail $path]]} {
+            lappend out $path
+        }
+        if {[file isdirectory $path]} { lappend out {*}[release_litter $path] }
+    }
+    return $out
+}
+
+test run-1.1 {source launch rebuilds native worker support only when missing or stale} -setup {
+    reset_release_tmp
+    set dll [file join $::tmp winfs.dll]
+    set source [file join $::tmp winfs.c]
+    set logic [file join $::tmp tasks.tcl]
+    write_test_file $source source
+    write_test_file $logic logic
+    file mtime $source 1000 ; file mtime $logic 1000
+} -body {
+    set missing [run_native_support_stale $dll [list $source $logic]]
+    write_test_file $dll dll ; file mtime $dll 2000
+    set current [run_native_support_stale $dll [list $source $logic]]
+    file mtime $source 3000
+    set staleSource [run_native_support_stale $dll [list $source $logic]]
+    file mtime $source 1000 ; file mtime $logic 3000
+    set staleLogic [run_native_support_stale $dll [list $source $logic]]
+    list $missing $current $staleSource $staleLogic
+} -cleanup {
+    reset_release_tmp
+} -result {1 0 1 1}
+
+test probe-1.1 {packaged probe checks native worker support before it streams} -setup {
+    set ::probe_order {}
+    rename ensure_native_support ensure_native_support_real
+    proc ensure_native_support {} { lappend ::probe_order support }
+    rename stream stream_real
+    proc stream args { lappend ::probe_order stream }
+} -body {
+    task_probe-exe [file join $::tmp candidate.exe]
+    set ::probe_order
+} -cleanup {
+    catch {rename ensure_native_support {}}
+    if {[llength [info commands ensure_native_support_real]]} {
+        rename ensure_native_support_real ensure_native_support
+    }
+    catch {rename stream {}}
+    if {[llength [info commands stream_real]]} { rename stream_real stream }
+    unset -nocomplain ::probe_order
+} -result {support stream}
+
+test native-test-1.1 {ordinary tests detect missing and stale native test support} -setup {
+    reset_release_tmp
+    set buildDir [file join $::tmp build]
+    set sourceDir [file join $::tmp src]
+    set logic [file join $::tmp tasks.tcl]
+    file mkdir $buildDir $sourceDir
+    write_test_file $logic logic
+    file mtime $logic 1000
+    foreach name {elsx icudet winfs} {
+        write_test_file [file join $sourceDir $name.c] $name
+        file mtime [file join $sourceDir $name.c] 1000
+    }
+} -body {
+    set missing [test_native_support_stale $buildDir $sourceDir $logic]
+    foreach leaf {elsx.dll icudet.dll winfs.dll pkgIndex.tcl} {
+        write_test_file [file join $buildDir $leaf] $leaf
+        file mtime [file join $buildDir $leaf] 2000
+    }
+    set current [test_native_support_stale $buildDir $sourceDir $logic]
+    file mtime [file join $sourceDir icudet.c] 3000
+    set staleSource [test_native_support_stale $buildDir $sourceDir $logic]
+    file mtime [file join $sourceDir icudet.c] 1000
+    file mtime $logic 3000
+    set staleLogic [test_native_support_stale $buildDir $sourceDir $logic]
+    list $missing $current $staleSource $staleLogic
+} -cleanup {
+    reset_release_tmp
+} -result {1 0 1 1}
+
+test native-test-1.2 {ordinary test dispatch refreshes native support before streaming} -setup {
+    set ::native_test_order {}
+    rename ensure_test_native_support ensure_test_native_support_real
+    proc ensure_test_native_support {} { lappend ::native_test_order support }
+    rename stream stream_real
+    proc stream args { lappend ::native_test_order stream }
+} -body {
+    task_test --fast
+    set ::native_test_order
+} -cleanup {
+    catch {rename ensure_test_native_support {}}
+    if {[llength [info commands ensure_test_native_support_real]]} {
+        rename ensure_test_native_support_real ensure_test_native_support
+    }
+    catch {rename stream {}}
+    if {[llength [info commands stream_real]]} { rename stream_real stream }
+    unset -nocomplain ::native_test_order
+} -result {support stream}
+
+test capture-1.1 {screenshot tasks detect stale cap.dll and refresh before streaming} -setup {
+    reset_release_tmp
+    set cap [file join $::tmp cap.dll]
+    set source [file join $::tmp cap.c]
+    set logic [file join $::tmp tasks.tcl]
+    write_test_file $source source
+    write_test_file $logic logic
+    file mtime $source 1000
+    file mtime $logic 1000
+    set ::capture_order {}
+    rename ensure_capture_support ensure_capture_support_real
+    proc ensure_capture_support {} { lappend ::capture_order support }
+    rename stream stream_real
+    proc stream args { lappend ::capture_order stream }
+} -body {
+    set missing [capture_support_stale $cap [list $source $logic]]
+    write_test_file $cap dll
+    file mtime $cap 2000
+    set current [capture_support_stale $cap [list $source $logic]]
+    file mtime $source 3000
+    set stale [capture_support_stale $cap [list $source $logic]]
+    task_shot [file join $::tmp shot.png]
+    task_readme-shots
+    task_shot --selftest
+    list $missing $current $stale $::capture_order
+} -cleanup {
+    catch {rename ensure_capture_support {}}
+    if {[llength [info commands ensure_capture_support_real]]} {
+        rename ensure_capture_support_real ensure_capture_support
+    }
+    catch {rename stream {}}
+    if {[llength [info commands stream_real]]} { rename stream_real stream }
+    unset -nocomplain ::capture_order
+    reset_release_tmp
+} -result {1 0 1 {support stream support stream support stream}}
+
+test promotion-1.1 {a complete candidate publishes both sidecars and the executable} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+} -body {
+    promote_release_set $candidate $output
+    list [read_test_file $output] \
+        [expr {![catch {verify_release_set_basic $output}]}] \
+        [files_match $candidate $output]
+} -cleanup {
+    reset_release_tmp
+} -result {new-executable 1 1}
+
+test promotion-1.2 {all sidecars are staged and published before the executable name} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate ordered
+    set ::promotion_renames {}
+    rename ::file ::release_real_file
+    proc ::file {subcommand args} {
+        if {$subcommand eq "rename"} { lappend ::promotion_renames [lindex $args end] }
+        return [uplevel 1 [list ::release_real_file $subcommand {*}$args]]
+    }
+} -body {
+    try {
+        promote_release_set $candidate $output
+    } finally {
+        rename ::file {}
+        rename ::release_real_file ::file
+    }
+    set exact [list [file tail "$output.sha256"] \
+        [file tail "$output.provenance.txt"] [file tail $output]]
+    set published {}
+    foreach path $::promotion_renames {
+        set tail [file tail $path]
+        if {$tail in $exact} { lappend published $tail }
+    }
+    set published
+} -cleanup {
+    if {[llength [info commands ::release_real_file]]} {
+        catch {rename ::file {}}
+        rename ::release_real_file ::file
+    }
+    reset_release_tmp
+} -result {els.exe.sha256 els.exe.provenance.txt els.exe}
+
+test promotion-1.3 {a locked final executable rolls visible sidecars back exactly} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    make_candidate $output old
+    set ::promotion_fail_target [file normalize $output]
+    set ::promotion_failed_once 0
+    rename ::file ::release_real_file
+    proc ::file {subcommand args} {
+        if {$subcommand eq "rename" && !$::promotion_failed_once &&
+            [::release_real_file normalize [lindex $args end]] eq $::promotion_fail_target} {
+            set ::promotion_failed_once 1
+            error "simulated locked executable"
+        }
+        return [uplevel 1 [list ::release_real_file $subcommand {*}$args]]
+    }
+} -body {
+    try {
+        set rc [catch {promote_release_set $candidate $output} err]
+    } finally {
+        rename ::file {}
+        rename ::release_real_file ::file
+    }
+    set litter [release_litter $::tmp]
+    list $rc [string match {*promotion or verification failed*} $err] \
+        [read_test_file $output] \
+        [expr {![catch {verify_release_set_basic $output}]}] [llength $litter]
+} -cleanup {
+    if {[llength [info commands ::release_real_file]]} {
+        catch {rename ::file {}}
+        rename ::release_real_file ::file
+    }
+    reset_release_tmp
+} -result {1 1 old-executable 1 0}
+
+test promotion-1.4 {an incomplete candidate changes no visible destination} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    write_test_file $candidate incomplete
+    make_candidate $output old
+} -body {
+    set rc [catch {promote_release_set $candidate $output} err]
+    list $rc [string match {*release provenance*} $err] \
+        [read_test_file $output] \
+        [expr {![catch {verify_release_set_basic $output}]}]
+} -cleanup {
+    file delete -force $::tmp
+} -result {1 1 old-executable 1}
+
+test promotion-1.5 {a directory at a destination is rejected without touching its contents} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    make_candidate $output old
+    file delete -force "$output.sha256"
+    file mkdir "$output.sha256"
+    write_test_file [file join "$output.sha256" sentinel.txt] keep
+} -body {
+    set rc [catch {promote_release_set $candidate $output} err]
+    list $rc [string match {*absent or a regular file*} $err] \
+        [read_test_file [file join "$output.sha256" sentinel.txt]] \
+        [read_test_file $output]
+} -cleanup {
+    file delete -force $::tmp
+} -result {1 1 keep old-executable}
+
+test promotion-1.6 {rollback restores an old member even if a failed rename removed it} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    make_candidate $output old
+    set ::promotion_fail_target [file normalize $output]
+    set ::promotion_failed_once 0
+    rename ::file ::release_real_file
+    proc ::file {subcommand args} {
+        if {$subcommand eq "rename" && !$::promotion_failed_once &&
+            [::release_real_file normalize [lindex $args end]] eq $::promotion_fail_target} {
+            set ::promotion_failed_once 1
+            ::release_real_file delete -- [lindex $args end]
+            error "simulated replace that removed its destination before failing"
+        }
+        return [uplevel 1 [list ::release_real_file $subcommand {*}$args]]
+    }
+} -body {
+    try {
+        set rc [catch {promote_release_set $candidate $output} err]
+    } finally {
+        rename ::file {}
+        rename ::release_real_file ::file
+    }
+    list $rc [read_test_file $output] \
+        [expr {![catch {verify_release_set_basic $output}]}] [llength [release_litter $::tmp]]
+} -cleanup {
+    if {[llength [info commands ::release_real_file]]} {
+        catch {rename ::file {}}
+        rename ::release_real_file ::file
+    }
+    reset_release_tmp
+} -result {1 old-executable 1 0}
+
+test promotion-1.7 {candidate and destination basenames must match before publication} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els-unsigned.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+} -body {
+    set rc [catch {promote_release_set $candidate $output} err]
+    list $rc [string match {*basenames must match*} $err] [path_type $output]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 missing}
+
+proc prepare_interrupted_promotion {candidate output publishCount keepPointer} {
+    set output [file normalize $output]
+    set token "[pid]-[clock microseconds]-[clock clicks]"
+    set stage [unique_stage_directory [file dirname $output] ".[file tail $output].promotion-"]
+    file mkdir [file join $stage new]
+    file mkdir [file join $stage old]
+    set oldFlags {}
+    foreach suffix [release_member_suffixes] {
+        set label [release_member_label $suffix]
+        file copy -- "$candidate$suffix" [file join $stage new "[file tail $output]$suffix"]
+        set existed [expr {[path_type "$output$suffix"] eq "file"}]
+        dict set oldFlags $label $existed
+        if {$existed} {
+            file copy -- "$output$suffix" [file join $stage old "[file tail $output]$suffix"]
+        }
+    }
+    set values [promotion_journal_values $output $stage $token $oldFlags]
+    write_manifest [file join $stage journal.txt] $values
+    if {$keepPointer} { write_manifest [promotion_journal_path $output] $values }
+    set n 0
+    foreach suffix [release_member_suffixes] {
+        if {$n >= $publishCount} break
+        file copy -force -- [file join $stage new "[file tail $output]$suffix"] "$output$suffix"
+        incr n
+    }
+    return $stage
+}
+
+test promotion-1.8 {an on-disk journal rolls a crash-partial publication back on the next run} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    make_candidate $output old
+    set stage [prepare_interrupted_promotion $candidate $output 2 1]
+    set interrupted [read_manifest [promotion_journal_path $output]]
+    write_test_file "$output.new-[dict get $interrupted token]" partial-copy
+} -body {
+    recover_release_promotion $output
+    list [read_test_file $output] [expr {![catch {verify_release_set_basic $output}]}] \
+        [path_type $stage] [path_type [promotion_journal_path $output]] [llength [release_litter $::tmp]]
+} -cleanup {
+    reset_release_tmp
+} -result {old-executable 1 missing missing 0}
+
+test promotion-1.9 {an orphan stage after commit is recognized from exact new hashes and removed} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    make_candidate $output old
+    set stage [prepare_interrupted_promotion $candidate $output 3 0]
+} -body {
+    recover_release_promotion $output
+    list [read_test_file $output] [expr {![catch {verify_release_set_basic $output}]}] \
+        [path_type $stage] [llength [release_litter $::tmp]]
+} -cleanup {
+    reset_release_tmp
+} -result {new-executable 1 missing 0}
+
+test promotion-1.10 {an extra staged member is rejected before any destination change} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    write_test_file [file join [file dirname $candidate] unexpected.txt] surprise
+} -body {
+    set rc [catch {promote_release_set $candidate $output} err]
+    list $rc [string match {*exact three-file release set*} $err] [path_type $output]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 missing}
+
+test promotion-1.11 {an atomic journal rename interrupted by a crash is recovered fail-closed} -setup {
+    reset_release_tmp
+    set candidate [file join $::tmp candidate els.exe]
+    set output [file join $::tmp output els.exe]
+    make_candidate $candidate new
+    make_candidate $output old
+    set stage [prepare_interrupted_promotion $candidate $output 1 1]
+    set journal [promotion_journal_path $output]
+    file rename -- $journal "$journal.new-999"
+} -body {
+    recover_release_promotion $output
+    list [read_test_file $output] [expr {![catch {verify_release_set_basic $output}]}] \
+        [path_type $stage] [llength [release_litter $::tmp]]
+} -cleanup {
+    reset_release_tmp
+} -result {old-executable 1 missing 0}
+
+test lock-1.1 {exclusive tooling lock reports its owner and releases cleanly} -setup {
+    reset_release_tmp
+    set lock [file join $::tmp tooling.lock]
+    set ::tool_lock_path ""; set ::tool_lock_token ""
+} -body {
+    acquire_tool_lock release-test $lock
+    set rc [catch {acquire_tool_lock contender $lock} err]
+    set hasOwner [expr {[string match {*already holds*} $err] || [string match {*another els*} $err]}]
+    release_tool_lock
+    list $rc $hasOwner [path_type $lock]
+} -cleanup {
+    if {$::tool_lock_channel ne ""} { catch {close $::tool_lock_channel} }
+    set ::tool_lock_path ""; set ::tool_lock_token ""
+    set ::tool_lock_channel ""
+    catch {file delete -force $lock}
+    reset_release_tmp
+} -result {1 1 missing}
+
+test lock-1.2 {release never deletes a replacement lock with another token} -setup {
+    reset_release_tmp
+    set lock [file join $::tmp tooling.lock]
+    set ::tool_lock_path ""; set ::tool_lock_token ""
+} -body {
+    acquire_tool_lock release-test $lock
+    # Emulate the narrow interval after release_tool_lock closes its held handle
+    # but before it removes the visible name.  Windows correctly forbids replacing
+    # the still-open file itself.
+    close $::tool_lock_channel
+    file delete -- $lock
+    write_test_file $lock {token replacement task other pid 999 started_utc never}
+    release_tool_lock
+    list [path_type $lock] [dict get [string trim [read_test_file $lock]] token]
+} -cleanup {
+    if {$::tool_lock_channel ne ""} { catch {close $::tool_lock_channel} }
+    set ::tool_lock_path ""; set ::tool_lock_token ""
+    set ::tool_lock_channel ""
+    catch {file delete -force $lock}
+    reset_release_tmp
+} -result {file replacement}
+
+test lock-1.3 {a stale lock is fail-closed and requires manual cleanup} -setup {
+    reset_release_tmp
+    set lock [file join $::tmp tooling.lock]
+    set ::tool_lock_path ""; set ::tool_lock_token ""
+    write_test_file $lock {token stale task build pid 123 started_utc old}
+} -body {
+    set rc [catch {acquire_tool_lock contender $lock} err]
+    list $rc [string match {*delete the lock manually*} $err] [path_type $lock]
+} -cleanup {
+    if {$::tool_lock_channel ne ""} { catch {close $::tool_lock_channel} }
+    set ::tool_lock_path ""; set ::tool_lock_token ""
+    set ::tool_lock_channel ""
+    catch {file delete -force $lock}
+    reset_release_tmp
+} -result {1 1 file}
+
+test lock-1.4 {a directory planted at the lock name is rejected without deleting it} -setup {
+    reset_release_tmp
+    set lock [file join $::tmp tooling.lock]
+    file mkdir $lock
+    write_test_file [file join $lock sentinel.txt] keep
+} -body {
+    set rc [catch {acquire_tool_lock contender $lock} err]
+    list $rc [string match {*absent or a regular file*} $err] \
+        [read_test_file [file join $lock sentinel.txt]]
+} -cleanup {
+    set ::tool_lock_path ""; set ::tool_lock_token ""; set ::tool_lock_channel ""
+    reset_release_tmp
+} -result {1 1 keep}
+
+test paths-1.1 {build and release commands reject source-tree output paths immediately} -body {
+    list \
+        [catch {validate_build_output [file join $::root els.tcl]} buildErr] \
+        [expr {[string match {*confined to*} $buildErr] || [string match {*must end in .exe*} $buildErr]}] \
+        [catch {task_release-check [file join $::root els.tcl]} releaseErr] \
+        [string match {*unknown release-check option*} $releaseErr]
+} -result {1 1 1 1}
+
+test paths-1.2 {the package helper independently rejects a source-file output} -body {
+    set before [sha256_file [P els.tcl]]
+    lassign [run_capture [tclshs] [P tools package.tcl] [P els.tcl]] rc out
+    list $rc [string match {*package output must remain below*} $out] \
+        [expr {$before eq [sha256_file [P els.tcl]]}]
+} -result {1 1 1}
+
+test paths-1.3 {the persistent release-check directory rejects unexpected members} -setup {
+    reset_release_tmp
+    set dir [file join $::tmp release-check]
+    file mkdir $dir
+    write_test_file [file join $dir unexpected.txt] keep
+} -body {
+    set rc [catch {prepare_exact_release_directory $dir "release-check directory"} err]
+    list $rc [string match {*unexpected member*} $err] \
+        [read_test_file [file join $dir unexpected.txt]]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 keep}
+
+test paths-1.4 {Git provenance requests relative paths and confines them to the release root} -body {
+    list \
+        [same_path [normalize_relative_git_path ./] $::ROOT] \
+        [same_path [normalize_relative_git_path .git/index] [P .git index]] \
+        [same_path [normalize_relative_git_path \
+            [git_capture rev-parse --path-format=relative --show-toplevel]] $::ROOT] \
+        [catch {normalize_relative_git_path /c/dev/_els} absoluteErr] \
+        [string match {*non-relative*} $absoluteErr] \
+        [catch {normalize_relative_git_path ../outside} escapeErr] \
+        [string match {*escaped*} $escapeErr] \
+        [catch {normalize_relative_git_path ""} emptyErr] \
+        [string match {*empty or invalid*} $emptyErr]
+} -result {1 1 1 1 1 1 1 1 1}
+
+test environment-1.1 {release environment rejects Git and compiler override families} -setup {
+    set hadC [info exists ::env(CFLAGS)]; if {$hadC} { set oldC $::env(CFLAGS) }
+    set hadG [info exists ::env(GIT_CONFIG_KEY_7)]; if {$hadG} { set oldG $::env(GIT_CONFIG_KEY_7) }
+    set ::env(CFLAGS) -fplugin=untrusted
+    set ::env(GIT_CONFIG_KEY_7) core.fsmonitor
+} -body {
+    set rc [catch {assert_release_environment} err]
+    list $rc [string match {*CFLAGS*} $err] [string match {*GIT_CONFIG_KEY_7*} $err]
+} -cleanup {
+    unset ::env(CFLAGS); if {$hadC} { set ::env(CFLAGS) $oldC }
+    unset ::env(GIT_CONFIG_KEY_7); if {$hadG} { set ::env(GIT_CONFIG_KEY_7) $oldG }
+} -result {1 1 1}
+
+test environment-1.2 {release payload roots are fixed to z's configured runtime} -body {
+    set valid [expr {![catch {assert_trusted_release_payloads}]}]
+    set saved $::TC
+    set ::TC [file join $::tmp substituted-tcl]
+    set changed [catch {assert_trusted_release_payloads} err]
+    set ::TC $saved
+    list $valid $changed [string match {*fixed*} $err]
+} -cleanup {
+    if {[info exists saved]} { set ::TC $saved }
+} -result {1 1 1}
+
+test signing-copy-1.1 {the signing copy is checked against the verified input hash and byte count} -setup {
+    reset_release_tmp
+    set input [file join $::tmp input.exe]
+    set candidate [file join $::tmp stage candidate.exe]
+    file mkdir [file dirname $candidate]
+    write_test_file $input exact-bytes
+    set meta [dict create artifact_bytes [file size $input] artifact_sha256 [sha256_file $input]]
+} -body {
+    copy_verified_sign_input $input $candidate $meta
+    list [files_match $input $candidate] \
+        [expr {[sha256_file $candidate] eq [dict get $meta artifact_sha256]}]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1}
+
+test signing-copy-1.2 {a copied signing candidate with a mismatched verified hash is removed} -setup {
+    reset_release_tmp
+    set input [file join $::tmp input.exe]
+    set candidate [file join $::tmp stage candidate.exe]
+    file mkdir [file dirname $candidate]
+    write_test_file $input exact-bytes
+    set meta [dict create artifact_bytes [file size $input] artifact_sha256 [string repeat 0 64]]
+} -body {
+    set rc [catch {copy_verified_sign_input $input $candidate $meta} err]
+    list $rc [string match {*does not exactly match*} $err] [path_type $candidate]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 missing}
+
+test arguments-1.1 {toolcheck rejects unknown options with a usage error} -body {
+    lassign [run_capture [tclsh] [P tools toolcheck.tcl] --unknown] rc out
+    list $rc [string match {*usage: z check*} $out]
+} -result {2 1}
+
+test manifest-1.1 {duplicate provenance keys are rejected rather than last-one-wins} -setup {
+    reset_release_tmp
+    set manifest [file join $::tmp duplicate.provenance.txt]
+    write_test_file $manifest "artifact_file\ta.exe\nartifact_file\tb.exe\n"
+} -body {
+    set rc [catch {read_manifest $manifest} err]
+    list $rc [string match {*duplicate release metadata key*} $err]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1}
+
+test checksum-1.1 {checksum parsing requires exactly one line and the actual basename} -setup {
+    reset_release_tmp
+    set checksum [file join $::tmp artifact.sha256]
+    set hash [string repeat a 64]
+} -body {
+    write_test_file $checksum "$hash *wrong.exe\n"
+    set wrong [catch {read_checksum $checksum artifact.exe} wrongErr]
+    write_test_file $checksum "$hash *artifact.exe\nextra\n"
+    set multi [catch {read_checksum $checksum artifact.exe} multiErr]
+    list $wrong [string match {*expected 'artifact.exe'*} $wrongErr] \
+        $multi [string match {*malformed SHA-256*} $multiErr]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 1 1}
+
+test notices-1.1 {canonical notices contain every exact statically-linked dependency notice} -body {
+    set notice [::elsrelease::third_party_notices $::TC $::MSYS2]
+    set ok 1
+    foreach {label path} [::elsrelease::notice_sources $::TC $::MSYS2] {
+        if {[string first "----- $label -----" $notice] < 0 ||
+            [string first [::elsrelease::read_binary $path] $notice] < 0} {
+            set ok 0
+        }
+    }
+    expr {$ok && [string first {does not include winpthreads} $notice] >= 0}
+} -result 1
+
+test provenance-1.1 {every actual compiler/runtime and notice dependency is fingerprinted} -body {
+    set fingerprints [release_fingerprints]
+    set missing {}
+    foreach key {
+        dependency.libtcl90.sha256 dependency.libtcl9tk90.sha256
+        dependency.libgcc.sha256 dependency.libgcc-eh.sha256 dependency.crt2u.sha256
+        dependency.default-manifest.sha256 dependency.libmsvcrt.sha256
+        dependency.libmingw32.sha256
+        dependency.libucrtbase.sha256
+        tool.gcc.sha256 tool.cc1.sha256 tool.collect2.sha256
+        tool.lto-wrapper.sha256 tool.lto-plugin.sha256
+        tool.as.sha256 tool.ld.sha256 tool.windres.sha256 tool.strip.sha256
+        tool.signtool.sha256
+        payload.tcl-library.sha256 payload.tk-library.sha256
+        payload.resources.sha256
+        source.release-inputs.sha256
+        headers.tcltk.sha256 headers.mingw-w64.sha256
+        headers.gcc.sha256 headers.gcc-fixed.sha256
+        notice.mingw-w64-runtime.sha256
+        notice.gnu-gpl-v3-gcc-runtime-support.sha256
+        notice.gcc-runtime-library-exception-3-1.sha256
+        notice.zlib-bundled-in-tcl.sha256 notice.libtommath-bundled-in-tcl.sha256
+    } {
+        if {![dict exists $fingerprints $key] ||
+            ![regexp {^[0-9a-f]{64}$} [dict get $fingerprints $key]]} {
+            lappend missing $key
+        }
+    }
+    set missing
+} -result {}
+
+test provenance-1.2 {signed provenance is canonical and rejects a changed signer claim} -setup {
+    reset_release_tmp
+    set artifact [file join $::tmp signed els.exe]
+    write_test_file $artifact signed-bytes
+    set unsigned [dict create \
+        artifact_file els-unsigned.exe artifact_bytes 10 \
+        artifact_sha256 [string repeat b 64] artifact_signed 0 marker verified]
+    set signedInfo [dict create subject {Expected Signer} sha1 [string repeat A 40] timestamped 1]
+    set written [write_release_metadata $artifact \
+        [signed_release_metadata $artifact $unsigned $signedInfo]]
+} -body {
+    set values [verify_release_set_basic $artifact]
+    set valid [expr {![catch {validate_signed_metadata $artifact $values $unsigned $signedInfo}]}]
+    dict set values signer_subject Impostor
+    set changed [catch {validate_signed_metadata $artifact $values $unsigned $signedInfo} err]
+    list $valid $changed [string match {*signer_subject*} $err]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 1}
+
+test provenance-1.3 {unsigned provenance requires its exact schema and recomputed claims} -setup {
+    reset_release_tmp
+    set artifact [file join $::tmp unsigned els-unsigned.exe]
+    write_test_file $artifact unsigned-bytes
+    set source [dict create commit [string repeat c 40] describe test-commit dirty 0 status {} \
+        index_sha256 [string repeat a 64]]
+    set identity [dict create subject {Expected Signer} sha1 {}]
+    set fingerprints [dict create dependency.fixture.sha256 [string repeat d 64]]
+    set values [dict create \
+        format els-release-provenance-v1 product els product_version [els_version] \
+        artifact_file [file tail $artifact] artifact_signed 0 \
+        built_utc 2026-07-15T00:00:00Z \
+        source_commit [dict get $source commit] source_describe [dict get $source describe] source_dirty 0 \
+        source_index_sha256 [dict get $source index_sha256] \
+        tool.tcl_version [command_version [tclsh] << {puts [info patchlevel]}] \
+        tool.gcc_version [command_version [gcc] -dumpfullversion -dumpversion] \
+        signing_subject_expected [dict get $identity subject] signing_sha1_expected {} \
+        packaged_notices {LICENSE.txt; THIRD-PARTY-NOTICES.txt} \
+        native.link-map.sha256 [string repeat 1 64] \
+        native.link-inputs.sha256 [string repeat 2 64] native.winpthread-linked 0 \
+        dependency.fixture.sha256 [dict get $fingerprints dependency.fixture.sha256]]
+    set values [write_release_metadata $artifact $values]
+} -body {
+    set valid [expr {![catch {validate_unsigned_metadata $artifact $values $source $identity \
+        $fingerprints [els_version]}]}]
+    set extra $values; dict set extra invented.claim yes
+    set extraRc [catch {validate_unsigned_metadata $artifact $extra $source $identity \
+        $fingerprints [els_version]} extraErr]
+    set changed $values; dict set changed source_commit [string repeat e 40]
+    set changedRc [catch {validate_unsigned_metadata $artifact $changed $source $identity \
+        $fingerprints [els_version]} changedErr]
+    list $valid $extraRc [string match {*schema mismatch*} $extraErr] \
+        $changedRc [string match {*source_commit*} $changedErr]
+} -cleanup {
+    reset_release_tmp
+} -result {1 1 1 1 1}
+
+test provenance-1.4 {release input snapshots detect changed values and schemas} -body {
+    set original [dict create tool.a.sha256 [string repeat a 64] dependency.b.sha256 [string repeat b 64]]
+    set changed $original; dict set changed tool.a.sha256 [string repeat c 64]
+    set extra $original; dict set extra invented.sha256 [string repeat d 64]
+    list [same_fingerprints $original $original] \
+        [same_fingerprints $original $changed] [same_fingerprints $original $extra]
+} -result {1 0 0}
+
+test provenance-1.5 {native evidence records exact map/input hashes and rejects winpthreads} -setup {
+    reset_release_tmp
+    set map [file join $::tmp els.map]
+    write_test_file $map "LOAD libkernel32.a\n"
+    set info [dict create map $map link_map_sha256 [string repeat a 64] \
+        link_inputs_sha256 [string repeat b 64]]
+} -body {
+    set evidence [native_build_evidence $info]
+    write_test_file $map "LOAD libwinpthread.a\n"
+    set rc [catch {native_build_evidence $info} err]
+    list [dict get $evidence native.winpthread-linked] \
+        [dict get $evidence native.link-map.sha256] $rc [string match {*winpthreads*} $err]
+} -cleanup {
+    reset_release_tmp
+} -result [list 0 [string repeat a 64] 1 1]
+
+test signer-1.1 {the release publisher cannot be overridden by the environment} -setup {
+    set hadSubject [info exists ::env(ELS_SIGN_CERT_SUBJECT)]
+    if {$hadSubject} { set oldSubject $::env(ELS_SIGN_CERT_SUBJECT) }
+    set ::env(ELS_SIGN_CERT_SUBJECT) {Unrelated Publisher}
+} -body {
+    dict get [signing_identity] subject
+} -cleanup {
+    unset ::env(ELS_SIGN_CERT_SUBJECT)
+    if {$hadSubject} { set ::env(ELS_SIGN_CERT_SUBJECT) $oldSubject }
+} -result {Open Source Developer Vincent Vercauteren}
+
+test signer-1.2 {the optional certificate thumbprint pin is strictly validated} -body {
+    list [normalize_sha1 {ff:f5 468e-3b61a5c466fc5a07a7bb9fd2b9975b4b}] \
+        [catch {normalize_sha1 1234} err] \
+        [string match {*exactly 40 hexadecimal digits*} $err]
+} -result {FFF5468E3B61A5C466FC5A07A7BB9FD2B9975B4B 1 1}
+
+set failed $::tcltest::numTests(Failed)
+set skipped $::tcltest::numTests(Skipped)
+set total $::tcltest::numTests(Total)
+::tcltest::testConstraint interactive 1
+set cleanupRc [catch {::tcltest::cleanupTests} cleanupError cleanupOpts]
+if {$cleanupRc} {
+    puts stderr "release tooling cleanup failed: $cleanupError"
+    if {[dict exists $cleanupOpts -errorinfo]} { puts stderr [dict get $cleanupOpts -errorinfo] }
+    exit 1
+}
+set tmpCleanupRc [catch {file delete -force -- $::tmp} tmpCleanupErr]
+if {$failed != 0 || $skipped != 0 || $total <= 0 ||
+    $total != [llength $::release_tooling_seen_tests] ||
+    [llength [lsort -unique $::release_tooling_seen_tests]] != $total ||
+    [lsort -dictionary $::release_tooling_seen_tests] ne
+        [lsort -dictionary $::release_tooling_expected_tests] || $tmpCleanupRc} {
+    puts stderr "release tooling inventory/cleanup failed: total=$total failed=$failed skipped=$skipped observed=[llength $::release_tooling_seen_tests] cleanup=$tmpCleanupRc $tmpCleanupErr"
+    exit 1
+}
+set fh [open $sentinel {WRONLY CREAT EXCL}]
+try {
+    fconfigure $fh -encoding utf-8 -translation lf
+    puts -nonewline $fh "els-release-tooling-complete-v1\n$sentinelToken\n"
+    flush $fh
+} finally { close $fh }
+exit 0

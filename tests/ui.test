@@ -15,7 +15,7 @@ proc ui_reset {} {
     set ::els::find_case 0 ; set ::els::find_word 0 ; set ::els::find_regex 0
     set ::els::find_adapt 0 ; set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::find_matches {} ; set ::els::find_current -1
-    set ::els::find_mode "" ; set ::els::find_scan_doc "" ; set ::els::find_scan_chars -1
+    set ::els::find_mode ""
     set ::els::show_ws 0
     set ::els_test_openfile "" ; set ::els_test_savefile "" ; set ::els_test_mbanswer yes
     set ::els_test_open_args {} ; set ::els_test_save_args {}
@@ -68,6 +68,34 @@ test ui-1.4 {status-bar pickers have separators and hover affordance} -setup {ui
          [.sb.eol cget -cursor] [.sb.enc cget -cursor] \
          $hover [.sb.eol cget -foreground]
 } -result [list 1 1 hand2 hand2 [list $::els::INK $::els::TABBG] $::els::MUTED]
+
+test disk-ui-1.1 {status bar explicitly renders every active-document disk state} -setup {ui_reset} -body {
+    set id $::els::active
+    set labels {}
+    foreach state {untitled normal changed missing unavailable readonly} {
+        els::disk_state_set $id $state
+        lappend labels [.sb.disk cget -text]
+    }
+    els::disk_state_set $id normal
+    set normalFg [.sb.disk cget -foreground]
+    els::disk_state_set $id changed
+    set changedFg [.sb.disk cget -foreground]
+    set tip [els::disk_tip]
+    list [winfo exists .sb.sep_disk] [.sb.disk cget -width] $labels \
+         $normalFg $changedFg [string match "*Save will ask*" $tip]
+} -result [list 1 15 \
+    [list {Not on disk} {On disk} {Changed on disk} Missing Unavailable Read-only] \
+    $::els::MUTED $::els::CARET 1]
+
+test disk-ui-1.2 {normal-state tooltip is observational and promises only the authoritative save guard} \
+        -setup {ui_reset} -body {
+    set id $::els::active
+    els::disk_state_set $id normal
+    set tip [els::disk_tip]
+    list [string match "No external change has been detected*" $tip] \
+         [string match "*Save always performs a full conflict check.*" $tip] \
+         [string match "*matches*" $tip]
+} -result {1 1 0}
 
 test ui-1.5 {empty document does not paint a text current-line band} -setup {ui_reset} -body {
     set w [els::T]
@@ -157,6 +185,17 @@ test ui-4.1 {Ctrl+F shows the find bar and focuses the field} -setup {ui_reset} 
     list [winfo ismapped .find] [expr {[focus] eq ".find.fr.q"}]
 } -result {1 1}
 
+test ui-4.1a {every find action is in focus traversal and Escape closes from a toggle} -setup {ui_reset} -body {
+    els::find_show replace ; update
+    set controls {.find.fr.case .find.fr.word .find.fr.regex .find.fr.help \
+        .find.fr.prev .find.fr.next .find.fr.x .find.rr.adapt .find.rr.rep .find.rr.all}
+    set allFocus 1
+    foreach w $controls { if {![$w cget -takefocus]} { set allFocus 0 } }
+    focus -force .find.fr.case
+    event generate .find.fr.case <Escape> ; update
+    list $allFocus [winfo ismapped .find] [expr {[focus] eq [els::T]}]
+} -result {1 0 1}
+
 test ui-4.2 {typing in the find field highlights matches (debounced)} -setup {ui_reset} -body {
     [els::T] insert end "foo bar foo baz foo"
     event generate [els::T] <Control-f> ; update
@@ -201,8 +240,9 @@ test ui-4.6 {Ctrl+H reveals replace; Replace All replaces every match} -setup {u
     ui_type_find "cat" ; ui_settle
     set ::els::find_r "dog"
     .find.rr.all invoke ; update
-    list $rowShown [[els::T] get 1.0 "end - 1 char"]
-} -result {1 {dog dog dog}}
+    list $rowShown [[els::T] get 1.0 "end - 1 char"] \
+        $::els::find_replace_all_busy [.find.rr.all cget -text]
+} -result {1 {dog dog dog} 0 All}
 
 test ui-4.7 {Adapt-case toggle drives case-aware replacement} -setup {ui_reset} -body {
     [els::T] insert end "cat CAT Cat"
@@ -273,8 +313,17 @@ test ui-4.11 {no-match reports calmly, never throws} -setup {ui_reset} -body {
     list [llength $::els::find_matches] $::els::find_count
 } -result {0 {No results}}
 
-test ui-4.12 {STRESS: rapid incremental search on a big buffer never hangs} \
-        -constraints {} -setup {ui_reset} -body {
+test ui-4.12 {STRESS: rapid incremental search keeps the event loop responsive} \
+        -constraints {} -setup {
+    ui_reset
+    set ::els::find_test_sync 0
+    set ::ui_rapid_beat 0
+    proc ::ui_rapid_tick {} {
+        incr ::ui_rapid_beat
+        set ::ui_rapid_after [after 10 ::ui_rapid_tick]
+    }
+    ::ui_rapid_tick
+} -body {
     # ~55 KB buffer; debounced search must keep the UI responsive
     set big "" ; for {set i 0} {$i < 1000} {incr i} {
         append big "the quick brown fox jumps over the lazy dog $i\n"
@@ -291,10 +340,33 @@ test ui-4.12 {STRESS: rapid incremental search on a big buffer never hangs} \
         set ::els::find_q $q
         event generate .find.fr.q <KeyRelease> -keysym space
     }
-    ui_settle 400                                  ;# let the debounce resolve
-    set ms [expr {[clock milliseconds] - $t0}]
-    expr {$ms < 4000 && [llength $::els::find_matches] > 0 ? "ok" : "SLOW:$ms"}
-} -result ok
+    ui_settle 400                                  ;# debounce may start work, never block Tk
+    set responsiveMs [expr {[clock milliseconds] - $t0}]
+    set responsive [expr {$responsiveMs < 1500 && $::ui_rapid_beat > 10}]
+
+    # Completion may legitimately take several seconds for an exact global
+    # index of an empty-matching regex; drain it separately from responsiveness.
+    set done 0
+    set until [expr {[clock milliseconds] + 15000}]
+    while {[clock milliseconds] < $until} {
+        update
+        if {$::els::find_after eq "" && $::els::find_pending eq "" \
+                && $::els::find_job eq "" && $::els::find_snapshot_build eq "" \
+                && $::els::find_validation eq "" && $::els::find_highlight_state eq "" \
+                && $::els::find_count ni {"" "Searching..."}} {
+            set done 1
+            break
+        }
+        after 5
+    }
+    list $responsive $done [expr {[llength $::els::find_matches] > 0}]
+} -cleanup {
+    catch {after cancel $::ui_rapid_after}
+    catch {rename ::ui_rapid_tick {}}
+    unset -nocomplain ::ui_rapid_after ::ui_rapid_beat
+    set ::els::find_test_sync 1
+    catch {els::find_cancel cleanup}
+} -result {1 1 1}
 
 test ui-4.13 {find and replace rows align on the right} -setup {ui_reset} -body {
     els::find_show replace
@@ -313,6 +385,76 @@ test ui-4.13 {find and replace rows align on the right} -setup {ui_reset} -body 
          [ttk::style configure FindAction.Toolbutton -font] \
          [ttk::style configure FindAction.TButton -font]
 } -result {1 1 1 FindAction.TButton FindAction.TButton elsUI elsUI elsUI elsUI}
+
+test ui-replacebusy-1.1 {Replace All becomes cancellable as soon as snapshot construction starts} \
+        -setup {
+    ui_reset
+    set ::ui_busy_old_sync $::els::find_test_sync
+    set ::ui_busy_old_slice $::els::FIND_SLICE_CHARS
+    set ::els::find_test_sync 0
+    set ::els::FIND_SLICE_CHARS 1
+} -body {
+    els::find_show replace
+    set w [els::T]
+    $w insert end "alpha alpha"
+    set ::els::find_q alpha
+    set ::els::find_r beta
+    els::find_request replace-all
+    set during [list [expr {$::els::find_pending ne ""}] \
+        [expr {$::els::find_snapshot_build ne ""}] $::els::find_replace_all_busy \
+        [.find.rr.all cget -text]]
+    .find.rr.all invoke
+    list $during [expr {$::els::find_pending eq ""}] $::els::find_replace_all_busy \
+        [.find.rr.all cget -text] $::els::find_count [$w get 1.0 "end - 1 char"]
+} -cleanup {
+    catch {after cancel $::els::find_after}; set ::els::find_after ""
+    catch {els::find_cancel cleanup}
+    catch {els::find_snapshot_drop}
+    set ::els::find_test_sync $::ui_busy_old_sync
+    set ::els::FIND_SLICE_CHARS $::ui_busy_old_slice
+    unset -nocomplain ::ui_busy_old_sync ::ui_busy_old_slice
+} -result {{1 1 1 Cancel} 1 0 All Cancelled {alpha alpha}}
+
+test ui-replacebusy-1.2 {Replace All stays cancellable while its match index is validated} \
+        -setup {
+    ui_reset
+    set ::ui_busy_old_sync $::els::find_test_sync
+} -body {
+    els::find_show replace
+    set w [els::T]
+    $w insert end "alpha alpha"
+    set ::els::find_q alpha
+    set ::els::find_r beta
+    els::find_update
+    set cached [expr {$::els::find_snapshot ne ""}]
+
+    set ::els::find_test_sync 0
+    els::find_request replace-all
+    set started [expr {$::els::find_job ne ""}]
+    set until [expr {[clock milliseconds] + 7000}]
+    while {$::els::find_job ne "" && [clock milliseconds] < $until} {
+        if {$::els::find_poll_after ne ""} {
+            after cancel $::els::find_poll_after
+            set ::els::find_poll_after ""
+        }
+        els::find_poll
+        if {$::els::find_job ne ""} { after 5 }
+    }
+    if {$::els::find_job ne ""} { error "replace-all worker did not finish" }
+    set during [list [expr {$::els::find_validation ne ""}] \
+        $::els::find_replace_all_busy [.find.rr.all cget -text]]
+    .find.rr.all invoke
+    list $cached $started $during [expr {$::els::find_validation eq ""}] \
+        $::els::find_replace_all_busy [.find.rr.all cget -text] \
+        $::els::find_count [$w get 1.0 "end - 1 char"]
+} -cleanup {
+    catch {after cancel $::els::find_poll_after}; set ::els::find_poll_after ""
+    catch {after cancel $::els::find_after}; set ::els::find_after ""
+    catch {els::find_cancel cleanup}
+    catch {els::find_snapshot_drop}
+    set ::els::find_test_sync $::ui_busy_old_sync
+    unset -nocomplain ::ui_busy_old_sync
+} -result {1 1 {1 1 Cancel} 1 0 All Cancelled {alpha alpha}}
 
 # ---- go to line (modal, generated events) -------------------------------
 test ui-5.1 {Ctrl+G then Go jumps the caret to the line} -setup {ui_reset} -body {
@@ -362,13 +504,39 @@ test ui-7.1 {the scrollbar hides for a short doc, shows for a long one} -setup {
 } -result {0 1}
 
 # ---- menus --------------------------------------------------------------
-test ui-8.1 {the menu bar has File / Edit / Buffer / View / Help cascades} -setup {ui_reset} -body {
+test ui-8.1 {the menu bar has File / Edit / Buffer / Tabs / View / Help cascades} -setup {ui_reset} -body {
     set labels {}
     for {set i 0} {$i <= [.menu index end]} {incr i} {
         if {[.menu type $i] eq "cascade"} { lappend labels [.menu entrycget $i -label] }
     }
     set labels
-} -result {File Edit Buffer View Help}
+} -result {File Edit Buffer Tabs View Help}
+
+test ui-8.1a {every top-level menu has a unique keyboard mnemonic underline} -setup {ui_reset} -body {
+    set got {}
+    for {set i 0} {$i <= [.menu index end]} {incr i} {
+        if {[.menu type $i] eq "cascade"} {
+            lappend got [list [.menu entrycget $i -label] [.menu entrycget $i -underline]]
+        }
+    }
+    set got
+} -result {{File 0} {Edit 0} {Buffer 0} {Tabs 0} {View 0} {Help 0}}
+
+test ui-8.1b {Encoding and Line Endings are keyboard-traversable File cascades wired to document state} -setup {ui_reset} -body {
+    set labels {}
+    for {set i 0} {$i <= [.menu.file index end]} {incr i} {
+        if {[.menu.file type $i] eq "cascade"} { lappend labels [.menu.file entrycget $i -label] }
+    }
+    els::encoding_menu_post .menu.file.encoding
+    set reopenUntitled [.menu.file.encoding entrycget "Reopen with Encoding" -state]
+    .menu.file.eol invoke "CRLF (Windows)"
+    .menu.file.encoding.sv invoke "Windows-1252 (Western)"
+    list [expr {"Encoding" in $labels}] [expr {"Line Endings" in $labels}] \
+         [.menu.file entrycget Encoding -underline] \
+         [.menu.file entrycget "Line Endings" -underline] \
+         $reopenUntitled $::els::docEol($::els::active) $::els::docEnc($::els::active) \
+         [els::doc_dirty $::els::active]
+} -result {1 1 0 0 disabled crlf cp1252 1}
 
 test ui-8.2 {File menu items are wired} -setup {ui_reset} -body {
     set b [llength $::els::docs]
@@ -437,7 +605,7 @@ test ui-8.4 {Edit menu Undo reverts an edit} -setup {ui_reset} -body {
     $w get 1.0 "end - 1 char"
 } -result keep
 
-test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup {ui_reset} -body {
+test ui-9.1 {About: identity, license, and compact acknowledgements} -setup {ui_reset} -body {
     els::about
     catch {wm withdraw .about}
     set isWin   [winfo exists .about]
@@ -450,6 +618,8 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
                               - ([winfo y .about.top.name] + [winfo height .about.top.name] / 2)) <= 2}]
     set centered [expr {[.about.body.tag cget -anchor] eq "center"
                         && [.about.body.copy cget -anchor] eq "center"
+                        && [.about.body.ackh cget -anchor] eq "center"
+                        && [.about.body.ack cget -anchor] eq "center"
                         && [.about.body.ver cget -anchor] eq "center"
                         && [.about.body.lic cget -anchor] eq "center"}]
     set bodyOrder [winfo children .about.body]
@@ -462,6 +632,10 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     }
     set blob [join $texts \n]
     set tech    [string match -nocase *tcl* $blob]
+    set tools   [expr {[string match -nocase *MinGW-w64* $blob]
+                       && [string match -nocase *LibTomMath* $blob]}]
+    set ackhead [expr {[.about.body.ackh cget -text] eq "Acknowledgements"}]
+    set thanks  [string match -nocase *maintainers?and?communities* $blob]
     set hastag  [string match -nocase *simple?text?editor* $blob]
     set hasprog [string match -nocase *programmable* $blob]
     set hascopy [string match -nocase *Vercauteren* $blob]
@@ -470,8 +644,8 @@ test ui-9.1 {About: icon + name, copyright + license, no tech reference} -setup 
     list $isWin $name $hasicon $iconBig $aligned $centered \
          [expr {[lindex $bodyOrder end-1] eq ".about.body.ver"}] \
          [expr {[lindex $bodyOrder end] eq ".about.body.lic"}] \
-         $tech $hastag $hasprog $hascopy $haslic
-} -result {1 els 1 1 1 1 1 1 0 1 0 1 1}
+         $tech $tools $ackhead $thanks $hastag $hasprog $hascopy $haslic
+} -result {1 els 1 1 1 1 1 1 1 1 1 1 1 0 1 1}
 
 test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup {ui_reset} -body {
     els::shortcuts
@@ -577,15 +751,16 @@ test assoc-1.1 {assoc_commands registers els as an app + Open-with option for th
          [expr {[string first UserChoice $blob] < 0}]
 } -result {1 1 1 1 1 1}
 
-test assoc-1.2 {assoc_unregister_commands removes the whole app registration incl. the anafalanx vendor key, per-user} -setup {ui_reset} -body {
+test assoc-1.2 {assoc_unregister_commands removes only els-owned keys/values and preserves the vendor root} -setup {ui_reset} -body {
     set blob [join [lmap c [els::assoc_unregister_commands [file join $::ELS_TMP els.exe]] {join $c " "}] "\n"]
     list [expr {[string first {reg.exe delete} $blob] >= 0}] \
          [expr {[string first {\Classes\Applications\els.exe} $blob] >= 0}] \
          [expr {[string first {\Classes\els.txt} $blob] >= 0}] \
-         [expr {[string first {delete HKCU\Software\anafalanx /f} $blob] >= 0}] \
+         [expr {[string first {delete HKCU\Software\anafalanx\els\Capabilities /f} $blob] >= 0}] \
+         [expr {[string first {delete HKCU\Software\anafalanx /f} $blob] < 0}] \
          [expr {[string first {RegisteredApplications /v els} $blob] >= 0}] \
          [expr {[string first {\.txt\OpenWithProgids /v els.txt} $blob] >= 0}]
-} -result {1 1 1 1 1 1}
+} -result {1 1 1 1 1 1 1}
 
 test assoc-1.3 {curated set is the plain-text core; no markdown or code types} -setup {ui_reset} -body {
     set exts [els::assoc_exts]
@@ -610,8 +785,8 @@ test assoc-2.1 {dialog shows a Register button + status when els is NOT register
          [winfo exists .assoc.f.b.reg] \
          [expr {![winfo exists .assoc.f.b.un]}] \
          [winfo exists .assoc.f.status] \
-         $nchk
-} -result {1 1 1 1 0}
+         $nchk [.assoc.f.b.reg cget -default]
+} -result {1 1 1 1 0 active}
 
 test assoc-2.2 {dialog shows Remove + Open Default Apps (and no Register) when els IS registered} -setup {
     ui_reset
@@ -625,8 +800,9 @@ test assoc-2.2 {dialog shows Remove + Open Default Apps (and no Register) when e
     catch {wm withdraw .assoc}
     list [winfo exists .assoc.f.b.un] \
          [winfo exists .assoc.f.b.def] \
-         [expr {![winfo exists .assoc.f.b.reg]}]
-} -result {1 1 1}
+         [expr {![winfo exists .assoc.f.b.reg]}] \
+         [.assoc.f.b.close cget -default]
+} -result {1 1 1 active}
 
 # Regression for the "can only set from the built els.exe" intermittency: the exe
 # is resolved from the boot script captured at load (info script is "" in
@@ -674,9 +850,36 @@ test assoc-3.5 {assoc_unregister issues exactly the app-registration deletes, ag
     list [expr {[string first {reg.exe delete} $blob] >= 0}] \
          [expr {[string first {\Classes\Applications\assoc_els.exe} $blob] >= 0}] \
          [expr {[string first {\Classes\els.txt} $blob] >= 0}] \
-         [expr {[string first {delete HKCU\Software\anafalanx /f} $blob] >= 0}] \
+         [expr {[string first {delete HKCU\Software\anafalanx\els\Capabilities /f} $blob] >= 0}] \
+         [expr {[string first {delete HKCU\Software\anafalanx /f} $blob] < 0}] \
          [expr {[string first {RegisteredApplications /v els} $blob] >= 0}]
-} -result {1 1 1 1 1}
+} -result {1 1 1 1 1 1}
+
+test assoc-3.5a {assoc_unregister attempts every delete, reports collected errors once, and returns failure} -setup {
+    ui_reset
+    set ::els_test_assoc_exe [raw_write assoc_err_els.exe ""]
+    set ::els_test_assoc_commands {}
+    rename ::els::association_exe ::els::association_exe_real
+    proc ::els::association_exe {} { return $::els_test_assoc_exe }
+    rename ::els::assoc_run ::els::assoc_run_real
+    proc ::els::assoc_run {cmd} {
+        lappend ::els_test_assoc_commands $cmd
+        if {[string first RegisteredApplications [join $cmd " "]] >= 0} {
+            error "simulated registry denial"
+        }
+    }
+} -cleanup {
+    rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
+    rename ::els::assoc_run {} ; rename ::els::assoc_run_real ::els::assoc_run
+    catch {destroy .assoc}
+} -body {
+    set before $::els_test_mbcount
+    set ok [els::assoc_unregister]
+    set expected [llength [els::assoc_unregister_commands $::els_test_assoc_exe]]
+    list $ok [llength $::els_test_assoc_commands] $expected \
+         [expr {$::els_test_mbcount - $before}] \
+         [string match "*simulated registry denial*" [dict get $::els_test_mbargs -message]]
+} -result {0 19 19 1 1}
 
 test ui-10.1 {status name tooltip: native path + length while the label is eliding} -setup {ui_reset} -body {
     set p "C:/some/dir/notes.txt" ; set fn [file nativename $p]
@@ -696,6 +899,175 @@ test ui-10.2 {tab tooltip is the native full path + length, empty for an untitle
     set delayed [expr {[string first " $::els::tab_tip_delay" [bind [els::tabW $id] <Enter>]] >= 0}]
     list [expr {$u eq ""}] [expr {[els::tab_tip $id] eq "$fn \[[string length $fn]\]"}] $delayed
 } -result {1 1 1}
+
+test tabs-1.1 {duplicate basenames gain the shortest distinguishing parent suffix} -setup {ui_reset} -body {
+    set a $::els::active
+    set b [els::new_doc]
+    set ::els::docPath($a) C:/one/report.txt
+    set ::els::docPath($b) C:/two/report.txt
+    els::refresh_tabs
+    list [els::tab_identity $a] [els::tab_identity $b] \
+         [[els::tabW $a].name cget -text] [[els::tabW $b].name cget -text]
+} -result {one/report.txt two/report.txt one/report.txt two/report.txt}
+
+test tabs-1.2 {duplicate suffixes grow only as far as needed} -setup {ui_reset} -body {
+    set a $::els::active
+    set b [els::new_doc]
+    set ::els::docPath($a) C:/alpha/common/report.txt
+    set ::els::docPath($b) C:/beta/common/report.txt
+    list [els::tab_identity $a] [els::tab_identity $b]
+} -result {alpha/common/report.txt beta/common/report.txt}
+
+test tabs-1.3 {untitled documents are numbered and renumber after close} -setup {ui_reset} -body {
+    set a $::els::active
+    set b [els::new_doc]
+    set c [els::new_doc]
+    set before [list [els::tab_identity $a] [els::tab_identity $b] [els::tab_identity $c]]
+    els::close_doc $a
+    list $before [els::tab_identity $b] [els::tab_identity $c]
+} -result {{{untitled 1} {untitled 2} {untitled 3}} {untitled 1} {untitled 2}}
+
+test tabs-1.4 {a long tab label is middle-elided to the cap while its tooltip stays complete} -setup {ui_reset} -body {
+    set id $::els::active
+    set p C:/work/a_document_name_that_is_far_too_long_for_one_editor_tab.extension
+    set ::els::docPath($id) $p
+    els::refresh_tabs
+    set label [[els::tabW $id].name cget -text]
+    list [expr {[string length $label] <= $::els::TAB_LABEL_MAX}] \
+         [expr {[string first … $label] >= 0}] \
+         [expr {[els::tab_tip $id] eq [els::path_tip $p]}]
+} -result {1 1 1}
+
+test tabs-1.5 {overflow keeps the active tab visible and the Tabs menu can reach every document} \
+        -setup {ui_reset} -body {
+    set ids [list $::els::active]
+    for {set i 1} {$i < 12} {incr i} { lappend ids [els::new_doc] }
+    set i 0
+    foreach id $ids {
+        set ::els::docPath($id) [format "C:/work/long_document_name_%02d.txt" $i]
+        incr i
+    }
+    els::refresh_tabs
+    wm geometry . 360x620+100+100
+    update
+    els::tabs_layout
+    update idletasks
+    set visible {}
+    foreach id $ids { if {[winfo ismapped [els::tabW $id]]} { lappend visible $id } }
+    set last [lindex $ids end]
+    set lastVisible [winfo ismapped [els::tabW $last]]
+    els::tabs_menu_rebuild
+    set listed [expr {[.menu.tabs index end] + 1}]
+    .menu.tabs invoke 0
+    update
+    set first [lindex $ids 0]
+    list [expr {[llength $visible] < [llength $ids]}] $lastVisible \
+         $listed [expr {$::els::active eq $first}] \
+         [winfo ismapped [els::tabW $first]] [winfo ismapped .tabs.more] \
+         [.tabs.more cget -takefocus] [expr {[bind .tabs.more <KeyPress-Return>] ne ""}]
+} -result {1 1 12 1 1 1 1 1}
+
+test tabs-1.6 {strip and Tabs-menu labels stay unique after independent elision} \
+        -setup {ui_reset} -body {
+    set a $::els::active
+    set b [els::new_doc]
+    set shared [string repeat sameprefix 9]
+    set ::els::docPath($a) "C:/root/${shared}A-middle/common/report.txt"
+    set ::els::docPath($b) "C:/root/${shared}B-middle/common/report.txt"
+    els::refresh_tabs
+    set strip [list [[els::tabW $a].name cget -text] [[els::tabW $b].name cget -text]]
+    els::tabs_menu_rebuild
+    set menu [list [.menu.tabs entrycget 0 -label] [.menu.tabs entrycget 1 -label]]
+    list [expr {[llength [lsort -unique $strip]] == [llength $strip]}] \
+         [expr {[llength [lsort -unique $menu]] == [llength $menu]}] \
+         [lmap s $strip {expr {[string length $s] <= $::els::TAB_LABEL_MAX}}] \
+         [lmap s $menu {expr {[string length $s] <= $::els::TAB_MENU_MAX}}]
+} -result {1 1 {1 1} {1 1}}
+
+test tabs-1.7 {all state marks and wide glyphs remain inside character/pixel caps; active close fits minimum width} \
+        -setup {ui_reset} -body {
+    set id $::els::active
+    set ::els::docPath($id) "C:/work/[string repeat 界 60].txt"
+    set ::els::docRecovered($id) 1
+    set ::els::docDecodeLossy($id) 1
+    [els::W $id] insert end x
+    els::refresh_tabs
+    wm geometry . 360x620+100+100
+    update
+    els::tabs_layout ; update idletasks
+    set label [[els::tabW $id].name cget -text]
+    els::tabs_menu_rebuild
+    set menu [.menu.tabs entrycget 0 -label]
+    set avail [expr {[winfo width .tabs] - [winfo reqwidth .tabs.more]}]
+    list [string match "*•*" $label] [string match "*↺*" $label] \
+         [string match "*�*" $label] \
+         [expr {[string length $label] <= $::els::TAB_LABEL_MAX}] \
+         [expr {[font measure elsUI $label] <= $::els::TAB_LABEL_PX}] \
+         [expr {[string length $menu] <= $::els::TAB_MENU_MAX}] \
+         [expr {[font measure elsUI $menu] <= $::els::TAB_MENU_PX}] \
+         [expr {[winfo reqwidth [els::tabW $id]] <= $avail}]
+} -result {1 1 1 1 1 1 1 1}
+
+test deferred-ui-1.1 {File exposes a bounded, scrollable, keyboard-operable deferred list} \
+        -setup {ui_reset} -body {
+    set p [els_tmpfile deferred_ui1.txt "body\n"]
+    els::deferred_add $p
+    els::deferred_dialog
+    catch {wm withdraw .deferred}
+    set lb .deferred.f.list.lb
+    set labels {}
+    for {set i 0} {$i <= [.menu.file index end]} {incr i} {
+        if {[.menu.file type $i] ne "separator"} { lappend labels [.menu.file entrycget $i -label] }
+    }
+    list [expr {"Deferred Opens..." in $labels}] [$lb cget -height] \
+         [$lb cget -selectmode] [winfo exists .deferred.f.list.vs] \
+         [winfo exists .deferred.f.list.hs] \
+         [.deferred.f.buttons.open cget -text] \
+         [.deferred.f.buttons.forget cget -text] \
+         [.deferred.f.buttons.close cget -text] \
+         [lindex [wm resizable .deferred] 1] \
+         [expr {[bind $lb <KeyPress-Return>] ne ""}] \
+         [expr {[bind $lb <KeyPress-Delete>] ne ""}]
+} -cleanup {catch {destroy .deferred}} \
+  -result {1 10 extended 1 1 {Open selected} {Forget selected} Close 0 1 1}
+
+test deferred-ui-1.2 {Return deliberately opens a queued large file and removes it only on success} \
+        -setup {ui_reset} -cleanup {
+            set ::els::OPEN_WARN_SIZE 26214400
+            catch {destroy .deferred}
+        } -body {
+    set p [els_tmpfile deferred_ui2.txt "large body\n"]
+    set ::els::OPEN_WARN_SIZE 1
+    els::deferred_add $p
+    els::deferred_dialog
+    set lb .deferred.f.list.lb
+    $lb selection clear 0 end ; $lb selection set 0
+    focus -force $lb ; update
+    set ::els_test_mbcount 0
+    event generate $lb <KeyPress-Return>
+    update
+    list $::els_test_mbcount [llength $::els::deferred_files] \
+         [els::same_path $::els::docPath($::els::active) $p]
+} -result {0 0 1}
+
+test deferred-ui-1.3 {a failed selected open stays queued; Delete explicitly forgets it} \
+        -setup {ui_reset} -cleanup {catch {destroy .deferred}} -body {
+    set p [file join $::ELS_TMP missing_deferred_ui3.txt]
+    catch {file delete -force $p}
+    els::deferred_add $p
+    els::deferred_dialog
+    set lb .deferred.f.list.lb
+    $lb selection clear 0 end ; $lb selection set 0
+    focus -force $lb ; update
+    set ::els_test_mbcount 0
+    .deferred.f.buttons.open invoke
+    set stayed [els::deferred_contains $p]
+    $lb selection clear 0 end ; $lb selection set 0
+    focus -force $lb ; update
+    event generate $lb <KeyPress-Delete>
+    update
+    list $::els_test_mbcount $stayed [llength $::els::deferred_files]
+} -result {1 1 0}
 
 test ui-10.3 {find bar sits above the text (row 1); text + gutter at row 2} -setup {ui_reset} -body {
     els::find_show find
@@ -805,6 +1177,25 @@ test recent-1.8 {recent manager clear asks once and empties the list} -setup {ui
     catch {destroy .recent}
     set n
 } -result 0
+
+test recent-1.10 {Recent Files has a default Open action and Return opens the selected row} -setup {ui_reset} -body {
+    set p [els_tmpfile recent_keyboard.txt "keyboard\n"]
+    set ::els::recent [list $p]
+    els::recent_manage
+    catch {wm attributes .recent -alpha 0.0}
+    set kp [expr {[bind .recent.f.list <KP_Enter>] ne ""}]
+    set def [.recent.f.buttons.open cget -default]
+    focus -force .recent.f.list
+    update
+    event generate .recent.f.list <KeyPress-Return> -when now ; update
+    set opened 0
+    foreach id $::els::docs {
+        if {[info exists ::els::docPath($id)] && [els::same_path $::els::docPath($id) $p]} {
+            set opened 1
+        }
+    }
+    list $kp $def $opened [winfo exists .recent]
+} -result {1 active 1 0}
 
 # A too-long path is elided the same way as the status bar (keep the filename,
 # drop leading dirs behind "…/"); a short path shows in full.  The window is
@@ -972,6 +1363,20 @@ test lp-1.3 {display_path is native and prefix-free} -body {
     if {!$_ok} { error notlong }
 }]}]
 
+# A packaged els has winfs compiled in, so its long-path save uses ReplaceFileW.
+# Source-mode Tcl has no equivalent safe overwrite for an existing >260-char
+# target; exercise the production path when the separately built test DLL is
+# available, and skip this capability assertion when it genuinely is not.
+set ::ELS_UI_WINFS_DLL [file join $::ELS_ROOT build winfs.dll]
+::tcltest::testConstraint winlongNative [expr {
+    [::tcltest::testConstraint winlong] && [file exists $::ELS_UI_WINFS_DLL]
+}]
+proc ui_load_winfs {} {
+    if {![llength [info commands ::els::win_replace_file]]} {
+        load $::ELS_UI_WINFS_DLL Winfs
+    }
+}
+
 proc lp_deep_file {sub name content} {
     set dir [file join $::ELS_TMP $sub]
     catch {file delete -force $dir}
@@ -984,7 +1389,8 @@ proc lp_deep_file {sub name content} {
     return [list $p $dir]
 }
 
-test lp-2.1 {open, edit and save a document whose path exceeds 260 chars} -constraints winlong -setup {ui_reset} -body {
+test lp-2.1 {packaged/native path opens, edits and saves a document over 260 chars} \
+        -constraints winlongNative -setup {ui_reset ; ui_load_winfs} -body {
     lassign [lp_deep_file lp_open deepdoc.txt "hello deep"] p dir
     set id [els::open $p]
     set loaded [els_text $id]
@@ -1154,59 +1560,72 @@ test update-1.2 {a newer tag lights the red indicator; same/older/garbage do not
 } -result {0.18 {} {}}
 
 # ---- config location ----------------------------------------------------
-test cfg-1.1 {config_candidates yields a portable path and a LOCALAPPDATA path} -setup {els_reset} -body {
-    lassign [els::config_candidates] near appdata
-    list [file tail $near] [file tail $appdata] \
-         [string match "*els*" $appdata] [expr {$near ne $appdata}]
-} -result {els.conf els.conf 1 1}
+test cfg-1.1 {config_candidates yields exactly the source/executable-adjacent path} -setup {
+    els_reset ; set ::__cfg_bs $::els::boot_script
+} -cleanup {
+    set ::els::boot_script $::__cfg_bs ; unset -nocomplain ::__cfg_bs
+} -body {
+    set fake [file normalize [file join $::ELS_TMP cfg-one els.tcl]]
+    set ::els::boot_script $fake
+    set candidates [els::config_candidates]
+    list [llength $candidates] [lindex $candidates 0] [file join [file dirname $fake] els.conf]
+} -result [list 1 [file normalize [file join $::ELS_TMP cfg-one els.conf]] [file normalize [file join $::ELS_TMP cfg-one els.conf]]]
 
-test cfg-1.2 {resolve_existing finds the LOCALAPPDATA config when present} -setup {els_reset} -body {
-    lassign [els::config_candidates] near appdata
-    if {[file exists $near]} { return {1 1} }   ;# a portable config is present: branch not testable here
-    catch {file delete -force [file dirname $appdata]}
-    file mkdir [file dirname $appdata]
-    set fh [open $appdata w] ; puts $fh [dict create geometry 800x600] ; close $fh
-    set ::els::config_path ""
-    set found  [els::config_resolve_existing]
-    set picked [string equal $::els::config_path $appdata]
-    catch {els::lock_release}   ;# set_config_path acquired a real lock: release
-                                ;# it or the delete below silently fails
-    catch {file delete -force [file dirname $appdata]}
-    set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
-    list $found $picked
-} -result {1 1}
-
-test cfg-1.3 {the first-run dialog applies the chosen location and closes} -setup {els_reset} -body {
-    lassign [els::config_candidates] near appdata
-    set ::els::config_path ""
-    els::config_choice_dialog $near $appdata     ;# non-blocking; no vwait
-    .cfgask.f.ok invoke                          ;# default selection -> appdata
-    set chosen $::els::config_path
-    set gone [expr {![winfo exists .cfgask]}]
-    # config_apply_choice scheduled `after idle recover_boot` and acquired a
-    # session lock: neutralize both, or the callback fires mid-suite (it could
-    # deiconify a REAL recovery dialog) and the delete below silently fails
-    foreach a [after info] { catch {after cancel $a} }
-    catch {els::lock_release}
-    catch {file delete -force [file dirname $appdata]}
-    set ::els::config_path [file join $::ELS_TMP els.conf]   ;# restore hermetic default
-    list [string equal $chosen $appdata] $gone
-} -result {1 1}
-
-test cfg-1.4 {legacy config.tcl is migrated to els.conf} -setup {els_reset} -body {
-    lassign [els::config_candidates] near appdata
-    lassign [els::config_legacy_candidates] oldNear oldAppdata
-    catch {file delete -force $near $appdata $oldNear $oldAppdata [file dirname $appdata]}
-    file mkdir [file dirname $oldAppdata]
-    set fh [open $oldAppdata w] ; puts $fh [dict create geometry 810x610 word_wrap 1] ; close $fh
-    set ::els::config_path ""
-    set found [els::config_resolve_existing]
-    set migrated [file exists $appdata]
-    set picked [string equal $::els::config_path $appdata]
-    catch {els::lock_release}   ;# release the lock set_config_path acquired
-    catch {file delete -force [file dirname $appdata]}
+test cfg-1.2 {resolve_existing ignores a profile config and pins the adjacent path} -setup {
+    els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_self $::els::selftest
+} -cleanup {
+    set ::els::boot_script $::__cfg_bs ; set ::els::selftest $::__cfg_self
+    set ::env(LOCALAPPDATA) [file join $::ELS_TMP localappdata]
     set ::els::config_path [file join $::ELS_TMP els.conf]
-    list $found $migrated $picked
+    catch {file delete -force [file join $::ELS_TMP cfg-profile]}
+    unset -nocomplain ::__cfg_bs ::__cfg_self
+} -body {
+    set root [file join $::ELS_TMP cfg-profile]
+    file mkdir [file join $root profile els]
+    set ::els::boot_script [file join $root app els.tcl]
+    file mkdir [file dirname $::els::boot_script]
+    set profile [file join $root profile els els.conf]
+    raw_write $profile [dict create geometry 800x600]
+    set ::env(LOCALAPPDATA) [file join $root profile]
+    set ::els::selftest 1 ; set ::els::config_path ""
+    set found [els::config_resolve_existing]
+    set near [file join $root app els.conf]
+    list $found [expr {$::els::config_path eq $near}] [file exists $near] [file exists $profile]
+} -result {0 1 0 1}
+
+test cfg-1.3 {first run is pinned immediately and has no location chooser} -setup {
+    els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_self $::els::selftest
+} -cleanup {
+    set ::els::boot_script $::__cfg_bs ; set ::els::selftest $::__cfg_self
+    set ::els::config_path [file join $::ELS_TMP els.conf]
+    catch {file delete -force [file join $::ELS_TMP cfg-first]}
+    unset -nocomplain ::__cfg_bs ::__cfg_self
+} -body {
+    set root [file join $::ELS_TMP cfg-first]
+    file mkdir $root
+    set ::els::boot_script [file join $root els.tcl]
+    set ::els::selftest 1 ; set ::els::config_path ""
+    set found [els::config_resolve_existing]
+    list $found [expr {$::els::config_path eq [file join $root els.conf]}] \
+         [llength [info commands els::config_choice_dialog]] [winfo exists .cfgask]
+} -result {0 1 0 0}
+
+test cfg-1.4 {adjacent legacy config.tcl is migrated to adjacent els.conf} -setup {
+    els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_self $::els::selftest
+} -cleanup {
+    set ::els::boot_script $::__cfg_bs ; set ::els::selftest $::__cfg_self
+    set ::els::config_path [file join $::ELS_TMP els.conf]
+    catch {file delete -force [file join $::ELS_TMP cfg-legacy]}
+    unset -nocomplain ::__cfg_bs ::__cfg_self
+} -body {
+    set root [file join $::ELS_TMP cfg-legacy]
+    file mkdir $root
+    set ::els::boot_script [file join $root els.tcl]
+    raw_write [file join $root config.tcl] [dict create geometry 810x610 word_wrap 1]
+    set ::els::selftest 1 ; set ::els::config_path ""
+    set found [els::config_resolve_existing]
+    set near [file join $root els.conf]
+    list $found [file exists $near] [expr {$::els::config_path eq $near}]
 } -result {1 1 1}
 
 # ---- bug-hunt wave 4: config + session robustness ------------------------
@@ -1265,7 +1684,7 @@ test geo-clamp-2.5 {a from-right `-N` on-screen by Tk's right-edge anchoring is 
     els::clamp_geometry 900x620-1000+100 0 0 1920 1080
 } -result 900x620-1000+100
 
-test geo-clamp-2.5 {a size-only geometry (no offset) passes through unchanged} -body {
+test geo-clamp-2.5a {a size-only geometry (no offset) passes through unchanged} -body {
     els::clamp_geometry 900x620 0 0 1920 1080
 } -result 900x620
 
@@ -1326,25 +1745,24 @@ test geo-clamp-2.11 {clamp keeps a "+-N" window a connected left monitor covers}
     els::clamp_geometry 900x620+-1900+100 -1920 0 3840 1080
 } -result 900x620+-1900+100
 
-test cfg-2.3 {LOCALAPPDATA-unset fallback resolves a real home dir (no literal ~)} -setup {ui_reset} -body {
+test cfg-2.3 {LOCALAPPDATA cannot influence the fixed adjacent config root} -setup {ui_reset} -body {
     set saved $::env(LOCALAPPDATA)
-    unset ::env(LOCALAPPDATA)
-    lassign [els::config_roots] near appdata
+    set ::env(LOCALAPPDATA) [file join $::ELS_TMP profile-a]
+    set a [els::config_roots]
+    set ::env(LOCALAPPDATA) [file join $::ELS_TMP profile-b]
+    set b [els::config_roots]
     set ::env(LOCALAPPDATA) $saved
-    list [string match "*~*" $appdata] [string match -nocase "*AppData*" $appdata]
-} -result {0 1}
+    list [llength $a] [expr {$a eq $b}]
+} -result {1 1}
 
-# bug-hunt wave 2 (F09): the portable ("next to the program") config dir must
-# come from the boot script captured at source time, not `info script`.  The
-# first-run dialog runs from an `after` callback where `info script` is "", which
-# normalized to "." and made the portable path the cwd-relative "./els.conf" —
-# settings written into the launch folder, and the choice never sticking.
-test cfg-2.6 {config_roots derives the portable dir from boot_script, not (callback-empty) info script} \
+# The fixed adjacent config dir comes from the boot script captured at source
+# time, not callback-sensitive `info script` or the process working directory.
+test cfg-2.6 {config_roots derives the adjacent state dir from boot_script, not callback-empty info script} \
         -setup {ui_reset ; set ::__saved_bs $::els::boot_script} \
         -cleanup {set ::els::boot_script $::__saved_bs ; unset -nocomplain ::__saved_bs} -body {
     set fake [file normalize [file join $::ELS_TMP fakeapp els.tcl]]
     set ::els::boot_script $fake
-    lassign [els::config_roots] progdir appdata
+    set progdir [lindex [els::config_roots] 0]
     # progdir must be fakeapp/ (from boot_script), never a relative "." or the
     # tests dir (which `info script` would yield here)
     list [file pathtype $progdir] \
@@ -1410,13 +1828,57 @@ test assoc-3.6 {assoc_registered is FALSE for a stale registration pointing at a
     list $stale $healthy
 } -result {0 1}
 
-test reveal-argv-1.1 {a comma/= folder path routes through cmd start; a normal path uses explorer (G-Windows-0)} -body {
-    set comma [els::reveal_argv "C:/docs,v2"]
-    set eq    [els::reveal_argv "C:/a=b"]
-    set plain [els::reveal_argv "C:/docs/normal"]
-    list [expr {[lsearch $comma start] >= 0}] [expr {[lsearch $eq start] >= 0}] \
-         [string match -nocase "*explorer.exe*" [lindex $plain 0]]
+test folder-open-1.1 {native folder opening receives one literal path and never invokes cmd parsing} -setup {
+    ui_reset
+    set ::els_test_folder_seen ""
+    set ::els_test_saved_folder_cmd [llength [info commands ::els::win_open_folder]]
+    if {$::els_test_saved_folder_cmd} {
+        rename ::els::win_open_folder ::els::win_open_folder_real
+    }
+    proc ::els::win_open_folder {path} { set ::els_test_folder_seen $path ; return "" }
+} -cleanup {
+    rename ::els::win_open_folder {}
+    if {$::els_test_saved_folder_cmd} {
+        rename ::els::win_open_folder_real ::els::win_open_folder
+    }
+    unset -nocomplain ::els_test_folder_seen ::els_test_saved_folder_cmd
+} -body {
+    set before $::els_test_mbcount
+    set path {C:/docs & notes/v2,final=a|b}
+    set ok [els::open_folder $path]
+    list $ok [expr {$::els_test_folder_seen eq [file nativename $path]}] \
+         [expr {$::els_test_mbcount == $before}]
 } -result {1 1 1}
+
+test folder-open-1.2 {native folder-opening failure is reported once and returned safely} -setup {
+    ui_reset
+    set ::els_test_saved_folder_cmd [llength [info commands ::els::win_open_folder]]
+    if {$::els_test_saved_folder_cmd} {
+        rename ::els::win_open_folder ::els::win_open_folder_real
+    }
+    proc ::els::win_open_folder {path} { return "ShellExecuteW error 2" }
+} -cleanup {
+    rename ::els::win_open_folder {}
+    if {$::els_test_saved_folder_cmd} {
+        rename ::els::win_open_folder_real ::els::win_open_folder
+    }
+    unset -nocomplain ::els_test_saved_folder_cmd
+} -body {
+    set before $::els_test_mbcount
+    set ok [els::open_folder C:/missing]
+    list $ok [expr {$::els_test_mbcount - $before}] \
+         [string match "*ShellExecuteW error 2*" [dict get $::els_test_mbargs -message]]
+} -result {0 1 1}
+
+test folder-open-1.3 {dev fallback is direct Explorer argv and refuses its comma/equals grammar} -body {
+    set comma [els::folder_fallback_argv "C:/docs,v2"]
+    set eq    [els::folder_fallback_argv "C:/a=b"]
+    set plain [els::folder_fallback_argv "C:/docs/normal"]
+    set blob [string tolower [join $plain " "]]
+    list [llength $comma] [llength $eq] \
+         [string match "*explorer.exe*" [string tolower [lindex $plain 0]]] \
+         [expr {[string first cmd.exe $blob] < 0}]
+} -result {0 0 1 1}
 
 test updatepill-1.1 {show_update keeps the pill's hover highlight after adding its tooltip (G-View mat-4)} -setup {ui_reset} -body {
     els::show_update 9.9
@@ -1471,14 +1933,10 @@ test session-pending-1.3 {the pending merge dedupes a same-file path case-insens
     llength [dict get [raw_read $::els::config_path] session_files]
 } -result 1
 
-test cfg-2.5 {the first-run dialog's <Return> routes through the button (no % substitution of paths)} -setup {ui_reset} -body {
-    els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
-    catch {wm withdraw .cfgask}
-    set b [bind .cfgask <Return>]
-    set ok [string equal $b [list .cfgask.f.ok invoke]]
-    catch {destroy .cfgask}
-    set ok
-} -result 1
+test cfg-2.5 {the obsolete first-run chooser API and window are absent} -setup {ui_reset} -body {
+    list [llength [info commands els::config_choice_dialog]] \
+         [llength [info commands els::config_apply_choice]] [winfo exists .cfgask]
+} -result {0 0 0}
 
 test session-4.2 {a session-owning run persists its open docs as the session} -setup {ui_reset} -body {
     set p [els_tmpfile sw5.txt "y\n"]
@@ -1497,15 +1955,17 @@ test session-4.3 {session restore does not push restored tabs into Open Recent (
 
 # ---- user-issues batch A ---------------------------------------------------
 
-test issue-a.1 {cancelling the first-run dialog postpones, never adopts a location} -setup {ui_reset} -body {
-    set ::els::config_path ""
-    els::config_choice_dialog [file join $::ELS_TMP near.conf] [file join $::ELS_TMP app.conf]
-    catch {wm withdraw .cfgask}
-    els::config_postpone_choice .cfgask        ;# the WM close / Escape path
-    list $::els::config_path [winfo exists .cfgask]
+test issue-a.1 {first-run config can no longer be postponed into a recovery-disabled session} \
+        -setup {ui_reset ; set ::__cfg_self $::els::selftest} -body {
+    set ::els::selftest 1 ; set ::els::config_path ""
+    els::config_resolve_existing
+    list [expr {$::els::config_path ne ""}] \
+         [llength [info commands els::config_postpone_choice]] [winfo exists .cfgask]
 } -cleanup {
+    set ::els::selftest $::__cfg_self
     set ::els::config_path [file join $::ELS_TMP els.conf]
-} -result {{} 0}
+    unset -nocomplain ::__cfg_self
+} -result {1 0 0}
 
 test issue-a.2 {Markdown is not offered in the open/save filetypes} -body {
     string match -nocase "*markdown*" [els::filetypes]
@@ -1527,9 +1987,10 @@ test issue-a.4 {goto entry rejects non-numeric input at the keyboard} -setup {ui
     set bad [.goto.f.e get]
     .goto.f.e insert 0 42
     set good [.goto.f.e get]
+    set def [.goto.f.b.ok cget -default]
     catch {destroy .goto}
-    list $bad $good
-} -result {{} 42}
+    list $bad $good $def
+} -result {{} 42 active}
 
 test issue-a.5 {statusbar shows the path length in its normal depiction} -setup {ui_reset} -body {
     els::open [els_tmpfile ia5.txt "x\n"]
@@ -1637,7 +2098,7 @@ test reg-2.1 {Replace uses the floating findOne tag, not a stale index, after a 
     list [string match *XYZ-* $t] [regexp -all dog $t]
 } -result {1 1}
 
-test reg-3.1 {zero-width regex yields no matches and Replace All does not corrupt} -setup {ui_reset} -body {
+test reg-3.1 {zero-width regex counts every boundary and Replace All follows Tcl progress rules} -setup {ui_reset} -body {
     set w [els::T]
     $w insert end "abc"
     set ::els::find_regex 1 ; set ::els::find_q {x*} ; set ::els::find_mode find
@@ -1646,7 +2107,7 @@ test reg-3.1 {zero-width regex yields no matches and Replace All does not corrup
     set ::els::find_r Q
     els::find_replace_all
     list $m [$w get 1.0 "end - 1 char"]
-} -result {0 abc}
+} -result {4 QaQbQcQ}
 
 test reg-4.1 {Ctrl+H in the find field switches to replace without eating a character} -setup {ui_reset} -body {
     els::find_show find
@@ -2109,21 +2570,27 @@ test ctxmenu-1.4 {tab menu: path entries disabled for untitled, enabled for a fi
     list $untitled $filed [string match "*ctx.txt" $clip]
 } -result {disabled normal 1}
 
-test ctxmenu-1.5 {Open Containing Folder opens the DIR (no /select), correct for spaced paths} -setup {ui_reset} -body {
+test ctxmenu-1.5 {Open Containing Folder sends the literal spaced DIR to the native helper} -setup {
+    ui_reset
+    set ::_els_ctx_had_native [llength [info commands ::els::win_open_folder]]
+    if {$::_els_ctx_had_native} {
+        rename ::els::win_open_folder ::els::win_open_folder_ctx_real
+    }
+    set ::_els_ctx_folder ""
+    proc ::els::win_open_folder {dir} { set ::_els_ctx_folder $dir ; return "" }
+} -body {
     set id $::els::active
     set ::els::docPath($id) "C:/Users/John Doe/notes.txt"
-    rename ::exec _els_exec_real
-    set ::_els_exec_argv ""
-    proc ::exec {args} { set ::_els_exec_argv $args ; return "" }
     els::tab_reveal $id
-    rename ::exec {} ; rename _els_exec_real ::exec
-    list [string match -nocase "*explorer.exe" [lindex $::_els_exec_argv 0]] \
-         [lindex $::_els_exec_argv 1] \
-         [string match "*/select,*" $::_els_exec_argv]
+    list $::_els_ctx_folder [string match "*/select,*" $::_els_ctx_folder]
 } -cleanup {
-    if {[llength [info commands _els_exec_real]]} { catch {rename ::exec {}} ; rename _els_exec_real ::exec }
-    unset -nocomplain ::_els_exec_argv
-} -result {1 {C:\Users\John Doe} 0}
+    catch {rename ::els::win_open_folder {}}
+    if {$::_els_ctx_had_native && \
+            [llength [info commands ::els::win_open_folder_ctx_real]]} {
+        rename ::els::win_open_folder_ctx_real ::els::win_open_folder
+    }
+    unset -nocomplain ::_els_ctx_had_native ::_els_ctx_folder
+} -result {{C:\Users\John Doe} 0}
 
 test ctxmenu-1.6 {extended right-click items exist; file items grey out for an untitled doc} -setup {ui_reset} -body {
     set w [els::T]

@@ -1,6 +1,6 @@
-# tests/winfs.test -- els::win_replace_file (Win32 ReplaceFileW): an atomic,
-# metadata-preserving file replace used by els::write_atomic in the native build
-# (preserves ACLs / alternate data streams / attributes that a rename drops).
+# tests/winfs.test -- els::win_replace_file (Win32 ReplaceFileW): the atomic
+# native replace used by els::write_atomic.  Windows normally carries metadata
+# that a rename drops; merge failures are deliberately best-effort.
 # Gated on build/winfs.dll (`z build-ext`); skipped otherwise, so the suite is
 # green with or without a compiler run.
 
@@ -73,29 +73,30 @@ test winfs-3.1 {win_virtual_screen returns a 4-int rect covering all monitors} -
          [expr {[lindex $r 2] >= [winfo screenwidth .]}]
 } -result {4 1 1 1}
 
-test winfs-4.1 {a failing in-place fallback keeps + NAMES the temp as a rescue copy (Wave 2)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
+test winfs-4.1 {failed native atomic replacements keep the target and complete rescue temp intact} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
     # Hold the target open WITHOUT share-delete so both ReplaceFileW and the
-    # rename-replace fail, forcing write_atomic to its in-place fallback; stub the
-    # in-place write to fail (simulating dying media) and assert the temp — the only
-    # copy of the new bytes — survives and is named in the error, not deleted first.
+    # rename-replace fail.  The save path must never truncate the target in place;
+    # the complete temp survives and is named in the error instead.
     set p [file join $::ELS_TMP wfs_rescue.txt]
     set f [open $p wb] ; puts -nonewline $f "old content" ; close $f
     catch {els::win_unlock_file}
     els::win_lock_file [file nativename $p]
     rename els::_write_inplace _els_wip_real
-    proc els::_write_inplace {args} { return "simulated media failure" }
+    set ::_els_wip_calls 0
+    proc els::_write_inplace {args} { incr ::_els_wip_calls ; return "must not run" }
     set err [els::write_atomic $p "new rescued bytes"]
     rename els::_write_inplace {} ; rename _els_wip_real els::_write_inplace
     els::win_unlock_file
     set gotTmp [regexp {safe at: ([^)]+)\)} $err -> tmp]
     set tmp [string trim $tmp]
     set ok [expr {$gotTmp && [file exists $tmp] && [raw_read $tmp] eq "new rescued bytes"}]
+    set original [raw_read $p]
     catch {file delete -force $tmp} ; catch {file delete -force $p}
-    list [string match "*media failure*" $err] $ok
+    list $::_els_wip_calls [string match "atomic replacement failed:*" $err] $ok $original
 } -cleanup {
     if {[llength [info commands _els_wip_real]]} { catch {rename els::_write_inplace {}} ; rename _els_wip_real els::_write_inplace }
     catch {els::win_unlock_file}
-} -result {1 1}
+} -result {0 1 1 {old content}}
 
 test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
     set p [file join $::ELS_TMP wfs_save.txt]
@@ -165,3 +166,297 @@ test winfs-6.2 {re-acquiring a >520-char lock path stays idempotent (g_lock_path
     catch {file delete -force $top}
     list [expr {[string length [file nativename $lp]] > 520}] $r1 $r2
 } -result {1 {} {}}
+
+test winfs-6.3 {embedded NUL cannot truncate a native path to a different lock file} -constraints winfsBuilt -setup {load_winfs} -body {
+    set lp [file join $::ELS_TMP wfs_nul.lock]
+    set f [open $lp w] ; close $f
+    # A conversion failure is conservative (0 = maybe live).  Before the NUL
+    # guard Win32 saw only $lp, successfully probed that free file, and returned 1.
+    set r [els::win_try_lock "[file nativename $lp]\0ignored"]
+    file delete -force $lp
+    set r
+} -result 0
+
+test winfs-6.4 {BMP and astral Unicode paths round-trip through replace, fsync, and lock APIs} -constraints winfsBuilt -setup {load_winfs} -body {
+    set top [file join $::ELS_TMP "Jos\u00E9-\u4F60\u597D-\U0001F600"]
+    file mkdir $top
+    set tgt [file join $top "cafe\u0301-\U0001F680.txt"]
+    set tmp [file join $top "replacement-\u03A9.tmp"]
+    set lp  [file join $top "session-\U0001F512.lock"]
+    set f [open $tgt w] ; puts -nonewline $f OLD ; close $f
+    set f [open $tmp w] ; puts -nonewline $f "NEW" ; close $f
+    set replaced [els::win_replace_file [file nativename $tgt] [file nativename $tmp]]
+    set flushed [els::win_fsync [file nativename $tgt]]
+    catch {els::win_unlock_file}
+    set locked [els::win_lock_file [file nativename $lp]]
+    set held [els::win_try_lock [file nativename $lp]]
+    els::win_unlock_file
+    set free [els::win_try_lock [file nativename $lp]]
+    set body [raw_read $tgt]
+    file delete -force $top
+    list $replaced $flushed $locked $held $free $body
+} -cleanup {
+    catch {els::win_unlock_file}
+    catch {file delete -force [file join $::ELS_TMP "Jos\u00E9-\u4F60\u597D-\U0001F600"]}
+} -result {{} {} {} 0 1 NEW}
+
+test winfs-6.5 {zero-argument commands reject extras without releasing the held lock} -constraints winfsBuilt -setup {load_winfs} -body {
+    set lp [file join $::ELS_TMP wfs_arity.lock]
+    catch {els::win_unlock_file}
+    els::win_lock_file [file nativename $lp]
+    set unlockRc [catch {els::win_unlock_file extra} unlockErr]
+    set stillHeld [els::win_try_lock [file nativename $lp]]
+    set screenRc [catch {els::win_virtual_screen extra} screenErr]
+    els::win_unlock_file
+    file delete -force $lp
+    list $unlockRc [string match {wrong # args:*win_unlock_file*} $unlockErr] \
+         $stillHeld $screenRc [string match {wrong # args:*win_virtual_screen*} $screenErr]
+} -cleanup {
+    catch {els::win_unlock_file}
+    catch {file delete -force [file join $::ELS_TMP wfs_arity.lock]}
+} -result {1 1 0 1 1}
+
+# ---- shell integration ---------------------------------------------------
+
+test winfs-7.1 {win_open_folder is a native command with a strict one-path API} -constraints winfsBuilt -setup {load_winfs} -body {
+    set rc [catch {els::win_open_folder} err]
+    list [expr {[llength [info commands ::els::win_open_folder]] == 1}] $rc \
+         [string match {wrong # args:*path*} $err]
+} -result {1 1 1}
+
+test winfs-7.2 {win_open_folder rejects a missing path without invoking the shell} -constraints winfsBuilt -setup {load_winfs} -body {
+    set p [file join $::ELS_TMP folder_missing_[pid]]
+    catch {file delete -force $p}
+    set err [els::win_open_folder [file nativename $p]]
+    string match {folder lookup error *} $err
+} -result 1
+
+test winfs-7.3 {win_open_folder rejects a regular file without launching its association} -constraints winfsBuilt -setup {load_winfs} -body {
+    set p [file join $::ELS_TMP not_a_folder.txt]
+    set f [open $p w] ; puts -nonewline $f harmless ; close $f
+    set err [els::win_open_folder [file nativename $p]]
+    file delete -force $p
+    set err
+} -cleanup {
+    catch {file delete -force [file join $::ELS_TMP not_a_folder.txt]}
+} -result {path is not a directory}
+
+proc winfs_make_junction {link target} {
+    set ::env(ELS_TEST_LINK) [file nativename $link]
+    set ::env(ELS_TEST_TARGET) [file nativename $target]
+    exec {*}[auto_execok powershell] -NoLogo -NoProfile -NonInteractive -Command {
+        New-Item -ItemType Junction -Path $env:ELS_TEST_LINK -Target $env:ELS_TEST_TARGET | Out-Null
+    }
+}
+proc winfs_remove_junction {link} {
+    set ::env(ELS_TEST_LINK) [file nativename $link]
+    catch {exec {*}[auto_execok powershell] -NoLogo -NoProfile -NonInteractive -Command {
+        Remove-Item -LiteralPath $env:ELS_TEST_LINK -Force
+    }}
+}
+
+test winfs-7.4 {win_path_reparse distinguishes an ordinary directory from a junction} \
+        -constraints {winfsBuilt powershellAvailable} -setup {load_winfs} -body {
+    set top [file join $::ELS_TMP winfs-reparse-[pid]]
+    set target [file join $top target] ; set link [file join $top link]
+    file mkdir $target
+    winfs_make_junction $link $target
+    set result [list [els::win_path_reparse [file nativename $target]] \
+                     [els::win_path_reparse [file nativename $link]]]
+    winfs_remove_junction $link
+    file delete -force $top
+    unset -nocomplain ::env(ELS_TEST_LINK) ::env(ELS_TEST_TARGET)
+    set result
+} -cleanup {
+    if {[info exists link]} { catch {winfs_remove_junction $link} }
+    if {[info exists top] && [file exists $top]} { catch {file delete -force $top} }
+    unset -nocomplain ::env(ELS_TEST_LINK) ::env(ELS_TEST_TARGET)
+} -result {0 1}
+
+# ---- isolated worker Job Objects ----------------------------------------
+proc winfs_worker_script {name body} {
+    set p [file join $::ELS_TMP $name]
+    raw_write $p $body
+    return $p
+}
+proc winfs_worker_wait {token {limit 3000}} {
+    set until [expr {[clock milliseconds] + $limit}]
+    while {[clock milliseconds] < $until} {
+        set status [els::win_worker_status $token]
+        if {[lindex $status 0] eq "exited"} { return $status }
+        after 10
+    }
+    error "worker did not exit"
+}
+
+test winfs-worker-8.1 {watch returns an opaque capability and reports natural child exit} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set script [winfs_worker_script worker-natural.tcl {after 80; exit 7}]
+    set pid [lindex [exec [info nameofexecutable] $script &] 0]
+    set token [els::win_worker_watch $pid]
+    set opaque [expr {$token ne $pid && [string match "worker-*" $token]}]
+    set initial [els::win_worker_status $token]
+    set final [winfs_worker_wait $token]
+    file delete -force $script
+    list $opaque $initial $final [catch {els::win_worker_status $token} retired]
+} -result {1 running {exited 7} 1}
+
+test winfs-worker-8.2 {explicit kill terminates the whole disposable worker job} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set script [winfs_worker_script worker-kill.tcl {after 30000; exit 0}]
+    set token [els::win_worker_spawn_watch \
+        [list [info nameofexecutable] $script] [file dirname $script]]
+    set before [els::win_worker_status $token]
+    set killed [els::win_worker_kill $token]
+    set final [winfs_worker_wait $token]
+    file delete -force $script
+    list $before $killed [lindex $final 0] [expr {[lindex $final 1] != 0}]
+} -cleanup {
+    if {[info exists token]} { catch {els::win_worker_kill $token} }
+    catch {file delete -force [file join $::ELS_TMP worker-kill.tcl]}
+} -result {running {} exited 1}
+
+test winfs-worker-8.3 {watch refuses the current process and a non-child PID} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set self [catch {els::win_worker_watch [pid]} selfErr]
+    set system [catch {els::win_worker_watch 4} systemErr]
+    # The PID-reuse fix intentionally opens the process object before checking
+    # ancestry.  A protected non-child can therefore be rejected either by
+    # OpenProcess itself or by the subsequent direct-child check.
+    list $self [string match {*valid child process*} $selfErr] \
+         $system [expr {[string match {*OpenProcess error*} $systemErr] \
+             || [string match {*direct child process*} $systemErr]}]
+} -result {1 1 1 1}
+
+test winfs-worker-8.4 {deleting an interpreter closes its Job Object and kills its watched child} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set marker [file join $::ELS_TMP worker-escaped.marker]
+    catch {file delete -force $marker}
+    set body "after 700\nset f \[open [list $marker] w\]\nputs -nonewline \$f escaped\nclose \$f\n"
+    set script [winfs_worker_script worker-interp-delete.tcl $body]
+    interp create workerOwner
+    workerOwner eval [list load $::WINFS_DLL Winfs]
+    set token [workerOwner eval [list els::win_worker_spawn_watch \
+        [list [info nameofexecutable] $script] [file dirname $script]]]
+    interp delete workerOwner
+    after 1100
+    set escaped [file exists $marker]
+    file delete -force $script
+    catch {file delete -force $marker}
+    list [string match "worker-*" $token] $escaped
+} -cleanup {
+    catch {interp delete workerOwner}
+    catch {file delete -force [file join $::ELS_TMP worker-interp-delete.tcl]}
+    catch {file delete -force [file join $::ELS_TMP worker-escaped.marker]}
+} -result {1 0}
+
+proc winfs_force_stop {pid} {
+    set ::env(ELS_TEST_STOP_PID) $pid
+    catch {exec {*}[auto_execok powershell] -NoLogo -NoProfile -NonInteractive -Command {
+        Stop-Process -Id $env:ELS_TEST_STOP_PID -Force
+    }}
+}
+
+test winfs-worker-8.5 {abrupt helper-parent death closes the Job Object and kills its worker} \
+        -constraints {winfsBuilt powershellAvailable} -setup {load_winfs} -body {
+    set marker [file join $::ELS_TMP worker-parent-death.marker]
+    set ready [file join $::ELS_TMP worker-parent-death.ready]
+    catch {file delete -force $marker $ready}
+    set childBody "after 1500\nset f \[open [list $marker] w\]\nputs -nonewline \$f escaped\nclose \$f\n"
+    set childScript [winfs_worker_script worker-parent-child.tcl $childBody]
+    set ownerScript [file join $::ELS_TMP worker-parent-owner.tcl]
+    set ownerBody ""
+    append ownerBody [list load $::WINFS_DLL Winfs] "\n"
+    append ownerBody [list set childScript $childScript] "\n"
+    append ownerBody [list set ready $ready] "\n"
+    append ownerBody {set token [els::win_worker_spawn_watch [list [info nameofexecutable] $childScript] [file dirname $childScript]]} "\n"
+    append ownerBody {set f [open $ready {WRONLY CREAT EXCL TRUNC}]} "\n"
+    append ownerBody {puts -nonewline $f [list $token]} "\n"
+    append ownerBody {close $f} "\n"
+    append ownerBody {vwait forever} "\n"
+    raw_write $ownerScript $ownerBody
+    set ownerPid [lindex [exec [info nameofexecutable] $ownerScript &] 0]
+    set until [expr {[clock milliseconds] + 4000}]
+    while {![file exists $ready] && [clock milliseconds] < $until} { after 10 }
+    if {![file exists $ready]} { error "helper parent did not arm its worker Job Object" }
+    set f [open $ready r] ; set armed [read $f] ; close $f
+    winfs_force_stop $ownerPid
+    after 2200
+    set escaped [file exists $marker]
+    catch {file delete -force $ownerScript $childScript $ready $marker}
+    unset -nocomplain ::env(ELS_TEST_STOP_PID)
+    list [expr {[llength $armed] == 1 && [string match "worker-*" [lindex $armed 0]]}] $escaped
+} -cleanup {
+    if {[info exists ownerPid]} { catch {winfs_force_stop $ownerPid} }
+    foreach leaf {worker-parent-owner.tcl worker-parent-child.tcl worker-parent-death.ready worker-parent-death.marker} {
+        catch {file delete -force [file join $::ELS_TMP $leaf]}
+    }
+    unset -nocomplain ::env(ELS_TEST_STOP_PID)
+} -result {1 0}
+
+test winfs-worker-8.6 {embedded NUL cannot alias an opaque worker capability} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set script [winfs_worker_script worker-token-nul.tcl {after 30000; exit 0}]
+    set pid [lindex [exec [info nameofexecutable] $script &] 0]
+    set token [els::win_worker_watch $pid]
+    set statusAlias [catch {els::win_worker_status "$token\0suffix"}]
+    set killAlias [catch {els::win_worker_kill "$token\0suffix"}]
+    set still [els::win_worker_status $token]
+    els::win_worker_kill $token
+    set final [winfs_worker_wait $token]
+    file delete -force $script
+    list $statusAlias $killAlias $still [lindex $final 0] [expr {[lindex $final 1] != 0}]
+} -cleanup {
+    if {[info exists token]} { catch {els::win_worker_kill $token} }
+    catch {file delete -force [file join $::ELS_TMP worker-token-nul.tcl]}
+} -result {1 1 running exited 1}
+
+test winfs-worker-8.7 {native spawn/watch preserves Windows argv quoting and working directory} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set cwd [file join $::ELS_TMP "worker cwd é"]
+    file mkdir $cwd
+    set marker [file join $cwd result.txt]
+    set script [winfs_worker_script worker-native-spawn.tcl {
+set marker [lindex $argv 0]
+set f [open $marker w]
+fconfigure $f -encoding utf-8 -profile strict -translation lf
+puts -nonewline $f [list [pwd] [lrange $argv 1 end]]
+close $f
+after 150
+exit 0
+}]
+    set values [list "space value" "quote\"value" "trailing\\" \
+        "slashes\\\\\"quote" "unicode-€-U0001f600" {&|<>^%!} ""]
+    set token [els::win_worker_spawn_watch \
+        [list [info nameofexecutable] $script $marker {*}$values] $cwd]
+    set initial [els::win_worker_status $token]
+    set final [winfs_worker_wait $token]
+    set f [open $marker r]
+    fconfigure $f -encoding utf-8 -profile strict -translation lf
+    set received [read $f]
+    close $f
+    lassign $received childCwd childArgs
+    list [string match {worker-*} $token] $initial $final \
+        [expr {[file normalize $childCwd] eq [file normalize $cwd]}] \
+        [expr {$childArgs eq $values}]
+} -cleanup {
+    if {[info exists token]} { catch {els::win_worker_kill $token} }
+    catch {file delete -force [file join $::ELS_TMP worker-native-spawn.tcl]}
+    if {[info exists cwd]} { catch {file delete -force $cwd} }
+} -result {1 running {exited 0} 1 1}
+
+test winfs-worker-8.8 {native spawn/watch rejects NUL and oversized command arguments} \
+        -constraints winfsBuilt -setup {load_winfs} -body {
+    set exe [info nameofexecutable]
+    set nul [catch {els::win_worker_spawn_watch \
+        [list $exe "bad\0argument"] [pwd]} nulErr]
+    set huge [catch {els::win_worker_spawn_watch \
+        [list $exe [string repeat x 40000]] [pwd]} hugeErr]
+    set empty [catch {els::win_worker_spawn_watch {} [pwd]} emptyErr]
+    set missing [catch {els::win_worker_spawn_watch \
+        [list [file join $::ELS_TMP does-not-exist.exe]] [pwd]} missingErr]
+    list $nul [string match {*invalid*NUL*} $nulErr] \
+        $huge [string match {*oversized*} $hugeErr] \
+        $empty [string match {*argument count*} $emptyErr] \
+        $missing [string match {*CreateProcessW error*} $missingErr]
+} -result {1 1 1 1 1 1 1 1}
