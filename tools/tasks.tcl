@@ -410,7 +410,16 @@ proc task_probe-exe {args} {
 
 proc task_pecheck {args} {
     need tclsh
-    if {![llength $args]} { set args [list --unsigned [P dist els-unsigned.exe]] }
+    # A mode-only invocation (as `z pecheck [mode] [exe]` implies both are optional)
+    # gets the matching default artifact instead of failing pecheck.tcl's usage:
+    # --signed -> the fixed signed release path, --unsigned/bare -> the unsigned one (R41).
+    if {![llength $args]} {
+        set args [list --unsigned [P dist els-unsigned.exe]]
+    } elseif {[llength $args] == 1 && [lindex $args 0] eq "--signed"} {
+        set args [list --signed [P dist els.exe]]
+    } elseif {[llength $args] == 1 && [lindex $args 0] eq "--unsigned"} {
+        set args [list --unsigned [P dist els-unsigned.exe]]
+    }
     stream [tclsh] [P tools pecheck.tcl] {*}$args
 }
 
@@ -460,10 +469,12 @@ proc sha256_file {path} {
     return [string tolower $hash]
 }
 
-proc normalize_sha1 {value} {
+proc normalize_sha1 {value {label "ELS_SIGN_CERT_SHA1"}} {
     set value [string toupper [string map {" " "" ":" "" "-" ""} [string trim $value]]]
     if {$value ne "" && ![regexp {^[0-9A-F]{40}$} $value]} {
-        error "ELS_SIGN_CERT_SHA1 must be exactly 40 hexadecimal digits"
+        # $label names the real source of the value so an unparseable signtool hash
+        # line is not misattributed to the operator's pin env var (R43).
+        error "$label must be exactly 40 hexadecimal digits"
     }
     return $value
 }
@@ -510,7 +521,7 @@ proc verify_signed_identity {signtool exe identity} {
             set leafSubject $value
             set leafSha1 ""
         } elseif {[regexp -nocase {^\s*SHA1 hash:\s*([0-9A-Fa-f :\-]+)\s*$} $line -> value]} {
-            if {$leafSubject ne ""} { set leafSha1 [normalize_sha1 $value] }
+            if {$leafSubject ne ""} { set leafSha1 [normalize_sha1 $value "signtool SHA1 hash output"] }
         }
     }
     if {!$timestamped || !$timestampVerified} {
@@ -1260,7 +1271,10 @@ proc read_checksum {path expectedName} {
     require_regular_file $path "release checksum"
     set fh [open $path r]
     try {
-        fconfigure $fh -encoding utf-8 -profile strict -translation binary
+        # -translation binary is a COMPOUND that also resets -encoding to iso8859-1,
+        # so it must come FIRST -- listing it last (as before) silently overrode the
+        # declared utf-8/strict and decoded the artifact name as latin-1 (R40).
+        fconfigure $fh -translation binary -encoding utf-8 -profile strict
         set text [read $fh]
     } finally { close $fh }
     if {![string match *\n $text] || [string first \n [string range $text 0 end-1]] >= 0} {
@@ -2126,7 +2140,16 @@ proc run_native_startup_check {{prepared {}}} {
     set ownPrepared 0
     if {$prepared eq ""} {
         set prepOutDir [unique_stage_directory [P build] _startup-prep]
-        set prepared [build_native_product [file join $prepOutDir els-normal-prep.exe]]
+        # A failing preparatory build must not orphan the just-created stage dir: the
+        # try/finally that reclaims outer_stage only begins after this block, so remove
+        # it here before rethrowing (place_regular_file is the build's last step and runs
+        # only on success, so on error the dir holds no product exe) (R42).
+        try {
+            set prepared [build_native_product [file join $prepOutDir els-normal-prep.exe]]
+        } on error {err opts} {
+            remove_real_tree $prepOutDir
+            return -options $opts $err
+        }
         dict set prepared outer_stage $prepOutDir
         set ownPrepared 1
     }

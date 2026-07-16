@@ -53,10 +53,10 @@ set ::release_tooling_expected_tests {
     promotion-1.6 promotion-1.7 promotion-1.8 promotion-1.9 promotion-1.10 promotion-1.11
     lock-1.1 lock-1.2 lock-1.3 lock-1.4 lock-1.5
     paths-1.1 paths-1.2 paths-1.3 paths-1.4 environment-1.1 environment-1.2
-    signing-copy-1.1 signing-copy-1.2 arguments-1.1 manifest-1.1 checksum-1.1
+    signing-copy-1.1 signing-copy-1.2 arguments-1.1 manifest-1.1 checksum-1.1 checksum-1.2
     notices-1.1 provenance-1.1 provenance-1.2 provenance-1.3 provenance-1.4
-    provenance-1.5 signer-1.1 signer-1.2 run-1.1 probe-1.1
-    native-test-1.1 native-test-1.2 capture-1.1
+    provenance-1.5 signer-1.1 signer-1.2 signer-1.3 run-1.1 probe-1.1 pecheck-1.1
+    native-test-1.1 native-test-1.2 native-test-1.3 capture-1.1
 }
 rename ::tcltest::test ::tcltest::_release_tooling_test
 proc ::tcltest::test {name description args} {
@@ -832,6 +832,57 @@ test signer-1.2 {the optional certificate thumbprint pin is strictly validated} 
         [catch {normalize_sha1 1234} err] \
         [string match {*exactly 40 hexadecimal digits*} $err]
 } -result {FFF5468E3B61A5C466FC5A07A7BB9FD2B9975B4B 1 1}
+
+# ---- 0.95 hardening regressions (bug-hunt findings) ----------------------
+test checksum-1.2 {a UTF-8 artifact name is decoded strictly, not silently as latin-1 (R40)} -setup {
+    reset_release_tmp
+    set checksum [file join $::tmp artifact.sha256]
+    set hash [string repeat a 64]
+    set name "els-café.exe"
+} -body {
+    write_test_file $checksum [encoding convertto utf-8 "$hash *$name\n"]
+    read_checksum $checksum $name
+} -cleanup {
+    reset_release_tmp
+} -result [string repeat a 64]
+
+test signer-1.3 {a malformed signtool SHA1 line is not blamed on the pin env var (R43)} -body {
+    catch {normalize_sha1 {ab:cd} "signtool SHA1 hash output"} err
+    list [string match {*signtool SHA1 hash output*} $err] [string match {*ELS_SIGN_CERT_SHA1*} $err]
+} -result {1 0}
+
+test pecheck-1.1 {a mode-only pecheck defaults to the matching dist artifact (R41)} -setup {
+    rename need need_real ; proc need args {}
+    rename stream stream_real ; proc stream args { set ::pc_args $args }
+} -body {
+    task_pecheck --signed   ; set s [file tail [lindex $::pc_args end]]
+    task_pecheck --unsigned ; set u [file tail [lindex $::pc_args end]]
+    task_pecheck            ; set b [file tail [lindex $::pc_args end]]
+    list $s $u $b
+} -cleanup {
+    catch {rename stream {}} ; if {[llength [info commands stream_real]]} { rename stream_real stream }
+    catch {rename need {}}   ; if {[llength [info commands need_real]]} { rename need_real need }
+    unset -nocomplain ::pc_args
+} -result {els.exe els-unsigned.exe els-unsigned.exe}
+
+test native-test-1.3 {a failing preparatory build leaves no orphaned _startup-prep stage (R42)} -setup {
+    rename need need_real ; proc need args {}
+    rename tclshs tclshs_real ; proc tclshs {} { return [info nameofexecutable] }
+    rename build_native_product bnp_real ; proc build_native_product {out} { error "forced prep failure" }
+    set ::before_prep [glob -nocomplain -directory [P build] _startup-prep*]
+} -body {
+    set rc [catch {run_native_startup_check} err]
+    set after_prep [glob -nocomplain -directory [P build] _startup-prep*]
+    list $rc [expr {[llength $after_prep] == [llength $::before_prep]}]
+} -cleanup {
+    catch {rename need {}} ; if {[llength [info commands need_real]]} { rename need_real need }
+    catch {rename tclshs {}} ; if {[llength [info commands tclshs_real]]} { rename tclshs_real tclshs }
+    catch {rename build_native_product {}} ; if {[llength [info commands bnp_real]]} { rename bnp_real build_native_product }
+    foreach d [glob -nocomplain -directory [P build] _startup-prep*] {
+        if {$d ni $::before_prep} { catch {file delete -force $d} }
+    }
+    unset -nocomplain ::before_prep
+} -result {1 1}
 
 set failed $::tcltest::numTests(Failed)
 set skipped $::tcltest::numTests(Skipped)

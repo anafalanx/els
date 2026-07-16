@@ -25,6 +25,20 @@ proc write_file {path bytes} {
     return $path
 }
 
+# Atomic write (temp + rename) for control files a peer reads exactly once.  The
+# worker's wait_for_go reads the `go` file on first sighting and permanently gives
+# up on a parse failure, so a plain truncating open() -- observable zero-length
+# between open and close -- can race it into a flaky release failure (R35).
+proc write_file_atomic {path bytes} {
+    file mkdir [file dirname $path]
+    set tmp "$path.tmp-[pid]-[clock clicks]"
+    set f [open $tmp {WRONLY CREAT EXCL TRUNC}]
+    fconfigure $f -translation binary
+    try { puts -nonewline $f $bytes } finally { close $f }
+    file rename -force $tmp $path
+    return $path
+}
+
 proc read_file {path} {
     set f [open $path r]
     try {
@@ -74,6 +88,30 @@ proc wait_report {report pid} {
     # process after a crash, so only kill it if it is still an els.exe
     catch {exec $::TASKKILL /FI "PID eq [lindex $pid 0]" /FI "IMAGENAME eq els.exe" /T /F}
     error "exe probe did not finish: $report"
+}
+
+# Run $exe under the probe environment, bounded by a watchdog, so a wedged candidate
+# cannot hang release-check forever (the only other bound is the worker's own ~5s
+# self-exit, which a broken startup never reaches) (R34).  Returns a dict:
+#   {timeout 1}                              -- killed after $deadlineMs elapsed
+#   {timeout 0 code C errorcode EC error E}  -- exited; C/EC/E mirror `catch {exec ...}`
+proc exec_bounded {app pairs exe cmdArgs {deadlineMs 15000}} {
+    set chan [with_probe_environment $app $pairs [list open [list | $exe {*}$cmdArgs] r]]
+    fconfigure $chan -blocking 0
+    set deadline [expr {[clock milliseconds] + $deadlineMs}]
+    while {[clock milliseconds] < $deadline} {
+        catch {read $chan}          ;# drain output so a full pipe can't block the child
+        if {[eof $chan]} {
+            fconfigure $chan -blocking 1
+            set code [catch {close $chan} err opts]
+            set ec [expr {$code ? [dict get $opts -errorcode] : {}}]
+            return [dict create timeout 0 code $code errorcode $ec error $err]
+        }
+        after 25
+    }
+    catch {exec $::TASKKILL /FI "PID eq [lindex [pid $chan] 0]" /FI "IMAGENAME eq els.exe" /T /F}
+    catch {close $chan}             ;# still -blocking 0: returns without waiting on the child
+    return [dict create timeout 1 code 0 errorcode {} error {}]
 }
 
 proc with_probe_environment {app pairs body} {
@@ -158,11 +196,14 @@ proc probe_packaged_worker_bypass {src} {
     file mkdir $job
     set report [file join $app normal-startup.report]
     set token 0123456789abcdef0123456789abcdef
-    set code [catch {
-        with_probe_environment $app [list ELS_STARTUP_PROBE $report] \
-            [list exec $exe --find-worker $job $token]
-    } err opts]
-    set ec [expr {$code ? [dict get $opts -errorcode] : {}}]
+    set bounded [exec_bounded $app [list ELS_STARTUP_PROBE $report] $exe \
+        [list --find-worker $job $token]]
+    if {[dict get $bounded timeout]} {
+        error "packaged worker bypass probe wedged (no exit within 15s)"
+    }
+    set code [dict get $bounded code]
+    set ec   [dict get $bounded errorcode]
+    set err  [dict get $bounded error]
     if {!$code || [lindex $ec 0] ne "CHILDSTATUS" || [lindex $ec 2] != 3 \
             || [file exists $report] || [file exists [file join $app els.conf]] \
             || [llength [glob -nocomplain -directory $job *]]} {
@@ -200,7 +241,7 @@ proc probe_packaged_worker_bypass {src} {
             error "packaged worker spawn blocked for ${spawnElapsed}ms before authorization"
         }
         set go [dict create version 1 token $authToken command go]
-        write_file [file join $authJob go] [encoding convertto -profile strict utf-8 $go]
+        write_file_atomic [file join $authJob go] [encoding convertto -profile strict utf-8 $go]
         set deadline [expr {[clock milliseconds] + 8000}]
         set final ""
         while {[clock milliseconds] < $deadline} {
@@ -256,6 +297,10 @@ proc probe_packaged_worker_bypass {src} {
 
 if {[file exists $BASE]} { error "unique exe probe root already exists: $BASE" }
 file mkdir $BASE
+
+# Always reclaim the unique scratch root, even when a probe throws -- otherwise every
+# failed run permanently leaks ~6 copies of the candidate exe under tests/_tmp (R37).
+try {
 
 probe_packaged_worker_bypass $SRC
 
@@ -340,7 +385,10 @@ if {[dict get $explicitRun cfgask] != 0 ||
     error "explicit-arg probe failed: $explicitRun"
 }
 
-if {![cleanup_probe_root $BASE]} {
-    puts stderr "warning: could not remove unique exe probe scratch directory: $BASE"
-}
 puts "exe probe ok"
+
+} finally {
+    if {![cleanup_probe_root $BASE]} {
+        puts stderr "warning: could not remove unique exe probe scratch directory: $BASE"
+    }
+}
