@@ -1796,7 +1796,7 @@ test atomic-1.2 {write_atomic rejects an existing directory for durable and nond
 } -result {1 1 1 0 0 0 0}
 
 # ---- 0.95 hardening regressions (bug-hunt findings) ----------------------
-test bk-1.15 {a backward clock step does not delete the just-written newest backup (BK audit)} -setup {els_reset} -cleanup {set ::els::BK_RING 8 ; set ::els::BK_MININT 60} -body {
+test bk-1.16 {a backward clock step does not delete the just-written newest backup (BK audit)} -setup {els_reset} -cleanup {set ::els::BK_RING 8 ; set ::els::BK_MININT 60} -body {
     set ::els::backups 1 ; set ::els::BK_MININT 0 ; set ::els::BK_RING 3
     file mkdir [bk_dir]
     set p [els_tmpfile bkclock.txt "orig\n"]
