@@ -793,15 +793,35 @@ proc els::deferred_load {} {
     set ::els::deferred_notice ""
     set p [els::deferred_path]
     if {$p eq "" || ![file exists $p]} { return }
-    set fh ""
+    # Distinguish a TRANSIENT read fault (a sharing violation or I/O error while AV
+    # or a backup tool briefly holds a perfectly valid file) from real content
+    # corruption.  Only corruption should quarantine; a transient fault must leave
+    # the intact queue in place and block writes this run so a later deferred_add
+    # cannot clobber the good file with an empty list (R10).  So read the bytes here,
+    # BEFORE the quarantine catch -- and the return on failure sits at proc scope,
+    # never inside a catch (catch would trap TCL_RETURN into the quarantine path).
+    # A directory at the path is NOT read (it is corruption); it falls through to the
+    # quarantine catch below, preserving the directory-quarantine contract.
+    set raw ""
+    if {![file isdirectory $p]} {
+        set fh ""
+        if {[catch {
+            set fh [::open $p r]
+            fconfigure $fh -translation binary
+            set raw [read $fh [expr {$::els::DEFERRED_MAX_BYTES + 1}]]
+            close $fh
+            set fh ""
+        } ioerr]} {
+            if {$fh ne ""} { catch {close $fh} }
+            set ::els::deferred_blocked 1
+            set ::els::deferred_notice "deferred-open state could not be read; it was left untouched"
+            catch {els::log warn "deferred-open state at $p could not be read ($ioerr); preserved for retry"}
+            return
+        }
+    }
     set problem ""
     if {[catch {
         if {[file isdirectory $p]} { error "state path is a directory" }
-        set fh [::open $p r]
-        fconfigure $fh -translation binary
-        set raw [read $fh [expr {$::els::DEFERRED_MAX_BYTES + 1}]]
-        close $fh
-        set fh ""
         if {[string length $raw] > $::els::DEFERRED_MAX_BYTES} { error "state file exceeds size limit" }
         set data [encoding convertfrom -profile strict utf-8 $raw]
         # Force one exact dict parse and accept only the schema we actually
@@ -816,7 +836,6 @@ proc els::deferred_load {} {
         llength $files
         set ::els::deferred_files [els::deferred_sanitize $files]
     } problem]} {
-        if {$fh ne ""} { catch {close $fh} }
         set ::els::deferred_files {}
         if {[catch {set quarantined [els::deferred_quarantine $p]} qerr]} {
             # The evidence could not be moved aside.  Leave the original bytes
@@ -1312,6 +1331,11 @@ proc els::deferred_dialog {} {
     bind $lb <KeyPress-Delete> {els::deferred_dialog_forget; break}
     bind $lb <Double-Button-1> {els::deferred_dialog_open; break}
     bind $top <Escape> [list destroy $top]
+    # Enter also accepts from the -default active "Open selected" button after Tab
+    # (Tk 9's TButton ignores Return); the listbox's own Return binding breaks, so
+    # this toplevel binding never double-fires when the list has focus (R21).
+    bind $top <Return>   els::deferred_dialog_open
+    bind $top <KP_Enter> els::deferred_dialog_open
     wm protocol $top WM_DELETE_WINDOW [list destroy $top]
     els::deferred_dialog_refresh
     update idletasks
@@ -1471,6 +1495,10 @@ proc els::recent_manage {} {
     bind .recent.f.list <Double-Button-1> els::recent_manage_open
     bind .recent.f.list <Return>   {els::recent_manage_open ; break}
     bind .recent.f.list <KP_Enter> {els::recent_manage_open ; break}
+    # Enter also accepts from the -default active Open button after Tab (Tk 9's
+    # TButton ignores Return); the listbox binding breaks, so no double-fire (R21).
+    bind .recent <Return>   els::recent_manage_open
+    bind .recent <KP_Enter> els::recent_manage_open
     # re-elide the rows AND the detail label to the current width on any resize
     bind .recent.f.list <Configure> els::recent_manage_refresh
     bind .recent <Escape> {destroy .recent}
@@ -1874,6 +1902,10 @@ proc els::assoc_render {} {
         set ::els::assoc_default .assoc.f.b.reg
     }
     if {$reg} { .assoc.f.b.close configure -default active }
+    # Enter activates the -default active button (Tk 9's TButton ignores Return);
+    # no entry/list in this dialog, so a toplevel binding is unambiguous (R21).
+    bind .assoc <Return>   {catch {$::els::assoc_default invoke}}
+    bind .assoc <KP_Enter> {catch {$::els::assoc_default invoke}}
     grid columnconfigure .assoc.f 0 -weight 1
     update idletasks
     after idle {if {[info exists ::els::assoc_default] && [winfo exists $::els::assoc_default]} {
@@ -2137,7 +2169,11 @@ proc els::build {} {
     ttk::label .sb.name -font elsUI -anchor w -text "untitled" -width 8 \
         -foreground $::els::MUTED
     ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1 Col 1" -foreground $::els::MUTED
-    ttk::label .sb.disk -font elsUI -anchor e -width 15 -text "Not on disk" \
+    # -anchor w (not e): when a narrow window squeezes this slot the label clips
+    # from the far edge, so west-anchoring keeps the DISTINGUISHING leading word
+    # ("Changed"/"Not"/"On") visible instead of the shared "...on disk" tail, which
+    # would read like the healthy state even when the file changed on disk (R19).
+    ttk::label .sb.disk -font elsUI -anchor w -width 15 -text "Not on disk" \
         -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED \
         -cursor hand2 -padding {4 1}
@@ -2708,7 +2744,11 @@ proc els::tab_drag {id rootX} {
     }
 }
 proc els::tab_repack {} {
-    els::tabs_layout
+    # A drag reorder changes position-dependent identities (untitled numbering and
+    # same-basename discriminators), so relabel EVERY tab, not just the active one
+    # -- tabs_layout alone would leave peers showing their pre-reorder names, e.g.
+    # two tabs both reading "untitled 1" until the next switch/close/save (R17).
+    els::refresh_tabs
 }
 proc els::tab_close_enter {id} {
     set w [els::tabW $id].close
@@ -2777,13 +2817,19 @@ proc els::tabs_layout {} {
     set activeTextPx [expr {max(1, min($::els::TAB_LABEL_PX, $avail - $closeW - 18))}]
     $activeW.name configure -text [els::tab_label [lindex $::els::docs $idx] \
         $::els::TAB_LABEL_MAX $activeTextPx]
-    set used [expr {[winfo reqwidth $activeW] + 1}]
+    # Measure from the two child labels, not the frame: a label's reqwidth updates
+    # SYNCHRONOUSLY inside `configure`, but the enclosing frame's reqwidth is only
+    # recomputed by the packer at idle -- so reading the frame here (right after the
+    # label -text change) yields a STALE width and the strip packs one tab too many,
+    # squeezing the rightmost close button off (R18).  The frame is borderless with
+    # no inter-child padding, so name+close reqwidth equals its would-be reqwidth.
+    set used [expr {[winfo reqwidth $activeW.name] + $closeW + 1}]
     set grew 1
     while {$grew} {
         set grew 0
         if {$right + 1 < [llength $::els::docs]} {
             set w [els::tabW [lindex $::els::docs [expr {$right + 1}]]]
-            set need [expr {[winfo reqwidth $w] + 1}]
+            set need [expr {[winfo reqwidth $w.name] + [winfo reqwidth $w.close] + 1}]
             if {$used + $need <= $avail} {
                 incr right
                 incr used $need
@@ -2792,7 +2838,7 @@ proc els::tabs_layout {} {
         }
         if {$left > 0} {
             set w [els::tabW [lindex $::els::docs [expr {$left - 1}]]]
-            set need [expr {[winfo reqwidth $w] + 1}]
+            set need [expr {[winfo reqwidth $w.name] + [winfo reqwidth $w.close] + 1}]
             if {$used + $need <= $avail} {
                 incr left -1
                 incr used $need
@@ -2823,6 +2869,12 @@ proc els::tabs_menu_rebuild {} {
 }
 proc els::tabs_popup {} {
     if {![winfo exists .tabs.more]} { return }
+    # Dismiss the button's own tooltip BEFORE posting the menu.  tk_popup below
+    # enters a native modal loop that does not return until the menu closes, and
+    # the .tip toplevel is override-redirect + -topmost, so a still-visible tip
+    # would float over the posted menu the whole time.  Doing it here (not only in
+    # the click binding) also covers the keyboard activation paths (R20).
+    els::tip_cancel
     els::tabs_menu_rebuild
     update idletasks
     set m .menu.tabs
@@ -4180,7 +4232,7 @@ proc els::read_binary_guarded {path quiet consent} {
     if {$quiet && !$consent && [els::remote_path $path]} {
         set existed [els::deferred_contains $path]
         if {$existed || [els::deferred_add $path]} {
-            return [dict create state deferred new [expr {!$existed}]]
+            return [dict create state deferred new [expr {!$existed}] reason remote]
         }
         return [dict create state failed error "the deferred-open list could not be saved"]
     }
@@ -4192,7 +4244,7 @@ proc els::read_binary_guarded {path quiet consent} {
         if {$quiet} {
             set existed [els::deferred_contains $path]
             if {$existed || [els::deferred_add $path]} {
-                return [dict create state deferred new [expr {!$existed}]]
+                return [dict create state deferred new [expr {!$existed}] reason large]
             }
             return [dict create state failed error "the deferred-open list could not be saved"]
         }
@@ -4212,7 +4264,7 @@ proc els::read_binary_guarded {path quiet consent} {
             if {$quiet} {
                 set existed [els::deferred_contains $path]
                 if {$existed || [els::deferred_add $path]} {
-                    return [dict create state deferred new [expr {!$existed}]]
+                    return [dict create state deferred new [expr {!$existed}] reason large]
                 }
                 return [dict create state failed error "the deferred-open list could not be saved"]
             }
@@ -4256,7 +4308,9 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
             catch {els::log error "quiet reload failed for $p: $err"}
             catch {els::status_note "file was not reloaded: [file tail $p]"}
         } elseif {$readState eq "deferred" && [dict get $readResult new]} {
-            catch {els::status_note "large reload deferred - use File > Deferred Opens..."}
+            set what [expr {([dict exists $readResult reason] && [dict get $readResult reason] eq "remote") \
+                ? "network reload deferred" : "large reload deferred"}]
+            catch {els::status_note "$what - use File > Deferred Opens..."}
         }
         return 0
     }
@@ -4363,6 +4417,20 @@ proc els::open_quiet_failure {path err} {
     catch {els::log error "quiet open failed for $path: $err"}
     catch {els::status_note "file not opened: [file tail $path]"}
 }
+# A launch-file argument that failed to open is the user's own deliberate action
+# (a double-click / "Open with els"), not a background timer, so it earns a real
+# modal -- but only after the window is mapped (els::main defers this via `after`),
+# never during pre-UI startup.  A transient status note that clears in 4s would
+# otherwise leave an unexplained empty editor and no reason (R12).
+proc els::report_launch_failures {paths} {
+    if {![llength $paths]} { return }
+    set names {}
+    foreach p $paths { lappend names [file tail $p] }
+    set n [llength $paths]
+    set head [expr {$n == 1 ? "Could not open this file:" : "Could not open these $n files:"}]
+    els::message_box -parent . -icon error -title els \
+        -message "$head\n[join $names \n]\n\nSee els.log for details."
+}
 proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     set ::els::last_open_outcome cancelled
     if {$p eq ""} {
@@ -4414,7 +4482,9 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
             deferred {
                 set ::els::last_open_outcome deferred
                 if {[dict get $readResult new]} {
-                    catch {els::status_note "large file deferred - use File > Deferred Opens..."}
+                    set what [expr {([dict exists $readResult reason] && [dict get $readResult reason] eq "remote") \
+                        ? "network file deferred" : "large file deferred"}]
+                    catch {els::status_note "$what - use File > Deferred Opens..."}
                 }
             }
             failed {
@@ -4912,6 +4982,12 @@ $choice"
     pack $top.b   -padx 16 -pady {0 12}
     wm protocol $top WM_DELETE_WINDOW {set ::els::lossy_answer cancel}
     bind $top <Escape> {set ::els::lossy_answer cancel}
+    # Tk 9's TButton binds only <Key-space>, so the -default active button (which we
+    # also focus below) ignores Enter -- the Windows-standard accept key.  Bind it on
+    # the toplevel to the same answer the default button carries (R21).
+    set enterAns [expr {"utf8" in $actions ? "utf8" : "cancel"}]
+    bind $top <Return>   [list set ::els::lossy_answer $enterAns]
+    bind $top <KP_Enter> [list set ::els::lossy_answer $enterAns]
     set suspendToken [els::suspend_acquire]
     try {
         update idletasks
@@ -5042,9 +5118,18 @@ proc els::backup_keep {path} {
             set bytes [els::read_binary_file $path]
             set werr [els::write_atomic $target $bytes]
             if {$werr ne ""} { error $werr }
-            # prune the ring to the newest BK_RING entries (by mtime, F14)
+            # prune the ring to the newest BK_RING entries (by mtime, F14).  Never
+            # prune the backup we just wrote: after a BACKWARD wall-clock step (NTP
+            # correction of a fast clock, or a VM resume to an earlier snapshot) the
+            # older backups carry FUTURE mtimes, so the fresh one has the LOWEST mtime
+            # and would sort into the delete slice -- a frequently-saved file would then
+            # lose its just-made pre-save snapshot precisely while the clock is skewed.
+            # The ring may briefly hold BK_RING+1 entries; it self-corrects once the
+            # clock passes the stale future mtimes (BK audit, extends F14).
+            set keep [file tail $target]
             set ring [els::backup_ring $dir $glob]
             foreach old [lrange $ring 0 end-$::els::BK_RING] {
+                if {[file tail $old] eq $keep} { continue }
                 catch {file delete -force $old}
             }
         }
@@ -5362,9 +5447,14 @@ proc els::session_restore {} {
         set id [els::open $p 1 1]
         if {$id ne ""} {
             lappend restored [list $p $id]
-        } elseif {![els::deferred_contains $p]} {
-            # A deferred large file already has its own durable queue.  pending is
-            # only for files that could not be read right now, so don't duplicate it.
+        } else {
+            # The open produced no tab: the file could not be read right now, OR it was
+            # deferred (a network path, or larger than the open-warning size).  Keep it
+            # in the session either way -- session_pending is folded back into
+            # session_files by save_geometry, so dropping it here would silently erase
+            # the tab from every future startup, leaving it findable only via File >
+            # Deferred Opens.  A deferred path also lives in its own durable queue; the
+            # redundancy is harmless and self-heals the moment the file is opened (R05).
             lappend ::els::session_pending $p
         }
     }
@@ -5822,6 +5912,7 @@ proc els::build_findbar {} {
     els::tooltip .find.fr.help  "Regex quickref"
     els::tooltip .find.fr.prev  "Previous  (Shift+Enter)"
     els::tooltip .find.fr.next  "Next  (Enter)"
+    els::tooltip_for .find.fr.n els::find_count_tip
 
     ttk::frame .find.rr
     ttk::label .find.rr.l -text "Replace" -font elsUI -width 7 -anchor w
@@ -6068,6 +6159,17 @@ proc els::tip_schedule_cmd {w textcmd {delay 550}} {
 proc els::tip_pop_cmd {w textcmd} {
     if {![winfo exists $w]} { return }
     els::tip_pop $w [uplevel #0 $textcmd]
+}
+# The find-count label is a fixed 16-char slot; the async find worker routes long
+# diagnostics ("Find unavailable (worker control missing)", "Document too large to
+# search", "Find worker returned invalid data") through it, and -anchor e clips
+# them to an unreadable tail.  Its tooltip carries the full text, but only when the
+# label actually clips it -- an ordinary "3 of 12" count returns "" (no tip) (R22).
+proc els::find_count_tip {} {
+    if {![winfo exists .find.fr.n]} { return "" }
+    set s $::els::find_count
+    if {$s eq "" || [string length $s] <= [.find.fr.n cget -width]} { return "" }
+    return $s
 }
 
 # a compact, scannable regex quick reference, opened from the Find/Replace "?"
@@ -7364,7 +7466,11 @@ proc els::goto_line {} {
         grid $top.f.e -row 0 -column 1 -padx 6 -sticky ew
         grid $top.f.b -row 1 -column 0 -columnspan 2 -pady {10 0}
         pack $top.f
-        bind $top.f.e <Return> [list els::goto_do $top $id]
+        # Enter accepts from anywhere in the dialog -- the entry (TEntry has no class
+        # <Return> binding, so it bubbles here) or the -default active "Go" button
+        # after Tab, since Tk 9's TButton ignores Return (R21).
+        bind $top <Return>   [list els::goto_do $top $id]
+        bind $top <KP_Enter> [list els::goto_do $top $id]
         bind $top <Escape> [list destroy $top]
         update idletasks
         set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
@@ -7721,6 +7827,7 @@ proc els::main {} {
         # initial empty document).  Explicit launch files take precedence over
         # the saved session, which is only for a plain app start.
         set openedArgs 0
+        set failedArgs {}
         foreach f $fileArgs {
             if {[string index $f 0] ne "-"} {
                 # Startup arguments are not yet an interactive event-loop action:
@@ -7728,11 +7835,19 @@ proc els::main {} {
                 els::open $f 1
                 if {$::els::last_open_outcome in {opened already deferred}} {
                     set openedArgs 1
+                } elseif {$::els::last_open_outcome eq "failed"} {
+                    lappend failedArgs $f
                 }
             }
         }
         set ::els::session_boot_after \
             [after 80 [list els::session_boot $openedArgs]]   ;# session restore
+        # Surface any launch-arg open failures AFTER the UI is mapped and the event
+        # loop runs (the `after` lets els::main return first), so the modal never
+        # blocks startup; skipped under the headless probe so the suite stays modal-free.
+        if {!$startupProbe && [llength $failedArgs]} {
+            after 120 [list els::report_launch_failures $failedArgs]
+        }
         if {$startupProbe} {
             # Headless probe: report once startup/session work has settled, then exit.
             after 900 [list els::startup_probe $startupReport]

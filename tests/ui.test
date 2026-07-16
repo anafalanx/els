@@ -2674,3 +2674,40 @@ test drop-1.8 {a native drop waits until the active modal guard has closed} \
     if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
     unset -nocomplain ::_drop_raised
 } -result {{untitled 1 1 0} drop_modal.txt 0 {} 1}
+
+# ---- 0.95 hardening regressions (bug-hunt findings) ----------------------
+test tabs-1.8 {reordering untitled tabs relabels every tab, not just the dragged one (R17)} -setup {ui_reset} -body {
+    set a $::els::active
+    set b [els::new_doc]
+    els::refresh_tabs
+    els::switch_to $b
+    set ::els::docs [list $b $a]      ;# simulate a drag that moved b before a
+    els::tab_repack
+    # before the fix both tabs read the same positional identity ("untitled 1")
+    expr {[[els::tabW $a].name cget -text] ne [[els::tabW $b].name cget -text]}
+} -result 1
+
+test tabs-1.9 {the overflow menu dismisses the button tooltip before posting (R20)} -setup {ui_reset} -cleanup {
+    if {[llength [info commands ::_r20_real_tk_popup]]} { catch {rename ::tk_popup {}} ; rename ::_r20_real_tk_popup ::tk_popup }
+    catch {destroy .tip}
+} -body {
+    toplevel .tip ; label .tip.l -text x ; pack .tip.l    ;# a fake visible tooltip
+    rename ::tk_popup ::_r20_real_tk_popup
+    proc ::tk_popup {args} {}                              ;# neutralize the blocking menu
+    els::tabs_popup
+    set gone [expr {![winfo exists .tip]}]
+    rename ::tk_popup {} ; rename ::_r20_real_tk_popup ::tk_popup
+    set gone
+} -result 1
+
+test ui-10.4 {the find-count tooltip carries the full status only when the label clips it (R22)} -setup {ui_reset} -body {
+    set ::els::find_count "3 of 12"
+    set short [els::find_count_tip]
+    set ::els::find_count "Find unavailable (worker control missing)"
+    set long [els::find_count_tip]
+    list [expr {$short eq ""}] [expr {$long eq "Find unavailable (worker control missing)"}]
+} -result {1 1}
+
+test disk-ui-1.5 {the disk-state label west-anchors so a clipped state shows its leading word (R19)} -setup {ui_reset} -body {
+    .sb.disk cget -anchor
+} -result w

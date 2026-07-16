@@ -1346,16 +1346,18 @@ test bigfile-1.7 {explicit deferred-open consent has no second prompt or absolut
          [[els::W $id] count -chars 1.0 "end - 1 char"]
 } -result {1 0 0 5000}
 
-test bigfile-1.8 {session restore defers a large file without duplicating it as pending} \
+test bigfile-1.8 {session restore defers a large file AND keeps it in the session so the tab never silently vanishes (R05)} \
         -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
     set p [els_tmpfile big8.txt "large restored body\n"]
     set ::els::OPEN_WARN_SIZE 5
     set ::els::session_files [list $p]
     set ::els_test_mbcount 0
     set restored [els::session_restore]
+    # deferred (in the durable queue) AND retained in session_pending, so
+    # save_geometry keeps it in session_files instead of dropping it (R05).
     list $restored $::els_test_mbcount [llength $::els::session_pending] \
          [llength $::els::deferred_files] [els::deferred_contains $p]
-} -result {0 0 0 1 1}
+} -result {0 0 1 1 1}
 
 test bigfile-1.10 {a deferred-add write failure rolls memory back and reports failure} -setup {
     els_reset
@@ -1500,9 +1502,13 @@ test quiet-open-1.1 {quiet startup-style open failure is logged, nonmodal, and n
         -setup {els_reset} -body {
     set missing [file join $::ELS_TMP definitely-missing-open.txt]
     catch {file delete -force $missing}
+    # els.log is a shared, append-only file that els_reset never clears, and an
+    # earlier same-file test (bigfile-1.10) already writes "quiet open failed" into
+    # it -- so clear it here to attribute the phrase to THIS open, not a leftover (R31).
+    set log [file join [file dirname $::els::config_path] els.log]
+    catch {file delete -force $log}
     set ::els_test_mbcount 0
     set rc [els::open $missing 1]
-    set log [file join [file dirname $::els::config_path] els.log]
     list $rc $::els::last_open_outcome $::els_test_mbcount \
          [string match "*not opened*" [.sb.name cget -text]] \
          [expr {[file exists $log] && [string match "*quiet open failed*" [raw_read $log]]}]
@@ -1788,3 +1794,89 @@ test atomic-1.2 {write_atomic rejects an existing directory for durable and nond
          [file exists [file join $::ELS_TMP .dir-target-0.tmp]] \
          [file exists [file join $::ELS_TMP .dir-target-1.tmp]]
 } -result {1 1 1 0 0 0 0}
+
+# ---- 0.95 hardening regressions (bug-hunt findings) ----------------------
+test bk-1.15 {a backward clock step does not delete the just-written newest backup (BK audit)} -setup {els_reset} -cleanup {set ::els::BK_RING 8 ; set ::els::BK_MININT 60} -body {
+    set ::els::backups 1 ; set ::els::BK_MININT 0 ; set ::els::BK_RING 3
+    file mkdir [bk_dir]
+    set p [els_tmpfile bkclock.txt "orig\n"]
+    set stem [els::backup_stem $p]
+    # a full ring whose backups all carry FUTURE mtimes, as after an NTP/VM backward step
+    for {set i 1} {$i <= 3} {incr i} {
+        set f [file join [bk_dir] "$stem.2099010$i-000000-00000$i.bak"]
+        raw_write $f "future$i"
+        file mtime $f [expr {[clock seconds] + 100000 + $i}]
+    }
+    set id [els::open $p]
+    [els::W $id] insert end "edit" ; els::save
+    # the pre-save "orig" snapshot has a current-time (lowest) mtime; it must survive
+    set kept 0
+    foreach f [bk_ring $p] { if {[raw_read $f] eq "orig\n"} { set kept 1 } }
+    set kept
+} -result 1
+
+test bigfile-1.12 {a deferred read tags remote vs oversize so the note is not wrongly "large" (R11)} -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400 ; catch {file delete -force [els::deferred_path]}} -body {
+    set r [els::read_binary_guarded {//server/share/tiny.txt} 1 0]
+    set big [els_tmpfile big12.txt [string repeat x 5000]]
+    set ::els::OPEN_WARN_SIZE 5
+    set l [els::read_binary_guarded $big 1 0]
+    list [dict get $r state] [dict get $r reason] [dict get $l state] [dict get $l reason]
+} -result {deferred remote deferred large}
+
+test deferred-state-1.5 {a transient read fault preserves the queue instead of quarantining it (R10)} -setup {els_reset} -cleanup {
+    # only if the body threw before its own finally restored ::open
+    if {[llength [info commands ::_defer_real_open]]} { catch {rename ::open {}} ; rename ::_defer_real_open ::open }
+    unset -nocomplain ::_defer_fail
+    catch {file delete -force [els::deferred_path]}
+    foreach c [glob -nocomplain "[els::deferred_path].corrupt-*"] { catch {file delete -force $c} }
+} -body {
+    set keep [els_tmpfile deferred-keep.txt "hello"]
+    els::deferred_add $keep
+    set p [els::deferred_path]
+    set before [raw_read $p]
+    set ::_defer_fail [file normalize $p]
+    rename ::open ::_defer_real_open
+    proc ::open {args} {
+        if {[file normalize [lindex $args 0]] eq $::_defer_fail} { error "simulated sharing violation" }
+        return [uplevel 1 [list ::_defer_real_open {*}$args]]
+    }
+    set blocked "" ; set exists "" ; set nocorrupt "" ; set noticed ""
+    try {
+        els::deferred_load
+        set blocked $::els::deferred_blocked
+        set exists [file exists $p]
+        set nocorrupt [expr {[llength [glob -nocomplain "$p.corrupt-*"]] == 0}]
+        set noticed [expr {$::els::deferred_notice ne ""}]
+    } finally {
+        rename ::open {} ; rename ::_defer_real_open ::open
+    }
+    # raw_read below uses the RESTORED real open
+    list $blocked $exists $nocorrupt [expr {[raw_read $p] eq $before}] $noticed
+} -result {1 1 1 1 1}
+
+test session-r05-1 {a deferred (network) session file stays in session_pending instead of vanishing (R05)} -setup {els_reset} -cleanup {
+    set ::els::session_files {} ; set ::els::session_pending {} ; set ::els::session_active ""
+    catch {file delete -force [els::deferred_path]}
+} -body {
+    set ::els::restore_session 1
+    set ::els::session_files [list {//server/share/remote-doc.txt}]
+    set ::els::session_active ""
+    els::session_restore
+    list [llength $::els::session_pending] [string match {*remote-doc.txt} [lindex $::els::session_pending 0]]
+} -result {1 1}
+
+test launchfail-1.1 {a failed launch-file open is collected and reported after the UI is up (R12)} -setup {els_reset} -cleanup {
+    if {[llength [info commands ::_lf_real_mb]]} { catch {rename ::els::message_box {}} ; rename ::_lf_real_mb ::els::message_box }
+    unset -nocomplain ::_lf_msg
+} -body {
+    set bad [file join $::ELS_TMP does-not-exist-[pid].txt]
+    catch {file delete -force $bad}
+    els::open $bad 1
+    set outcome $::els::last_open_outcome
+    rename ::els::message_box ::_lf_real_mb
+    set ::_lf_msg ""
+    proc ::els::message_box {args} { set ::_lf_msg $args }
+    els::report_launch_failures [list $bad]
+    rename ::els::message_box {} ; rename ::_lf_real_mb ::els::message_box
+    list $outcome [string match {*Could not open*} $::_lf_msg] [string match "*[file tail $bad]*" $::_lf_msg]
+} -result {failed 1 1}
