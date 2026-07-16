@@ -988,7 +988,6 @@ test tabs-1.7 {all state marks and wide glyphs remain inside character/pixel cap
         -setup {ui_reset} -body {
     set id $::els::active
     set ::els::docPath($id) "C:/work/[string repeat 界 60].txt"
-    set ::els::docRecovered($id) 1
     set ::els::docDecodeLossy($id) 1
     [els::W $id] insert end x
     els::refresh_tabs
@@ -999,14 +998,14 @@ test tabs-1.7 {all state marks and wide glyphs remain inside character/pixel cap
     els::tabs_menu_rebuild
     set menu [.menu.tabs entrycget 0 -label]
     set avail [expr {[winfo width .tabs] - [winfo reqwidth .tabs.more]}]
-    list [string match "*•*" $label] [string match "*↺*" $label] \
+    list [string match "*•*" $label] \
          [string match "*�*" $label] \
          [expr {[string length $label] <= $::els::TAB_LABEL_MAX}] \
          [expr {[font measure elsUI $label] <= $::els::TAB_LABEL_PX}] \
          [expr {[string length $menu] <= $::els::TAB_MENU_MAX}] \
          [expr {[font measure elsUI $menu] <= $::els::TAB_MENU_PX}] \
          [expr {[winfo reqwidth [els::tabW $id]] <= $avail}]
-} -result {1 1 1 1 1 1 1 1}
+} -result {1 1 1 1 1 1 1}
 
 test deferred-ui-1.1 {File exposes a bounded, scrollable, keyboard-operable deferred list} \
         -setup {ui_reset} -body {
@@ -2449,67 +2448,6 @@ test bgerror-6.4 {els::bgerror logs the trace and posts one non-modal note, neve
     list $rc [string match {*while executing*} $txt] \
          [string match {*internal error*} [.sb.name cget -text]]
 } -result {0 1 1}
-
-test swap-fail-6.5 {persistent swap-write failure surfaces a note after ~3 straight failures} -setup {ui_reset} -body {
-    set p [raw_write swf.txt "content\n"]
-    els::open $p ; set id $::els::active
-    set ::els::swap_enabled 1
-    [els::W $id] insert end "dirty edit" ; els::swap_touch
-    rename els::write_atomic _els_wa_real
-    proc els::write_atomic {args} { return "forced failure" }
-    els::swap_flush_doc $id ; set s1 $::els::swap_fail_streak($id)
-    els::swap_flush_doc $id ; set s2 $::els::swap_fail_streak($id)
-    els::swap_flush_doc $id ; set s3 $::els::swap_fail_streak($id)
-    set noted [string match {*crash protection is failing*} [.sb.name cget -text]]
-    list $s1 $s2 $s3 $noted
-} -cleanup {
-    if {[llength [info commands _els_wa_real]]} {
-        catch {rename els::write_atomic {}}
-        rename _els_wa_real els::write_atomic
-    }
-    set ::els::swap_enabled 0
-} -result {1 2 3 1}
-
-test swap-fail-6.6 {a healthy swap write resets that doc's failure streak} -setup {ui_reset} -body {
-    set p [raw_write swf2.txt "content\n"]
-    els::open $p ; set id $::els::active
-    set ::els::swap_enabled 1
-    [els::W $id] insert end "dirty" ; els::swap_touch
-    set ::els::swap_fail_streak($id) 2            ;# pretend two prior failures
-    els::swap_flush_doc $id                        ;# a real, successful swap write
-    set streak $::els::swap_fail_streak($id)
-    els::swap_clear $id
-    set ::els::swap_enabled 0
-    set streak
-} -result 0
-
-test swap-fail-6.7 {a doc failing on a flaky mount still warns even while another doc keeps succeeding} -setup {ui_reset} -body {
-    set pa [raw_write swfA.txt "aaa\n"] ; set pb [raw_write swfB.txt "bbb\n"]
-    els::open $pa ; set a $::els::active
-    els::open $pb ; set b $::els::active
-    set ::els::swap_enabled 1
-    [els::W $a] insert end "edit a" ; [els::W $b] insert end "edit b"
-    # write_atomic fails ONLY for doc A's swap path; B (and everything else) succeeds
-    set apath [els::swap_path [els::session_id] $a]
-    rename els::write_atomic _els_wa_real
-    proc els::write_atomic {path args} {
-        if {$path eq $::_els_failpath} { return "forced failure" }
-        return [_els_wa_real $path {*}$args]
-    }
-    set ::_els_failpath $apath
-    # three full all-docs flush passes (the real timer path): A fails every time,
-    # B succeeds the first pass then no-ops (content unchanged) — either way healthy
-    foreach _ {1 2 3} { els::swap_flush_all }
-    list $::els::swap_fail_streak($a) $::els::swap_fail_streak($b) \
-         [string match {*crash protection is failing*} [.sb.name cget -text]]
-} -cleanup {
-    if {[llength [info commands _els_wa_real]]} {
-        catch {rename els::write_atomic {}}
-        rename _els_wa_real els::write_atomic
-    }
-    unset -nocomplain ::_els_failpath
-    set ::els::swap_enabled 0
-} -result {3 0 1}
 
 # ---- right-click context menus + Select All -------------------------------
 

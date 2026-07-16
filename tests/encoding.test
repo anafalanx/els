@@ -746,15 +746,6 @@ test astral-2.2 {decomposed Hangul jamo stay distinct from the precomposed sylla
     list [string length $line] [expr {$line eq "\uac00"}] [expr {$line eq "\u1100\u1161"}]
 } -result {2 0 1}
 
-test astral-2.3 {astral content survives the swap serialize/deserialize round-trip (crash-recovery format)} -setup {els_reset} -body {
-    [els::T] insert end $::ASTRAL
-    set id $::els::active
-    set want [[els::T] get 1.0 "end - 1 char"]
-    set blob [els::swap_serialize $id [els::session_id]]
-    set rec [els::swap_read [write_raw astral_swap.swp $blob]]
-    expr {[dict exists $rec text] && [dict get $rec text] eq $want}
-} -result 1
-
 # ---- bug-hunt wave 2: ICU verdicts the name map must not drop ---------------
 # ICU reports logical-order Hebrew as ISO-8859-8-I — byte-table identical to
 # ISO-8859-8 (the -I only flags ordering).  icu_to_tcl returned "" for it, so a
@@ -799,16 +790,6 @@ test reopen-empty-6.1 {Reopen with Encoding works on a genuinely empty (0-byte) 
     els::reopen_with utf-16le 0                     ;# must NOT pop the "recovered content" refusal
     list $before [list $::els::docEnc($id) [els_text $id]] $::els_test_mbcount
 } -result {{utf-8 {}} {utf-16le {}} 0}
-
-test reopen-recovered-6.1 {Reopen with Encoding STILL refuses a recovered-but-unsaved tab (uncached bytes)} -setup {els_reset} -body {
-    set id $::els::active
-    set ::els::docPath($id) [file join $::ELS_TMP recov6.txt]   ;# has a path...
-    set ::els::docRaw($id) ""                                   ;# ...but no cached bytes
-    set ::els::docRecovered($id) 1                              ;# and it's a recovered tab
-    set ::els_test_mbcount 0
-    els::reopen_with utf-16le 0
-    list $::els::docEnc($id) $::els_test_mbcount                ;# unchanged + one refusal dialog
-} -result {utf-8 1}
 
 test lossy-utf8-6.1 {the lossy dialog omits the pointless "Save as UTF-8" action when the target is already utf-8 (F22)} -body {
     list [els::lossy_actions utf-8] [els::lossy_actions cp1252] [els::lossy_actions shiftjis]

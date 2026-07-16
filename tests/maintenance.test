@@ -1,0 +1,54 @@
+# tests/maintenance.test -- the startup maintenance sweep and save durability.
+#
+# 0.95 removed crash recovery of unsaved buffers and the single-instance/handoff
+# machinery.  What remains for on-disk safety: atomic saves with a durable flush,
+# the previous-version backup ring, and a boot-time sweep that ages backups out and
+# reaps any dead swap/handoff sidecar state a pre-0.95 install left behind.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+test maintenance-1.1 {maintenance_sweep reaps leftover swap/ + handoff/ dirs and ages old backups} -setup {els_reset} -body {
+    set root [file dirname $::els::config_path]
+    file mkdir [file join $root swap] [file join $root handoff] [file join $root backups]
+    raw_write [file join $root swap leftover.swp] "x"
+    raw_write [file join $root handoff leftover.open] "y"
+    set old [file join $root backups f.txt.00000000.20200101-000000.bak]
+    raw_write $old "ancient" ; file mtime $old [expr {[clock seconds] - $::els::BK_MAXAGE - 100}]
+    set fresh [file join $root backups f.txt.00000000.20990101-000000.bak]
+    raw_write $fresh "recent"
+    els::maintenance_sweep
+    list [file exists [file join $root swap]] [file exists [file join $root handoff]] \
+         [file exists $old] [file exists $fresh]
+} -result {0 0 0 1}
+
+test maintenance-1.2 {maintenance_sweep is a harmless no-op when there is nothing to reap} -setup {els_reset} -body {
+    set rc [catch {els::maintenance_sweep} e]
+    list $rc [file exists [file dirname $::els::config_path]]
+} -result {0 1}
+
+# ---- save durability: a failed flush must not report success --------------
+test durable-1.1 {a failed durable flush fails the save and keeps the doc dirty until a clean retry} -setup {
+    els_reset
+    if {[llength [info commands ::els::win_fsync]]} { rename ::els::win_fsync ::_els_real_fsync }
+    set ::_els_fsync_fail 1
+    proc ::els::win_fsync {path} {
+        if {$::_els_fsync_fail} { return "simulated FlushFileBuffers failure" }
+        return ""
+    }
+} -cleanup {
+    catch {rename ::els::win_fsync {}}
+    if {[llength [info commands ::_els_real_fsync]]} { rename ::_els_real_fsync ::els::win_fsync }
+} -body {
+    set p [file join $::ELS_TMP durable-retain.txt]
+    raw_write $p "old\n"
+    els::open $p ; set id $::els::active
+    [els::W $id] delete 1.0 end ; [els::W $id] insert end "new durable content"
+    set first [els::save $id]                          ;# durable flush fails -> 0
+    set dirty1 [els::doc_dirty $id]                     ;# kept dirty
+    set rebased [expr {[els::file_sig $p] eq [els::doc_saved_sig $id]}]
+    set ::_els_fsync_fail 0
+    set second [els::save $id]                          ;# retry succeeds
+    list $first $dirty1 $rebased $second \
+         [expr {[raw_read $p] eq "new durable content"}] [els::doc_dirty $id]
+} -result {0 1 1 1 1 0}

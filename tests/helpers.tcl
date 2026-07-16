@@ -42,10 +42,6 @@ set ::els_shipped_backups $::els::backups
 set ::els::config_path [file join $::ELS_TMP els.conf]
 catch {file delete -force $::els::config_path}
 
-# Autosave/crash-recovery is OFF by default in the suite (it would write swap
-# files and schedule timers on every edit); recover.test turns it on explicitly.
-set ::els::swap_enabled 0
-
 # ---- total control of error reporting: no dialog ever reaches the screen ----
 #
 # THE fix for GUI error boxes "raining" on the desktop.  Loading Tk installs a
@@ -142,10 +138,9 @@ proc els_reset {} {
     set ::els::docs {}
     set ::els::active ""
     set ::els::seq 0
-    foreach a {docPath docEnc docBom docEol docRaw docRecovered docRecoverySource docDecodeLossy docFormatPending swapSig savedSig
+    foreach a {docPath docEnc docBom docEol docRaw docDecodeLossy docFormatPending savedSig
                docDiskState docDiskMeta docDiskContent docDiskDetail docDiskDeepAt
-               savedSigPath dirtySince loading docLossyOk docLossyPause docExtModPause
-               swap_fail_streak handoff_seen docEpoch} {
+               savedSigPath loading docLossyOk docLossyPause docExtModPause docEpoch} {
         array unset ::els::$a
         array set ::els::$a {}
     }
@@ -154,19 +149,11 @@ proc els_reset {} {
     catch {wm state . normal}
     set ::els_test_lossy_answer cancel
     set ::els_test_lossy_calls {}
-    # Crash-recovery subsystem: cancel any pending timers and reset all state so a
-    # stray swap `after` can't fire into the next test.  swap_enabled/swap_test_mtime
-    # must be restored here too — recover.test enables them per-test, and a leak
-    # leaves autosave running for every later test FILE (timing flakiness).
-    catch {els::swap_stop}
-    catch {els::handoff_stop}
     catch {els::disk_watch_deactivate}
-    set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
-    set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    set ::els::swap_suspend 0
     set ::els::swap_suspend_tokens {} ; set ::els::swap_suspend_base 0
-    set ::els::handoff_after ""
     set ::els::drop_pending {} ; set ::els::drop_after ""
-    set ::els::recover_boot_after ""
+    set ::els::session_boot_after ""
     set ::els::autosave 0 ; set ::els::autosave_pending {}
     catch {after cancel $::els::autosave_after} ; set ::els::autosave_after ""
     # backups OFF in the suite (the product default is on): save tests stay
@@ -179,14 +166,8 @@ proc els_reset {} {
     set ::els::FIND_SLICE_CHARS 262144 ; set ::els::FIND_SLICE_BYTES 262144
     set ::els::FIND_SEARCH_MS 10000 ; set ::els::FIND_REPLACE_MS 30000
     set ::els::find_worker_command_override {}
-    set ::els::swap_interval 2000 ; set ::els::swap_debounce 400   ;# tick/debounce periods (F11 tests retune these)
     set ::els::status_note_after ""   ;# afters were cancelled above; unblock namelabel
     catch {file delete -force [file join [file dirname $::els::config_path] backups]}
-    # Release a held session lock BEFORE blanking the variables: the cfg tests
-    # acquire a real one via set_config_path, and dropping the only reference
-    # without closing leaked the channel and made their cleanup deletes fail
-    # silently (the lock file stayed open).
-    catch {els::lock_release}
     # Cancel every view-layer deferral too: find_after is a 130 ms TIMER and
     # tip_after 550 ms — they survive widget destruction, so one test's pending
     # callback could fire into a LATER test's update (order-dependent flakes).
@@ -227,9 +208,6 @@ proc els_reset {} {
     set ::els::disk_watch_active 0 ; set ::els::DISK_WATCH_MS 5000
     set ::els::DISK_DEEP_BACKOFF_MS 1500 ; set ::els::DISK_DEEP_PROBE_CAP 16777216
     set ::els::session_id_cached "" ; set ::els::session_token_cached ""
-    set ::els::lock_handle "" ; set ::els::lock_chan ""
-    set ::els::last_recover 0 ; set ::els::recover_auto 0
-    set ::els::recover_claims {}
     set ::els::show_ws 0 ; set ::els::word_wrap 0 ; set ::els::show_linenos 1
     set ::els::focus_mode 0
     set ::els::always_on_top 0 ; catch {wm attributes . -topmost 0}

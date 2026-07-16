@@ -457,12 +457,10 @@ test saveas-1.6 {a throwing save restores the complete Save As snapshot before r
     set old [els_tmpfile saveas_throw_old.txt "old\n"]
     els::open $old ; set id $::els::active
     [els::W $id] insert end "dirty"
-    set ::els::docRecovered($id) 1
     set ::els::docLossyPause($id) 1
-    set ::els::dirtySince($id) 1
     set fields {docEnc docBom docEol docRaw savedSig savedSigPath \
                 docExtModPause docDecodeLossy docLossyOk docLossyPause \
-                docFormatPending docRecovered swapSig dirtySince swap_fail_streak}
+                docFormatPending}
     set before [lmap name $fields {
         set slot "::els::${name}($id)"
         if {[info exists $slot]} { list 1 [set $slot] } else { list 0 "" }
@@ -473,7 +471,7 @@ test saveas-1.6 {a throwing save restores the complete Save As snapshot before r
     proc ::els::save {id args} {
         foreach name {docEnc docBom docEol docRaw savedSig savedSigPath \
                       docExtModPause docDecodeLossy docLossyOk docLossyPause \
-                      docFormatPending docRecovered swapSig dirtySince swap_fail_streak} {
+                      docFormatPending} {
             set ::els::${name}($id) CORRUPTED
         }
         [els::W $id] edit modified 0
@@ -727,9 +725,7 @@ test bk-1.8 {old backups age out via the sweep} -setup {els_reset} -body {
     file mtime $old [expr {[clock seconds] - $::els::BK_MAXAGE - 100}]
     set fresh [file join [bk_dir] "new.txt.00000000.20990101-000000.bak"]
     raw_write $fresh "recent"
-    set ::els::swap_enabled 1
-    els::swap_sweep
-    set ::els::swap_enabled 0
+    els::maintenance_sweep
     list [file exists $old] [file exists $fresh]
 } -result {0 1}
 
@@ -963,7 +959,7 @@ test extstate-1.2 {an unreadable target pauses quiet save and needs explicit man
 # therefore always drops volatile mtime without a middle-write blind spot.
 
 test extmod-1.10 {sig_content drops mtime at every size now that every CRC is full-content} -body {
-    set cap $::els::SWAP_FILE_CRC_CAP
+    set cap 16777216
     list [els::sig_content "1000:111:222"] \
          [els::sig_content "[expr {$cap + 1}]:111:222"] \
          [expr {[els::sig_content "[expr {$cap+1}]:111:222"] ne \
@@ -1362,22 +1358,6 @@ test bigfile-1.8 {session restore defers a large file without duplicating it as 
          [llength $::els::deferred_files] [els::deferred_contains $p]
 } -result {0 0 0 1 1}
 
-test bigfile-1.9 {timer-driven handoff consumes its spool but defers a large file without a modal} \
-        -setup {els_reset} -cleanup {
-            set ::els::OPEN_WARN_SIZE 26214400
-            catch {file delete -force [file join $::ELS_TMP handoff]}
-        } -body {
-    set p [els_tmpfile big9.txt "large handoff body\n"]
-    set ::els::OPEN_WARN_SIZE 5
-    els::handoff_send $::els::config_path [list $p]
-    set hd [file join $::ELS_TMP handoff]
-    set ::els_test_mbcount 0
-    els::handoff_drain
-    list $::els_test_mbcount [llength [glob -nocomplain -directory $hd *.open]] \
-         [els::deferred_contains $p] \
-         [expr {[lsearch -exact [lmap id $::els::docs {set ::els::docPath($id)}] [file normalize $p]] < 0}]
-} -result {0 0 1 1}
-
 test bigfile-1.10 {a deferred-add write failure rolls memory back and reports failure} -setup {
     els_reset
     set p1 [els_tmpfile defer_txn_keep.txt "keep\n"]
@@ -1556,7 +1536,7 @@ test quiet-open-1.2 {quiet extended-UNC open defers durably before every documen
          $::els_test_mbcount
 } -result {{} deferred 1 1 0 0 0}
 
-test quiet-open-1.3 {session restore and handoff both route UNC paths to the same zero-probe durable queue} \
+test quiet-open-1.3 {session restore routes UNC paths to the zero-probe durable queue} \
         -setup {
             els_reset
             rename ::els::read_preflight_size ::els::read_preflight_size_real
@@ -1574,21 +1554,15 @@ test quiet-open-1.3 {session restore and handoff both route UNC paths to the sam
             if {[llength [info commands ::els::_read_binary_prefix_real]]} {
                 rename ::els::_read_binary_prefix_real ::els::_read_binary_prefix
             }
-            catch {file delete -force [file join $::ELS_TMP handoff]}
             unset -nocomplain ::unc_preflight_calls ::unc_read_calls
         } -body {
     set fromSession {//offline/share/session.txt}
-    set fromHandoff {\\?\UNC\offline\share\handoff.txt}
     set ::els::session_files [list $fromSession]
     set ::els::restore_session 1
     set restored [els::session_restore]
-    set sent [els::handoff_send $::els::config_path [list $fromHandoff]]
-    els::handoff_drain
-    list $restored $sent [els::deferred_contains $fromSession] \
-         [els::deferred_contains $fromHandoff] $::unc_preflight_calls \
-         $::unc_read_calls $::els_test_mbcount \
-         [llength [glob -nocomplain -directory [file join $::ELS_TMP handoff] *.open]]
-} -result {0 1 1 1 0 0 0 0}
+    list $restored [els::deferred_contains $fromSession] \
+         $::unc_preflight_calls $::unc_read_calls $::els_test_mbcount
+} -result {0 1 0 0 0}
 
 test bounded-read-1.1 {post-stat growth is caught by threshold+1 and durably deferred when quiet} \
         -setup {
