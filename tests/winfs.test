@@ -35,34 +35,6 @@ test winfs-1.2 {win_replace_file preserves an alternate data stream (mark-of-the
     list $err $got $ads
 } -result {{} EDITED 1}
 
-# ---- bug-hunt wave 6: session-lock share mode + idempotent re-acquire ------
-
-test winfs-2.1 {a held session lock cannot be deleted by another open; re-acquire is idempotent} -constraints winfsBuilt -setup {load_winfs} -body {
-    set lp [file join $::ELS_TMP wfs_lock.lock]
-    catch {els::win_unlock_file}
-    catch {file delete -force $lp}
-    set r1 [els::win_lock_file [file nativename $lp]]
-    set r2 [els::win_lock_file [file nativename $lp]]   ;# same path: must not fail
-    set delHeld [catch {file delete -force $lp}]         ;# DELETE denied while held
-    set survives [file exists $lp]
-    els::win_unlock_file
-    set delFree [catch {file delete -force $lp}]
-    list $r1 $r2 $delHeld $survives $delFree
-} -result {{} {} 1 1 0}
-
-test winfs-2.2 {try_lock still reads held/free/missing correctly with the tightened share mode} -constraints winfsBuilt -setup {load_winfs} -body {
-    set lp [file join $::ELS_TMP wfs_lock2.lock]
-    catch {els::win_unlock_file}
-    catch {file delete -force $lp}
-    els::win_lock_file [file nativename $lp]
-    set held [els::win_try_lock [file nativename $lp]]   ;# 0 = live owner
-    els::win_unlock_file
-    set free [els::win_try_lock [file nativename $lp]]   ;# 1 = no owner
-    file delete -force $lp
-    set missing [els::win_try_lock [file nativename $lp]]
-    list $held $free $missing
-} -result {0 1 1}
-
 test winfs-3.1 {win_virtual_screen returns a 4-int rect covering all monitors} -constraints winfsBuilt -setup {load_winfs} -body {
     set r [els::win_virtual_screen]
     # {x y w h}: x/y may be negative (a monitor left/above the primary); w/h > 0.
@@ -74,19 +46,22 @@ test winfs-3.1 {win_virtual_screen returns a 4-int rect covering all monitors} -
 } -result {4 1 1 1}
 
 test winfs-4.1 {failed native atomic replacements keep the target and complete rescue temp intact} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
-    # Hold the target open WITHOUT share-delete so both ReplaceFileW and the
-    # rename-replace fail.  The save path must never truncate the target in place;
-    # the complete temp survives and is named in the error instead.
+    # Force BOTH the native ReplaceFileW and the rename-replace fallback to fail.
+    # The save path must never then truncate the target in place; the complete temp
+    # survives and is named in the error, and the legacy in-place helper is untouched.
     set p [file join $::ELS_TMP wfs_rescue.txt]
     set f [open $p wb] ; puts -nonewline $f "old content" ; close $f
-    catch {els::win_unlock_file}
-    els::win_lock_file [file nativename $p]
+    rename els::win_replace_file _els_repl_real
+    proc els::win_replace_file {args} { return "simulated replace failure" }
+    rename els::_atomic_rename _els_rename_real
+    proc els::_atomic_rename {args} { error "simulated rename failure" }
     rename els::_write_inplace _els_wip_real
     set ::_els_wip_calls 0
     proc els::_write_inplace {args} { incr ::_els_wip_calls ; return "must not run" }
     set err [els::write_atomic $p "new rescued bytes"]
+    rename els::win_replace_file {} ; rename _els_repl_real els::win_replace_file
+    rename els::_atomic_rename {} ; rename _els_rename_real els::_atomic_rename
     rename els::_write_inplace {} ; rename _els_wip_real els::_write_inplace
-    els::win_unlock_file
     set gotTmp [regexp {safe at: ([^)]+)\)} $err -> tmp]
     set tmp [string trim $tmp]
     set ok [expr {$gotTmp && [file exists $tmp] && [raw_read $tmp] eq "new rescued bytes"}]
@@ -94,8 +69,9 @@ test winfs-4.1 {failed native atomic replacements keep the target and complete r
     catch {file delete -force $tmp} ; catch {file delete -force $p}
     list $::_els_wip_calls [string match "atomic replacement failed:*" $err] $ok $original
 } -cleanup {
+    if {[llength [info commands _els_repl_real]]} { catch {rename els::win_replace_file {}} ; rename _els_repl_real els::win_replace_file }
+    if {[llength [info commands _els_rename_real]]} { catch {rename els::_atomic_rename {}} ; rename _els_rename_real els::_atomic_rename }
     if {[llength [info commands _els_wip_real]]} { catch {rename els::_write_inplace {}} ; rename _els_wip_real els::_write_inplace }
-    catch {els::win_unlock_file}
 } -result {0 1 1 {old content}}
 
 test winfs-1.3 {els::save routes through win_replace_file and preserves the file's ADS (the native-build path)} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
@@ -136,85 +112,69 @@ test winfs-5.3 {write_atomic with durable=1 (the save path) flushes and round-tr
     list $err $got [llength $residue]
 } -result {{} {new durable content} 0}
 
-# ---- bug-hunt: extended-length (long-path) handling in utf8_to_wide ---------
-# The \\?\ prefix must be added for any path Win32's non-prefixed APIs can't take
-# (>= MAX_PATH, since MAX_PATH counts the NUL), and the held-lock path must be
-# stored WITHOUT truncation so re-acquire stays idempotent at any length.
+# ---- bug-hunt: extended-length (long-path) and embedded-NUL handling --------
+# utf8_to_wide adds the \\?\ prefix for any path Win32's non-prefixed APIs can't
+# take (>= MAX_PATH, since MAX_PATH counts the NUL) and rejects embedded NULs so a
+# truncated string can never address a DIFFERENT file.  Every native path command
+# shares this converter; win_fsync/win_replace_file exercise it here.
 
-test winfs-6.1 {win_lock_file works at exactly MAX_PATH=260 chars (off-by-one, F39)} -constraints winfsBuilt -setup {load_winfs} -body {
+test winfs-6.1 {native path commands work at exactly MAX_PATH=260 chars (off-by-one, F39)} -constraints winfsBuilt -setup {load_winfs} -body {
     set dir [file nativename $::ELS_TMP]
-    set need [expr {260 - [string length $dir] - 1 - 5}]   ;# 1 separator + ".lock" (5)
+    set need [expr {260 - [string length $dir] - 1 - 4}]   ;# 1 separator + ".txt" (4)
     if {$need < 1} { return {260 {}} }                     ;# ELS_TMP too long to exercise here
-    set lp [file join $::ELS_TMP "[string repeat a $need].lock"]
-    set len [string length [file nativename $lp]]
-    catch {els::win_unlock_file}
-    set r [els::win_lock_file [file nativename $lp]]        ;# pre-fix: "open lock error 3"
-    els::win_unlock_file
-    catch {file delete -force $lp}
+    set p [file join $::ELS_TMP "[string repeat a $need].txt"]
+    set len [string length [file nativename $p]]
+    set f [open $p w] ; puts -nonewline $f durable ; close $f
+    set r [els::win_fsync [file nativename $p]]            ;# pre-fix: "open error 3"
+    catch {file delete -force $p}
     list $len $r
 } -result {260 {}}
 
-test winfs-6.2 {re-acquiring a >520-char lock path stays idempotent (g_lock_path not truncated, F40)} -constraints winfsBuilt -setup {load_winfs} -body {
+test winfs-6.2 {native path commands handle >520-char extended-length paths} -constraints winfsBuilt -setup {load_winfs} -body {
     set top [file join $::ELS_TMP [string repeat p 200]]
     set d [file join $top [string repeat q 200] [string repeat r 120]]
     file mkdir $d
-    set lp [file join $d "[string repeat s 120].lock"]
-    catch {els::win_unlock_file}
-    set r1 [els::win_lock_file [file nativename $lp]]
-    set r2 [els::win_lock_file [file nativename $lp]]       ;# SAME long path: pre-fix "lock held (error 33)"
-    els::win_unlock_file
+    set p [file join $d "[string repeat s 120].txt"]
+    set f [open $p w] ; puts -nonewline $f durable ; close $f
+    set r [els::win_fsync [file nativename $p]]
     catch {file delete -force $top}
-    list [expr {[string length [file nativename $lp]] > 520}] $r1 $r2
-} -result {1 {} {}}
+    list [expr {[string length [file nativename $p]] > 520}] $r
+} -cleanup {
+    catch {file delete -force [file join $::ELS_TMP [string repeat p 200]]}
+} -result {1 {}}
 
-test winfs-6.3 {embedded NUL cannot truncate a native path to a different lock file} -constraints winfsBuilt -setup {load_winfs} -body {
-    set lp [file join $::ELS_TMP wfs_nul.lock]
-    set f [open $lp w] ; close $f
-    # A conversion failure is conservative (0 = maybe live).  Before the NUL
-    # guard Win32 saw only $lp, successfully probed that free file, and returned 1.
-    set r [els::win_try_lock "[file nativename $lp]\0ignored"]
-    file delete -force $lp
+test winfs-6.3 {embedded NUL cannot truncate a native path to a different file} -constraints winfsBuilt -setup {load_winfs} -body {
+    set p [file join $::ELS_TMP wfs_nul.txt]
+    set f [open $p w] ; close $f
+    # Before the NUL guard Win32 saw only $p and flushed that real file ("");
+    # the guard must reject the whole string instead of acting on a truncated path.
+    set r [els::win_fsync "[file nativename $p]\0ignored"]
+    file delete -force $p
     set r
-} -result 0
+} -result {path conversion failed}
 
-test winfs-6.4 {BMP and astral Unicode paths round-trip through replace, fsync, and lock APIs} -constraints winfsBuilt -setup {load_winfs} -body {
+test winfs-6.4 {BMP and astral Unicode paths round-trip through replace and fsync} -constraints winfsBuilt -setup {load_winfs} -body {
     set top [file join $::ELS_TMP "Jos\u00E9-\u4F60\u597D-\U0001F600"]
     file mkdir $top
     set tgt [file join $top "cafe\u0301-\U0001F680.txt"]
     set tmp [file join $top "replacement-\u03A9.tmp"]
-    set lp  [file join $top "session-\U0001F512.lock"]
     set f [open $tgt w] ; puts -nonewline $f OLD ; close $f
     set f [open $tmp w] ; puts -nonewline $f "NEW" ; close $f
     set replaced [els::win_replace_file [file nativename $tgt] [file nativename $tmp]]
     set flushed [els::win_fsync [file nativename $tgt]]
-    catch {els::win_unlock_file}
-    set locked [els::win_lock_file [file nativename $lp]]
-    set held [els::win_try_lock [file nativename $lp]]
-    els::win_unlock_file
-    set free [els::win_try_lock [file nativename $lp]]
     set body [raw_read $tgt]
     file delete -force $top
-    list $replaced $flushed $locked $held $free $body
+    list $replaced $flushed $body
 } -cleanup {
-    catch {els::win_unlock_file}
     catch {file delete -force [file join $::ELS_TMP "Jos\u00E9-\u4F60\u597D-\U0001F600"]}
-} -result {{} {} {} 0 1 NEW}
+} -result {{} {} NEW}
 
-test winfs-6.5 {zero-argument commands reject extras without releasing the held lock} -constraints winfsBuilt -setup {load_winfs} -body {
-    set lp [file join $::ELS_TMP wfs_arity.lock]
-    catch {els::win_unlock_file}
-    els::win_lock_file [file nativename $lp]
-    set unlockRc [catch {els::win_unlock_file extra} unlockErr]
-    set stillHeld [els::win_try_lock [file nativename $lp]]
+test winfs-6.5 {single-path / zero-arg native commands reject wrong arity} -constraints winfsBuilt -setup {load_winfs} -body {
     set screenRc [catch {els::win_virtual_screen extra} screenErr]
-    els::win_unlock_file
-    file delete -force $lp
-    list $unlockRc [string match {wrong # args:*win_unlock_file*} $unlockErr] \
-         $stillHeld $screenRc [string match {wrong # args:*win_virtual_screen*} $screenErr]
-} -cleanup {
-    catch {els::win_unlock_file}
-    catch {file delete -force [file join $::ELS_TMP wfs_arity.lock]}
-} -result {1 1 0 1 1}
+    set fsyncRc [catch {els::win_fsync} fsyncErr]
+    list $screenRc [string match {wrong # args:*win_virtual_screen*} $screenErr] \
+         $fsyncRc [string match {wrong # args:*path*} $fsyncErr]
+} -result {1 1 1 1}
 
 # ---- shell integration ---------------------------------------------------
 

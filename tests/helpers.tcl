@@ -200,9 +200,9 @@ proc els_reset {} {
     set ::els::last_open_outcome ""
     set ::els::tabs_menu_choice ""
     # And as the final backstop, cancel EVERY pending after (e.g. the
-    # `after idle recover_boot` scheduled by config_apply_choice in cfg-1.3,
-    # which otherwise fired mid-suite and could deiconify a REAL recovery
-    # dialog over the desktop).
+    # `after ... session_boot` scheduled by config_apply_choice in cfg-1.3,
+    # which otherwise fired mid-suite and could run session restore against
+    # the desktop).
     foreach a [after info] { catch {after cancel $a} }
     set ::els::probe_quiet 0
     set ::els::disk_watch_active 0 ; set ::els::DISK_WATCH_MS 5000

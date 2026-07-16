@@ -372,7 +372,7 @@ proc task_help {args} {
   z sign [in]           sign a release-check artifact, verify identity, re-probe,
                         then promote to the fixed dist/els.exe release path
                         publisher is source-pinned; ELS_SIGN_CERT_SHA1 may pin the leaf
-  z probe-exe [exe]     verify the fused exe's startup/session/recovery behavior
+  z probe-exe [exe]     verify the fused exe's startup and session-restore behavior
   z pecheck [mode] [exe] verify AMD64/GUI/mitigations/manifest/certificate policy;
                         mode is --unsigned (default) or --signed
   z build-ext           compile the C23 extension(s) in src/ -> build/*.dll
@@ -1878,7 +1878,6 @@ proc task_run {args} {
     # against a missing or stale winfs.dll: the resulting editor would appear
     # healthy but Find/Replace would be deliberately unavailable.
     ensure_native_support
-    set ::env(ELS_NO_SINGLE_INSTANCE) 1
     exec [wish] [P els.tcl] {*}$args &
     puts "launched els"
 }

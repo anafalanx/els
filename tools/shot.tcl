@@ -192,7 +192,6 @@ proc shot_wait_ready {timeoutMs} {
 # Called only by tools/private_shot.tcl inside the private-desktop Wish child.
 proc shot_private_capture {script out status expectedTitle files} {
     load [file join $::SHOT_ROOT build cap.dll] Cap
-    set ::env(ELS_NO_SINGLE_INSTANCE) 1
     unset -nocomplain ::ELS_SHOT_READY ::ELS_SHOT_TARGET
     set ::argv $files
     set ::argv0 $script
@@ -244,7 +243,6 @@ proc shot_private_capture {script out status expectedTitle files} {
     shot_write_status $status [dict merge \
         [dict create status ok width $width height $height target $target \
             title [wm title $target] bytes [file size $out]] $stats]
-    catch {els::swap_shutdown}
 }
 
 proc shot_private_entry {argv} {
@@ -255,7 +253,6 @@ proc shot_private_entry {argv} {
     set rc [catch {shot_private_capture $script $out $status $title $files} err opts]
     if {$rc} {
         catch {shot_write_status $status [dict create status error message [string range $err 0 8191]]}
-        catch {els::swap_shutdown}
         catch {destroy .}
         exit 1
     }
@@ -448,7 +445,6 @@ proc main {argv} {
     if {$wish eq "" || $script eq "" || $out eq ""} {
         error "usage: shot.tcl <wish.exe> <els.tcl> <out.png> \[file ...\]"
     }
-    set ::env(ELS_NO_SINGLE_INSTANCE) 1
     set expectedTitle [expr {[info exists ::env(ELS_SHOT_TITLE)] ? $::env(ELS_SHOT_TITLE) : ""}]
     set result [shot_run_private $wish $script $out $files $expectedTitle]
     puts "wrote [file normalize $out] ([dict get $result width]x[dict get $result height]) on a private desktop; foreground unchanged"

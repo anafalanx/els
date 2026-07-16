@@ -30,7 +30,7 @@ set script [file normalize [info script]]
 set root [file dirname [file dirname $script]]
 set here [file join $root tests]
 set expectedFiles {
-    els.test elsx.test encoding.test find.test harness.test recover.test
+    els.test elsx.test encoding.test find.test harness.test maintenance.test
     startup.test stress.test ui.test units.test view.test winfs.test xform.test
 }
 

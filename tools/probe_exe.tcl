@@ -76,22 +76,12 @@ proc wait_report {report pid} {
     error "exe probe did not finish: $report"
 }
 
-# Frame a swap file exactly like els::swap_serialize (text stored as the internal
-# string; the whole dict is UTF-8-encoded once; length+crc trailer).
-proc make_swap {sid docId text {path ""} {savedSig ""} {enc utf-8} {eol lf}} {
-    set d [dict create schema 1 sessionId $sid docId $docId path $path enc $enc \
-               bom 0 eol $eol cursor 1.0 dirty 1 savedSig $savedSig \
-               mtime [clock seconds] host forged text $text]
-    set payload [encoding convertto -profile replace utf-8 $d]
-    return "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
-}
-
 proc with_probe_environment {app pairs body} {
     set names {
         APPDATA LOCALAPPDATA HOME USERPROFILE TEMP TMP PATH
         TCL_LIBRARY TK_LIBRARY TCLLIBPATH TCL_PACKAGE_PATH
         Z_HOME Z_ROOT Z_TCLTK Z_MSYS2 Z_TWAPI MSYSTEM MINGW_PREFIX
-        ELS_STARTUP_PROBE ELS_RECOVER_AUTO ELS_PROBE_LINGER
+        ELS_STARTUP_PROBE
     }
     foreach name [array names ::env TCL*] { if {$name ni $names} { lappend names $name } }
     foreach name [array names ::env TK_*] { if {$name ni $names} { lappend names $name } }
@@ -134,17 +124,16 @@ proc with_probe_environment {app pairs body} {
     }
 }
 
-proc launch_probe {app {args {}} {recoverAuto 0}} {
+proc launch_probe {app {args {}}} {
     set report [file join $app report.txt]
-    set pairs [list ELS_STARTUP_PROBE $report ELS_RECOVER_AUTO "\x00unset"]
-    if {$recoverAuto} { set pairs [list ELS_STARTUP_PROBE $report ELS_RECOVER_AUTO 1] }
+    set pairs [list ELS_STARTUP_PROBE $report]
     set exe [file join $app els.exe]
     set pid [with_probe_environment $app $pairs [list exec $exe {*}$args &]]
 
     return [wait_report $report $pid]
 }
 
-proc run_probe {name src {conf ""} {files {}} {args {}} {recoverAuto 0}} {
+proc run_probe {name src {conf ""} {files {}} {args {}}} {
     set app [file join $::BASE $name]
     if {[file exists $app]} { error "unique exe probe directory already exists: $app" }
     file mkdir $app
@@ -153,7 +142,7 @@ proc run_probe {name src {conf ""} {files {}} {args {}} {recoverAuto 0}} {
     foreach {tail bytes} $files {
         write_file [file join $app $tail] $bytes
     }
-    return [launch_probe $app $args $recoverAuto]
+    return [launch_probe $app $args]
 }
 
 # The fused executable must recognize its private worker entry point before any
@@ -350,91 +339,6 @@ if {[dict get $explicitRun cfgask] != 0 ||
     [file tail [dict get $explicitRun active_path]] ne "explicit.txt"} {
     error "explicit-arg probe failed: $explicitRun"
 }
-
-# Crash recovery: seed a valid orphan swap (from a "dead" session -- no held
-# lock) into the app's swap dir, launch with auto-recovery, and assert the real
-# fused exe recovers it into a dirty in-memory tab (never writing the user's
-# files).  This proves the on-disk swap format is durable across a real process.
-set conf [dict create geometry 800x600 recent {} word_wrap 0 \
-    restore_session 1 session_files {} session_active ""]
-set deadSid "host-999-deadbeefdeadbeef"
-set swapBytes [make_swap $deadSid d0 "RECOVERED!"]
-set recoverRun [run_probe recover $SRC $conf \
-    [list "swap/swp-$deadSid-d0.swp" $swapBytes] {} 1]
-if {[dict get $recoverRun recovered] < 1} {
-    error "recovery probe: nothing recovered: $recoverRun"
-}
-# The recovered tab must carry the exact snapshot text back into the editor.  Assert
-# on the body content, not a raw char count: swap_read validates the payload CRC, so
-# the STORED text is provably intact.  A rare leading space once seen here under heavy
-# disk load was root-caused as a stray startup keystroke landing in the (then) focused
-# recovered widget and fixed in recover_load (focus drops to the toplevel — see the
-# robustness study and recover-focus-1.1).  Trimmed-equality is kept as belt-and-braces:
-# it still catches every real content regression (truncation, wrong file, empty recovery).
-set recBodies [lmap b [dict get $recoverRun doc_bodies] {string trim $b}]
-if {"RECOVERED!" ni $recBodies} {
-    error "recovery probe: recovered body not present: $recoverRun"
-}
-puts "recovery probe ok (recovered=[dict get $recoverRun recovered])"
-
-# Single instance + file handoff (TWO real processes sharing one config dir): a
-# lingering primary holds the session lock; a plain second launch detects it,
-# spools its file arg, and exits before building any UI; the primary drains the
-# spool and opens the file.  Proves cross-process lock visibility + the
-# exit-before-build path of main().
-proc env_swap {app pairs body} {
-    # Preserve the caller's variable scope.  A direct wrapper call adds an
-    # extra proc frame, so with_probe_environment's deliberate `uplevel 1`
-    # would otherwise evaluate the launch body here, where globals such as
-    # app4/report4 are not visible.
-    return [uplevel 1 [list with_probe_environment $app $pairs $body]]
-}
-proc wait_for_lock {dir} {
-    set deadline [expr {[clock milliseconds] + 5000}]
-    while {[clock milliseconds] < $deadline} {
-        if {[llength [glob -nocomplain -directory $dir *.lock]]} { return 1 }
-        after 50
-    }
-    return 0
-}
-set app4 [file join $BASE single]
-if {[file exists $app4]} { error "unique single-instance probe directory already exists: $app4" }
-file mkdir $app4
-file copy -force $SRC [file join $app4 els.exe]
-# a config next to the exe so both processes share $app4/swap + $app4/handoff
-write_file [file join $app4 els.conf] [dict create geometry 800x600 recent {} \
-    restore_session 0 session_files {} session_active ""]
-set handed [file normalize [file join $app4 handed.txt]]
-write_file $handed "handed off from a second launch\n"
-set report4 [file join $app4 report.txt]
-
-set primePid [env_swap $app4 [list \
-        APPDATA [file join $app4 appdata] \
-        LOCALAPPDATA [file join $app4 localappdata] \
-        ELS_STARTUP_PROBE $report4 \
-        ELS_PROBE_LINGER 3500 \
-        ELS_RECOVER_AUTO "\x00unset"] {
-    exec [file join $app4 els.exe] &
-}]
-if {![wait_for_lock [file join $app4 swap]]} {
-    catch {exec $::TASKKILL /FI "PID eq [lindex $primePid 0]" /FI "IMAGENAME eq els.exe" /T /F}
-    error "single-instance probe: primary never acquired its lock"
-}
-# second launch: plain (no probe), with a file arg -> must hand off and exit
-set secPid [env_swap $app4 [list \
-        APPDATA [file join $app4 appdata] \
-        LOCALAPPDATA [file join $app4 localappdata] \
-        ELS_STARTUP_PROBE "\x00unset" \
-        ELS_RECOVER_AUTO "\x00unset"] {
-    exec [file join $app4 els.exe] $handed &
-}]
-set single [wait_report $report4 $primePid]
-set names {}
-foreach p [dict get $single paths] { lappend names [file tail $p] }
-if {"handed.txt" ni $names} {
-    error "single-instance probe: handed-off file not opened by the primary: $single"
-}
-puts "single-instance probe ok (primary opened: $names)"
 
 if {![cleanup_probe_root $BASE]} {
     puts stderr "warning: could not remove unique exe probe scratch directory: $BASE"

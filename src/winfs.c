@@ -193,124 +193,6 @@ static int OpenFolder_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     return TCL_OK;
 }
 
-/* ---- session liveness via a held byte-range lock --------------------------
- * els::win_lock_file <path>  : open <path> and hold an exclusive byte-range lock
- *   for the process lifetime -> "" on success (lock held), else an error string.
- *   The OS releases the lock when the process dies (crash, kill, BSOD, reboot),
- *   so the lock is a crash- and PID-reuse-proof "this session is alive" token.
- * els::win_unlock_file       : release + close the held lock (clean quit).
- * els::win_try_lock <path>   : non-blocking probe -> "1" if the lock is FREE
- *   (no live owner -> the session that wrote this lock is dead) or "0" if HELD
- *   (a live instance owns it).  Used by the recovery scan to skip live peers. */
-static HANDLE g_lock = INVALID_HANDLE_VALUE;
-/* Heap copy (ANY length) of the path the held lock was opened on.  A fixed buffer
- * truncated \\?\-prefixed long paths, so the idempotent-re-acquire compare below
- * stopped matching the same path and a second LockFileEx failed as "lock held" (F40). */
-static WCHAR *g_lock_path = nullptr;
-
-static int LockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
-                        int objc, Tcl_Obj *const objv[]) {
-    if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "path"); return TCL_ERROR; }
-    Tcl_Size n; const char *p = Tcl_GetStringFromObj(objv[1], &n);
-    WCHAR *w = utf8_to_wide(p, n);
-    if (w == nullptr) { Tcl_SetObjResult(ip, Tcl_NewStringObj("path conversion failed", -1)); return TCL_OK; }
-    /* re-acquiring the path we already hold must be idempotent: byte-range
-     * locks conflict across handles even within one process, so a second open
-     * + LockFileEx on the same path would FAIL and look like "another
-     * instance owns my lock" */
-    if (g_lock != INVALID_HANDLE_VALUE && g_lock_path != nullptr && wcscmp(w, g_lock_path) == 0) {
-        Tcl_Free((char *)w);
-        Tcl_SetObjResult(ip, Tcl_NewObj());
-        return TCL_OK;
-    }
-    /* NO FILE_SHARE_DELETE: it would grant every other process DELETE access
-     * to the lock file while the lock is held — on Win11 (POSIX delete
-     * semantics) the name unlinks immediately, a peer's try-lock then sees
-     * FILE_NOT_FOUND = "owner dead", and a LIVE session's swaps get recovered
-     * by a second instance.  Nothing in els requests DELETE while it's held. */
-    HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    DWORD gle = GetLastError();           /* capture BEFORE Tcl_Free clobbers it */
-    if (h == INVALID_HANDLE_VALUE) {
-        Tcl_Free((char *)w);
-        Tcl_SetObjResult(ip, Tcl_ObjPrintf("open lock error %lu", (unsigned long)gle));
-        return TCL_OK;
-    }
-    OVERLAPPED ov = {0};
-    BOOL locked = LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
-    if (!locked && GetLastError() == ERROR_LOCK_VIOLATION) {
-        /* A peer's win_try_lock briefly HOLDS byte 0 to probe us (TryLock_Cmd locks
-         * then immediately unlocks).  If our own acquire lands inside that window,
-         * LockFileEx fails spuriously with ERROR_LOCK_VIOLATION; without a retry the
-         * session downgrades to the lock-less channel fallback for good, and every
-         * native-probing peer then reads our lock as free = "owner dead".  One retry
-         * after a short pause clears the transient collision (F41). */
-        Sleep(15);
-        OVERLAPPED ovr = {0};
-        locked = LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ovr);
-    }
-    if (!locked) {
-        DWORD gle2 = GetLastError();
-        CloseHandle(h);
-        Tcl_Free((char *)w);
-        Tcl_SetObjResult(ip, Tcl_ObjPrintf("lock held (error %lu)", (unsigned long)gle2));
-        return TCL_OK;
-    }
-    if (g_lock != INVALID_HANDLE_VALUE) { CloseHandle(g_lock); }  /* replace any prior */
-    g_lock = h;
-    if (g_lock_path != nullptr) { Tcl_Free((char *)g_lock_path); }
-    size_t wn = wcslen(w) + 1;                            /* full, untruncated copy (F40) */
-    g_lock_path = (WCHAR *)Tcl_Alloc(wn * sizeof(WCHAR));
-    wmemcpy(g_lock_path, w, wn);
-    Tcl_Free((char *)w);
-    Tcl_SetObjResult(ip, Tcl_NewObj());     /* "" = success, lock held */
-    return TCL_OK;
-}
-
-static int UnlockFile_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
-                          int objc, Tcl_Obj *const objv[]) {
-    if (objc != 1) { Tcl_WrongNumArgs(ip, 1, objv, nullptr); return TCL_ERROR; }
-    if (g_lock != INVALID_HANDLE_VALUE) {
-        OVERLAPPED ov = {0};
-        UnlockFileEx(g_lock, 0, 1, 0, &ov);
-        CloseHandle(g_lock);
-        g_lock = INVALID_HANDLE_VALUE;
-        if (g_lock_path != nullptr) { Tcl_Free((char *)g_lock_path); g_lock_path = nullptr; }
-    }
-    Tcl_SetObjResult(ip, Tcl_NewObj());
-    return TCL_OK;
-}
-
-static int TryLock_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
-                       int objc, Tcl_Obj *const objv[]) {
-    if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "path"); return TCL_ERROR; }
-    Tcl_Size n; const char *p = Tcl_GetStringFromObj(objv[1], &n);
-    WCHAR *w = utf8_to_wide(p, n);
-    if (w == nullptr) { Tcl_SetObjResult(ip, Tcl_NewStringObj("0", -1)); return TCL_OK; }
-    HANDLE h = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    DWORD gle = GetLastError();           /* capture BEFORE Tcl_Free clobbers it */
-    Tcl_Free((char *)w);
-    if (h == INVALID_HANDLE_VALUE) {
-        /* no such lock file -> no owner -> dead ("1"); any other open failure ->
-         * be conservative and treat as live ("0", don't recover a maybe-live one) */
-        const char *r = (gle == ERROR_FILE_NOT_FOUND || gle == ERROR_PATH_NOT_FOUND) ? "1" : "0";
-        Tcl_SetObjResult(ip, Tcl_NewStringObj(r, -1));
-        return TCL_OK;
-    }
-    OVERLAPPED ov = {0};
-    BOOL got = LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
-    if (got) {
-        OVERLAPPED ov2 = {0};
-        UnlockFileEx(h, 0, 1, 0, &ov2);
-    }
-    CloseHandle(h);
-    Tcl_SetObjResult(ip, Tcl_NewStringObj(got ? "1" : "0", -1));   /* 1=free/dead, 0=held/live */
-    return TCL_OK;
-}
-
 /* ---- isolated find-worker lifecycle --------------------------------------
  * A regex worker is deliberately a disposable child process.  Each watched
  * child is placed in its own Job Object with KILL_ON_JOB_CLOSE, and both
@@ -841,9 +723,6 @@ int Winfs_Init(Tcl_Interp *ip) {
     Tcl_CreateObjCommand(ip, "::els::win_replace_file",   ReplaceFile_Cmd,   nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_open_folder",    OpenFolder_Cmd,    nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_fsync",          Fsync_Cmd,         nullptr, nullptr);
-    Tcl_CreateObjCommand(ip, "::els::win_lock_file",      LockFile_Cmd,      nullptr, nullptr);
-    Tcl_CreateObjCommand(ip, "::els::win_unlock_file",    UnlockFile_Cmd,    nullptr, nullptr);
-    Tcl_CreateObjCommand(ip, "::els::win_try_lock",       TryLock_Cmd,       nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_virtual_screen", VirtualScreen_Cmd, nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_worker_spawn_watch", WorkerSpawnWatch_Cmd, workers, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_worker_watch",   WorkerWatch_Cmd,   workers, nullptr);

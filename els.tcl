@@ -656,8 +656,10 @@ proc els::id_of {w} {                           ;# ".txt_d3" -> "d3"
 
 # Background guards may overlap and need not finish in stack order: a native
 # dialog pumps events, and one of those events can open a grabbed Tcl dialog.
-# Tokens keep work suspended until the last participant leaves, while preserving
-# a pre-existing direct suspension used by recovery/tests.
+# Tokens keep autosave and the async find worker suspended until the last
+# participant leaves, while preserving a pre-existing direct suspension set by
+# tests.  (swap_suspend is a historical name: 0.95 has no swaps, but the flag
+# still gates any work that must not commit beneath a modal event pump.)
 proc els::suspend_acquire {} {
     if {![dict size $::els::swap_suspend_tokens]} {
         set ::els::swap_suspend_base $::els::swap_suspend
@@ -728,7 +730,7 @@ proc els::load_icon {} {
     wm iconphoto . -default {*}$imgs
 }
 # ---- config location ----------------------------------------------------
-# els keeps its settings, recovery data and handoff state beside the program.
+# els keeps its settings and backup ring beside the program.
 # A source/dev run uses the source directory (not the shared wish directory);
 # a packaged zipfs build uses the directory containing els.exe.
 proc els::config_roots {} {
@@ -756,7 +758,7 @@ proc els::config_legacy_candidates {} {
 }
 proc els::config_file {} { return $::els::config_path }
 
-# Large files discovered by non-interactive startup/session/handoff paths are
+# Large files discovered by non-interactive startup/session paths are
 # never read silently and never trigger a timer-driven modal.  Keep them in their
 # own tiny adjacent state file: writing els.conf here would also rewrite session
 # ownership while startup is still deciding whether to adopt the previous one.
@@ -897,8 +899,8 @@ proc els::deferred_remove_many {paths} {
     return 1
 }
 # Single choke point for resolving the config location: the instant the dir is
-# known, hold the session lock and start autosave -- so edits are protected even
-# before the first save or a session restore.
+# known, pin it and make sure it exists -- so settings, the backup ring, and (if
+# enabled) autosave all have a home before the first save or a session restore.
 proc els::set_config_path {p} {
     set ::els::config_path $p
     if {$p ne "" && !$::els::selftest} {
@@ -1198,7 +1200,7 @@ proc els::session_set_restore {} {
 
 # ---- deferred large-file opens ------------------------------------------
 # The queue is intentionally modeless: it is the one foreground place where a
-# user can inspect paths gathered by startup/session/handoff code and explicitly
+# user can inspect paths gathered by startup/session code and explicitly
 # consent to the memory cost of opening them.
 proc els::deferred_dialog_selected {} {
     set lb .deferred.f.list.lb
@@ -1271,7 +1273,7 @@ proc els::deferred_dialog {} {
     ttk::label $top.f.h -text "Files waiting for a deliberate open" -font elsUIb \
         -foreground $::els::INK
     ttk::label $top.f.s -font elsUI -foreground $::els::MUTED -justify left \
-        -text "Large files received during startup, session restore, or handoff are held here."
+        -text "Large files received during startup or session restore are held here."
     grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
     grid $top.f.s -row 1 -column 0 -sticky w -pady {0 12}
     ttk::frame $top.f.list
@@ -2211,8 +2213,6 @@ proc els::build {} {
     # coalesced: an interactive resize delivers a continuous Configure stream,
     # and a bare `after idle` per event ran N full repaints per idle batch
     bind elsText <Configure>     {els::refresh_schedule}
-    # autosave: re-arm the swap debounce on real edits (<<Modified>> only flips on
-    # the 0->1 transition, so a sustained typing burst would otherwise miss it)
     bind elsText <Control-n> { els::new;       break }
     bind elsText <Control-o> { els::open;      break }
     bind elsText <Control-s> { els::save;      break }
@@ -2579,7 +2579,7 @@ proc els::tab_elide_identity {s max} {
     return "[string range $s 0 [expr {$left - 1}]]…[string range $s end-[expr {$right - 1}] end]"
 }
 # Compact state marks leave room for the identity while remaining durable:
-# dirty bullet, recovered arrow, and decoding-replacement warning.
+# a dirty bullet and a decoding-replacement warning.
 proc els::tab_markers {id} {
     set marks ""
     if {[els::doc_dirty $id]} { append marks "•" }
@@ -3143,16 +3143,16 @@ proc els::menu_event {ev} { set w [els::T] ; if {$w ne ""} { event generate $w $
 
 # ---- text transforms (Buffer menu) ----------------------------------------
 # A curated, opinionated set of buffer transforms.  Each is undo-atomic (one
-# separator-bracketed edit == one undo) and routes through swap_touch + a view
-# refresh so crash protection and the gutter/whitespace stay in sync, exactly
-# like a typed edit.  Conventions: line-reorder ops act on the selected lines or,
+# separator-bracketed edit == one undo) and routes through the same <<Modified>> +
+# view refresh as a typed edit, so the dirty state, autosave arming, and the
+# gutter/whitespace all stay in sync.  Conventions: line-reorder ops act on the selected lines or,
 # with no selection, the WHOLE buffer; the rest act on the selected lines (or the
 # current line).  els indents with a tab (no width knob); dedent also eats up to
 # four leading spaces so space-indented text still outdents.
 namespace eval ::els::xform {}
 
 # Bracket BODY (run in the caller's frame) as a single undo unit on widget W, then
-# poke the swap + view like any edit.
+# refresh the view like any edit (the edit itself fires <<Modified>>).
 proc els::xform::atomic {w body} {
     set as [$w cget -autoseparators]
     $w configure -autoseparators 0
@@ -3896,8 +3896,8 @@ proc els::build_enc_popup {} {
 # ---- context menus (right-click on the text and on tabs) ------------------
 # Editor context menu: the Windows-convention right-click Undo/Cut/Copy/Paste/…
 # that even Notepad has and els lacked.  Built once, lazily; every command routes
-# through the same helpers the Edit menu uses, so no new edit/recovery path is
-# created.  Entry states are computed at post time from the widget's condition.
+# through the same helpers the Edit menu uses, so no new edit path is created.
+# Entry states are computed at post time from the widget's condition.
 proc els::build_text_menu {} {
     menu .txtpop -tearoff 0
     .txtpop add command -label Undo  -command els::menu_undo
@@ -4174,7 +4174,7 @@ proc els::read_preflight_size {path} { return [file size $path] }
 # check and then be loaded without consent.  Returns a dict with state ok,
 # deferred, cancelled, or failed; I/O errors still raise to the caller.
 proc els::read_binary_guarded {path quiet consent} {
-    # Quiet startup/session/handoff work must not touch an offline share before
+    # Quiet startup/session work must not touch an offline share before
     # the UI is usable.  Persist it locally; explicit Deferred Open is consent
     # for the potentially blocking network operation.
     if {$quiet && !$consent && [els::remote_path $path]} {
@@ -4231,9 +4231,9 @@ proc els::read_binary_guarded {path quiet consent} {
 }
 # Re-read a document's file FRESH from disk (unlike reopen_with, which re-decodes
 # the cached bytes) and replace the buffer, re-detecting encoding/EOL.  Resets the
-# doc to clean, re-caches the on-disk signature (so the R3 baseline matches disk
-# again), and drops the swap.  This is the Reload branch of the external-change
-# prompt and of File ▸ Reload from Disk.
+# doc to clean and re-caches the on-disk signature (so the R3 baseline matches
+# disk again).  This is the Reload branch of the external-change prompt and of
+# File ▸ Reload from Disk.
 proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return 0 }
     set p $::els::docPath($id)
@@ -4389,7 +4389,7 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     # Large-file guard: the whole file is read, decoded, and held ~4x in RAM with no
     # way to cancel, so a mis-dropped multi-hundred-MB file wedges the editor.  Warn
     # before the read on an interactive open — and BEFORE creating a tab, so a "no"
-    # leaves no stray buffer.  A quiet startup/session/handoff path MUST NOT make
+    # leaves no stray buffer.  A quiet startup/session path MUST NOT make
     # that memory decision itself or post a modal from a timer: persist the path in
     # Deferred Opens instead.  largeConsent is set only by that dialog's explicit
     # Open selected action; once consented there is deliberately no absolute cap.
@@ -4548,8 +4548,8 @@ proc els::write_atomic {path bytes {tmpHint ""} {durable 0}} {
     if {[file exists $path] && ![catch {file attributes $path -readonly} ro] && $ro} {
         return "the file is read-only"
     }
-    # A caller-supplied temp name keeps concurrent writers (the swap fan-out loop)
-    # from colliding on a shared [clock clicks]; saves use the default per-pid name.
+    # A caller-supplied temp name lets a distinct writer (the deferred-opens queue)
+    # avoid colliding on a shared [clock clicks]; saves use the default per-pid name.
     set tmp [file join [file dirname $path] \
                  [expr {$tmpHint ne "" ? $tmpHint \
                         : [format ".els-save-%d-%d.tmp" [pid] [clock clicks]]}]]
@@ -4566,16 +4566,16 @@ proc els::write_atomic {path bytes {tmpHint ""} {durable 0}} {
         return $e   ;# temp write failed; original untouched — do NOT fall back to
                     ;# an in-place truncate (it could also fail and lose the file)
     }
-    # Durability model (SAVE-ONLY — only els::save passes durable; swaps/config/backups
-    # skip it, a forced flush on every ~2s swap tick being too costly for a snapshot a
-    # process crash already preserves).  The load-bearing flush is on the FINAL TARGET
-    # AFTER it holds the new content: FlushFileBuffers(target) forces the file's data AND
-    # the rename metadata (the name->data binding) to the platter.  NTFS journaling only
-    # guarantees post-crash CONSISTENCY, not that the replace is PERSISTED when the call
-    # returns — so without this a power cut just after the replace can roll the name back
-    # to the OLD data (the new, temp-flushed bytes then being an orphaned extent).  Flush
-    # is native-only.  A requested flush failure is a save failure: the target
-    # has the new bytes, but the tab and its recovery swap remain dirty.
+    # Durability model (SAVE-ONLY — only els::save passes durable; config/backups
+    # skip it, a forced flush being too costly to justify for those).  The load-bearing
+    # flush is on the FINAL TARGET AFTER it holds the new content: FlushFileBuffers(target)
+    # forces the file's data AND the rename metadata (the name->data binding) to the platter.
+    # NTFS journaling only guarantees post-crash CONSISTENCY, not that the replace is
+    # PERSISTED when the call returns — so without this a power cut just after the replace
+    # can roll the name back to the OLD data (the new, temp-flushed bytes then being an
+    # orphaned extent).  Flush is native-only.  A requested flush failure is a save
+    # failure: the target may hold the new bytes, but the tab stays dirty so the user
+    # knows the save did not durably complete.
     # Prefer ReplaceFileW (native build, src/winfs.c) when replacing an existing
     # file: atomic, with best-effort merging of the target's ACLs, alternate data
     # streams (mark-of-the-web), and attributes — which a rename-replace drops.
@@ -4611,17 +4611,21 @@ proc els::_write_inplace {path bytes} {
 }
 
 # ===========================================================================
-#  CRASH RECOVERY / AUTOSAVE (R2)
+#  AUTOSAVE + CHANGE DETECTION (R2/R3)
 #  ---------------------------------------------------------------------------
-#  Per-dirty-doc swap files under <configdir>/swap/, written atomically and
-#  often; orphaned swaps from a dead session are offered for non-destructive
-#  recovery on the next launch.  Never auto-writes the user's file.
+#  0.95 keeps NO crash-recovery snapshot of unsaved buffers: on a crash or power
+#  loss, text that was never saved -- by the user or by autosave -- is gone, as
+#  in a plain editor.  What lives here instead: a per-run session identity, the
+#  on-disk file signatures that drive external-change detection, and OPT-IN
+#  autosave, which writes the user's REAL file through els::save (never a hidden
+#  sidecar).  On-disk safety is atomic saves + the backup ring, nothing more.
 # ===========================================================================
 
 # ---- session identity ----------------------------------------------------
 # A per-run id "host-pid-token".  pid disambiguates concurrent instances; the
 # token (folded from microseconds/clicks/pid/rand) disambiguates a pid reused
-# across runs.  Memoized so every swap from one run shares one id.
+# across runs.  Memoized so one run keeps a single stable id (it names the
+# isolated find-worker job dirs and their snapshot files).
 proc els::host_tag {} {
     set h ""
     catch {set h [string tolower [info hostname]]}
@@ -4644,8 +4648,8 @@ proc els::session_id {} {
 }
 
 # ---- change-detection + on-disk file signatures --------------------------
-# A signature of on-disk bytes "size:mtime:crc", used to reconcile a swap's
-# baseline against the file at recovery time.  CRC always covers every byte.
+# A signature of on-disk bytes "size:mtime:crc", used to detect a third party
+# changing a file els has open (the external-change guard).  CRC covers every byte.
 proc els::sig_from_bytes {bytes mtime} {
     set size [string length $bytes]
     return "$size:$mtime:[zlib crc32 $bytes]"
@@ -4713,7 +4717,7 @@ proc els::doc_saved_sig {id} {
 # The CONTENT part of a "size:mtime:crc" signature.  Since every CRC covers the
 # full byte stream, volatile mtime is always dropped: byte-identical sync/AV
 # rewrites do not false-positive, while same-size middle rewrites remain visible.
-# Recovery reconciliation can still compare the full mtime-bearing signature.
+# Callers that also care about mtime compare the full signature directly.
 proc els::sig_content {sig} {
     set p [split $sig :]
     if {[llength $p] != 3} { return $sig }
@@ -4731,9 +4735,9 @@ proc els::raise_window {} {
 # Explorer drag-and-drop.  The native windrop helper (src/windrop.c) queues a Tcl
 # event per drop that calls this with the list of dropped paths; open each as a tab
 # and raise els to the front (the user dropped ONTO our window and expects it
-# focused).  Directories and vanished paths are skipped.  Unlike the quiet handoff
-# path, opens here are INTERACTIVE: a deliberate drop should surface the large-file
-# guard and any open error.  A native drop event can still arrive while another
+# focused).  Directories and vanished paths are skipped.  Unlike a quiet
+# startup/session open, opens here are INTERACTIVE: a deliberate drop should surface
+# the large-file guard and any open error.  A native drop event can still arrive while another
 # decision surface owns the event loop, so retain it until that guard closes.
 proc els::drop_open {paths} {
     if {$::els::swap_suspend} {
@@ -5061,11 +5065,12 @@ proc els::set_backups {{persist 1}} {
 # ---- auto-save (opt-in) ----------------------------------------------------
 # File ▸ Auto-save: documents that HAVE a file are saved automatically -- a
 # moment after typing pauses, when switching tabs, when the window loses
-# focus, and on close/quit.  Untitled documents are never auto-saved (crash
-# recovery protects them; els does not invent filenames).  Auto-saves are
-# quiet: a write error becomes a statusbar note, and a document whose
-# encoding cannot hold its characters pauses auto-saving until one manual
-# save settles the question (the lossy guard above).
+# focus, and on close/quit.  Untitled documents are never auto-saved (els does
+# not invent filenames): with no crash recovery in 0.95, their text simply is
+# not on disk until you save it with a name.  Auto-saves are quiet: a write
+# error becomes a statusbar note, and a document whose encoding cannot hold its
+# characters pauses auto-saving until one manual save settles the question (the
+# lossy guard above).
 proc els::set_autosave {{persist 1}} {
     if {$::els::autosave} { els::autosave_all }   ;# turning it on saves NOW
     if {$persist} { els::save_geometry }
@@ -5274,8 +5279,9 @@ proc els::saveas {} {
     variable docPath
     if {$active eq ""} { return }
     # Native dialogs pump nested events; active can change while the picker is
-    # open.  Capture the invoking document and suspend swap/handoff work across
-    # the whole transaction so no temporary target path leaks into recovery.
+    # open.  Capture the invoking document and suspend background writes (autosave,
+    # the async find worker) across the whole transaction so nothing commits against
+    # a half-changed target while the picker owns the event loop.
     set id $active
     set suspendToken [els::suspend_acquire]
     try {
@@ -7595,9 +7601,8 @@ proc els::startup_probe {report} {
         # write atomically (temp + rename) so a reader polling for the report can
         # never observe a half-written file (TOCTOU)
         # doc paths/bodies can hold lone UTF-16 surrogates; strict utf-8 would throw
-        # in puts, leak the channel, and skip swap_shutdown below -> orphaned lock +
-        # swaps -> phantom recovery on the next launch.  Replace-profile + a full
-        # catch + try/finally so the cleanup below always runs (pa-0).
+        # in puts and leave a truncated, malformed report.  Replace-profile + a full
+        # catch + try/finally so the channel is always closed (pa-0).
         catch {
             set fh [::open $report.tmp w]
             try {
@@ -7639,8 +7644,7 @@ proc els::log {level msg} {
     set ::els::log_active 0
 }
 # The production background-error handler, installed (only) for a normal launch.
-# It must NEVER exit and NEVER stack modal dialogs: flush dirty swaps first (so a
-# crash-inducing error still preserves unsaved edits), log the trace, then show a
+# It must NEVER exit and NEVER stack modal dialogs: log the trace, then show a
 # single non-modal status-bar note.  The startup PROBE keeps its own exit-3
 # handler; tests install their own capture; neither path reaches here.
 proc els::bgerror {msg args} {
@@ -7680,14 +7684,14 @@ proc els::main {} {
             # startup error to stderr + exit instead of a modal dialog — the test
             # then fails on a missing report rather than hanging behind a dialog.
             catch {wm attributes . -alpha 0.0}
-            # child toplevels too: a recovery offer inherits no alpha and could
+            # child toplevels too: one would inherit no alpha and could
             # otherwise flash as a real opaque window during a suite run
             set ::els::probe_quiet 1
             proc ::bgerror {msg args} { catch {puts stderr "els startup-probe: $msg"} ; exit 3 }
             catch {interp bgerror {} ::bgerror}
         } else {
-            # production run: route uncaught async errors to els::bgerror (flush
-            # swaps, log, one non-modal note) instead of Tk's modal "raining
+            # production run: route uncaught async errors to els::bgerror (log,
+            # one non-modal note) instead of Tk's modal "raining
             # dialogs".  Installed HERE, not at source time, so the test harness's
             # own bgerror capture (helpers.tcl) is never clobbered.
             proc ::bgerror {msg args} { els::bgerror $msg {*}$args }
@@ -7711,11 +7715,8 @@ proc els::main {} {
         set ::els::session_boot_after \
             [after 80 [list els::session_boot $openedArgs]]   ;# session restore
         if {$startupProbe} {
-            # ELS_PROBE_LINGER keeps the probe alive longer before reporting, so
-            # a SECOND process can hand a file off to it (single-instance test).
-            set linger 0
-            if {[info exists ::env(ELS_PROBE_LINGER)]} { catch {set linger [expr {int($::env(ELS_PROBE_LINGER))}]} }
-            after [expr {900 + $linger}] [list els::startup_probe $startupReport]
+            # Headless probe: report once startup/session work has settled, then exit.
+            after 900 [list els::startup_probe $startupReport]
             return
         }
         after 1500 els::check_update
