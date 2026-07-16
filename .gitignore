@@ -36,6 +36,14 @@
 # builds always store it next to els.exe
 /els.conf
 /config.tcl
+/els.log
+/els.log.1
+/els.deferred
+/els.deferred.*
+# runtime state directories a source run creates next to els.tcl
+/swap/
+/handoff/
+/backups/
 
 # OS / editor cruft
 *~
