@@ -481,20 +481,108 @@ test lossy-1.8 {close-with-save aborts the close when the guard is cancelled} -s
 # proving the dialog builds and every button maps to its answer.  A safety timer
 # turns a build failure into a test failure instead of a hung suite.
 proc lossy_autoclick {btn} {
-    if {[winfo exists .lossy.b.$btn]} { .lossy.b.$btn invoke } \
-    else { after 5 [list lossy_autoclick $btn] }
+    set ::lossy_autoclick_after ""
+    if {[winfo exists .lossy.b.$btn]} {
+        lappend ::lossy_suspend_seen $::els::swap_suspend
+        .lossy.b.$btn invoke
+    } \
+    else { set ::lossy_autoclick_after [after 5 [list lossy_autoclick $btn]] }
 }
 test lossy-dialog-1.1 {the real lossy dialog builds and each button returns its verdict (F13)} -setup {els_reset} -body {
     set ::els::probe_quiet 1                          ;# keep the modal transparent (no flash)
+    set ::lossy_suspend_seen {}
+    set ::lossy_autoclick_after ""
     set out {}
     foreach btn {utf8 lossy cancel} {
         set safety [after 3000 {set ::els::lossy_answer cancel}]   ;# never hang
         after 0 [list lossy_autoclick $btn]
         lappend out [els_real_lossy_ask d0 cp1252 1 1 00E9 1]
         after cancel $safety
+        catch {after cancel $::lossy_autoclick_after}
+        set ::lossy_autoclick_after ""
     }
-    set out
-} -result {utf8 lossy cancel}
+    list $out $::lossy_suspend_seen $::els::swap_suspend
+} -cleanup {
+    catch {after cancel $::lossy_autoclick_after}
+    unset -nocomplain ::lossy_autoclick_after
+} -result {{utf8 lossy cancel} {1 1 1} 0}
+
+test lossy-dialog-1.2 {Replace All cannot make a lossy save mark newer buffer text clean} -setup {
+    els_reset
+    rename ::els::lossy_ask ::els::_modal_stub_lossy_ask
+    rename ::els_real_lossy_ask ::els::lossy_ask
+    rename ::els::find_commit_replacement ::els::_modal_real_find_commit
+    set ::lossy_autoclick_after ""
+    set ::_modal_commit_calls 0
+    set ::_modal_commit_suspend {}
+    proc ::els::find_commit_replacement {job result output} {
+        incr ::_modal_commit_calls
+        lappend ::_modal_commit_suspend $::els::swap_suspend
+        set w [els::W [dict get $job doc]]
+        $w replace 1.0 "end - 1 char" $output
+        $w edit modified 1
+    }
+} -cleanup {
+    catch {after cancel $::els::find_output_after}
+    catch {after cancel $::lossy_autoclick_after}
+    set ::els::find_output_after ""
+    catch {close $outChan}
+    catch {file delete $outPath}
+    catch {destroy .lossy}
+    catch {rename ::els::lossy_ask ::els_real_lossy_ask}
+    if {[llength [info commands ::els::_modal_stub_lossy_ask]]} {
+        rename ::els::_modal_stub_lossy_ask ::els::lossy_ask
+    }
+    catch {rename ::els::find_commit_replacement {}}
+    if {[llength [info commands ::els::_modal_real_find_commit]]} {
+        rename ::els::_modal_real_find_commit ::els::find_commit_replacement
+    }
+    unset -nocomplain ::_modal_commit_calls ::_modal_commit_suspend ::lossy_autoclick_after
+    set ::els::find_output_read {}
+} -body {
+    set ::els::probe_quiet 1
+    set file [els_tmpfile modal-lossy-save.txt "alpha "]
+    set id [els::open $file]
+    set w [els::W $id]
+    $w delete 1.0 end
+    set source "alpha \u00e9"
+    $w insert end $source
+    set ::els::docEnc($id) ascii
+    set expected [encoding convertto -profile replace ascii $source]
+
+    set replacement beta
+    set output [encoding convertto -profile strict utf-8 $replacement]
+    set outPath [file join $::ELS_TMP modal-lossy-output-[pid].utf8]
+    raw_write $outPath $output
+    set outChan [open $outPath rb]
+    set job [dict create kind replace-all doc $id]
+    set result [dict create output_bytes [string length $output] \
+        output_crc [zlib crc32 $output] output_chars [string length $replacement]]
+    set ::els::find_output_read [dict create job $job result $result chan $outChan \
+        bytes 0 crc 0 carry "" text ""]
+
+    after 0 els::find_output_step
+    after 5 [list lossy_autoclick lossy]
+    set safety [after 3000 {set ::els::lossy_answer cancel}]
+    set rc [els::save $id]
+    after cancel $safety
+    catch {after cancel $::lossy_autoclick_after}
+    set ::lossy_autoclick_after ""
+    set during [list $rc [expr {[raw_read $file] eq $expected}] \
+        [expr {$::els::docRaw($id) eq $expected}] [expr {[els_text $id] eq $source}] \
+        [els::doc_dirty $id] [expr {$::els::find_output_read ne ""}] \
+        $::_modal_commit_calls $::els::swap_suspend]
+
+    set ::_modal_wait 0
+    after 50 {set ::_modal_wait 1}
+    vwait ::_modal_wait
+    unset ::_modal_wait
+    set resumed [list [expr {[raw_read $file] eq $expected}] \
+        [expr {[els_text $id] eq $replacement}] [els::doc_dirty $id] \
+        [expr {$::els::find_output_read eq ""}] $::_modal_commit_calls \
+        $::_modal_commit_suspend]
+    list $during $resumed
+} -result {{1 1 1 1 0 1 0 0} {1 1 1 1 1 0}}
 
 # ---- Wave 2: lossy-decode notice (surface silent U+FFFD substitutions) -----
 

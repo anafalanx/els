@@ -163,7 +163,10 @@ proc els_reset {} {
     catch {els::disk_watch_deactivate}
     set ::els::swap_enabled 0 ; set ::els::swap_test_mtime 0
     set ::els::swap_suspend 0 ; set ::els::swap_tick_count 0
+    set ::els::swap_suspend_tokens {} ; set ::els::swap_suspend_base 0
     set ::els::handoff_after ""
+    set ::els::drop_pending {} ; set ::els::drop_after ""
+    set ::els::recover_boot_after ""
     set ::els::autosave 0 ; set ::els::autosave_pending {}
     catch {after cancel $::els::autosave_after} ; set ::els::autosave_after ""
     # backups OFF in the suite (the product default is on): save tests stay

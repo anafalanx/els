@@ -334,6 +334,81 @@ test saveas-1.4 {Save As keeps the invoking document when nested dialog events s
          $::els::docPath($b) [els::doc_dirty $b] [els_text $b] $::_els_nested_suspended
 } -result {1 {CONTENT FROM A} 1 0 {} 1 {CONTENT FROM B} 1}
 
+test modal-1.1 {native message boxes suspend background work and restore prior state} -setup {
+    els_reset
+    rename ::tk_messageBox ::_els_modal_real_message_box
+    set ::_els_modal_seen {}
+    set ::_els_modal_throw 0
+    proc ::tk_messageBox {args} {
+        lappend ::_els_modal_seen $::els::swap_suspend
+        if {$::_els_modal_throw} { error "injected message-box failure" }
+        return yes
+    }
+} -cleanup {
+    catch {rename ::tk_messageBox {}}
+    if {[llength [info commands ::_els_modal_real_message_box]]} {
+        rename ::_els_modal_real_message_box ::tk_messageBox
+    }
+    unset -nocomplain ::_els_modal_seen ::_els_modal_throw
+    set ::els::swap_suspend_tokens {}
+    set ::els::swap_suspend 0
+} -body {
+    set ::els::swap_suspend 0
+    set answer [els::message_box -parent . -message test]
+    set restored0 $::els::swap_suspend
+    set ::els::swap_suspend 1
+    set ::_els_modal_throw 1
+    set code [catch {els::message_box -parent . -message test} err]
+    list $answer $restored0 $code $err $::els::swap_suspend $::_els_modal_seen \
+        [dict size $::els::swap_suspend_tokens]
+} -result {yes 0 1 {injected message-box failure} 1 {1 1} 0}
+
+test modal-1.2 {overlapping background guards remain suspended until the last guard leaves} \
+        -setup {els_reset} -body {
+    set outer [els::suspend_acquire]
+    set inner [els::suspend_acquire]
+    els::suspend_release $outer
+    set between $::els::swap_suspend
+    els::suspend_release $inner
+    set after $::els::swap_suspend
+    set ::els::swap_suspend 1
+    set nested [els::suspend_acquire]
+    els::suspend_release $nested
+    list $between $after $::els::swap_suspend [dict size $::els::swap_suspend_tokens]
+} -cleanup {
+    set ::els::swap_suspend_tokens {}
+    set ::els::swap_suspend 0
+} -result {1 0 1 0}
+
+test modal-1.3 {the native Open picker suspends callbacks and restores on cancel or error} \
+        -setup {
+    els_reset
+    rename ::tk_getOpenFile ::_els_modal_real_getopen
+    set ::_els_open_modal_seen {}
+    set ::_els_open_modal_throw 0
+    proc ::tk_getOpenFile {args} {
+        lappend ::_els_open_modal_seen $::els::swap_suspend
+        if {$::_els_open_modal_throw} { error "injected open-picker failure" }
+        return ""
+    }
+} -cleanup {
+    catch {rename ::tk_getOpenFile {}}
+    if {[llength [info commands ::_els_modal_real_getopen]]} {
+        rename ::_els_modal_real_getopen ::tk_getOpenFile
+    }
+    unset -nocomplain ::_els_open_modal_seen ::_els_open_modal_throw
+    set ::els::swap_suspend_tokens {}
+    set ::els::swap_suspend 0
+} -body {
+    set cancelled [els::open]
+    set restored0 $::els::swap_suspend
+    set ::els::swap_suspend 1
+    set ::_els_open_modal_throw 1
+    set code [catch {els::open} err]
+    list $cancelled $restored0 $code $err $::els::swap_suspend $::_els_open_modal_seen \
+        [dict size $::els::swap_suspend_tokens]
+} -result {{} 0 1 {injected open-picker failure} 1 {1 1} 0}
+
 test saveas-1.5 {failed Save As restores format, recovery, and lossy-consent metadata} -setup {els_reset} -body {
     set old [els_tmpfile saveas_meta_old.txt "plain\n"]
     els::open $old ; set id $::els::active
@@ -530,6 +605,35 @@ test as-1.10 {turning auto-save ON saves dirty pathed documents immediately} -se
     els::set_autosave 0                         ;# ...then its -command (no persist)
     list [els::doc_dirty $id] [raw_read $p]
 } -result [list 0 "base\nnow"]
+
+test as-1.11 {auto-save defers writes for the full lifetime of a modal guard} \
+        -setup {els_reset} -body {
+    set id [as_doc as111.txt]
+    set p $::els::docPath($id)
+    set ::els::swap_suspend 1
+    els::autosave_all
+    set guarded [list [els::doc_dirty $id] [raw_read $p] \
+        [dict exists $::els::autosave_pending $id] \
+        [expr {$::els::autosave_after ne ""}]]
+    catch {after cancel $::els::autosave_after}
+    set ::els::autosave_after ""
+    els::autosave_flush_pending
+    set stillGuarded [list [els::doc_dirty $id] [raw_read $p] \
+        [dict exists $::els::autosave_pending $id] \
+        [expr {$::els::autosave_after ne ""}]]
+    set ::els::swap_suspend 0
+    catch {after cancel $::els::autosave_after}
+    set ::els::autosave_after ""
+    els::autosave_flush_pending
+    list $guarded $stillGuarded [els::doc_dirty $id] [raw_read $p] \
+        [dict exists $::els::autosave_pending $id]
+} -cleanup {
+    catch {after cancel $::els::autosave_after}
+    set ::els::autosave_after ""
+    set ::els::autosave_pending {}
+    set ::els::swap_suspend 0
+} -result [list [list 1 "base\n" 1 1] [list 1 "base\n" 1 1] \
+    0 "base\nedit" 0]
 
 # ---- backups: previous versions ---------------------------------------------
 

@@ -1008,3 +1008,137 @@ test worker-protocol-9.3 {a late match-index self-check failure clears staged ou
     }
     if {[info exists dir]} { catch {file delete -force $dir} }
 } -result {error 0 0 0 0 0 0}
+
+test worker-modal-10.1 {a staged replacement cannot commit while a modal decision is open} \
+        -setup {
+    find_reset
+    set path [file join $::ELS_TMP modal-output-[pid].utf8]
+    raw_write $path ""
+    set f [open $path rb]
+    rename ::els::find_commit_replacement ::els::_modal_real_find_commit
+    set ::_modal_commit_calls 0
+    proc ::els::find_commit_replacement {args} { incr ::_modal_commit_calls }
+} -body {
+    set job [dict create kind replace-all]
+    set result [dict create output_bytes 0 output_crc 0 output_chars 0]
+    set ::els::find_output_read [dict create job $job result $result chan $f \
+        bytes 0 crc 0 carry "" text ""]
+    set ::els::swap_suspend 1
+    els::find_output_step
+    list $::_modal_commit_calls [expr {$::els::find_output_read ne ""}] \
+        [expr {$::els::find_output_after ne ""}]
+} -cleanup {
+    catch {after cancel $::els::find_output_after}
+    set ::els::find_output_after ""
+    catch {close $f}
+    catch {file delete $path}
+    catch {rename ::els::find_commit_replacement {}}
+    if {[llength [info commands ::els::_modal_real_find_commit]]} {
+        rename ::els::_modal_real_find_commit ::els::find_commit_replacement
+    }
+    unset -nocomplain ::_modal_commit_calls
+    set ::els::swap_suspend 0
+    set ::els::find_output_read {}
+} -result {0 1 1}
+
+test worker-modal-10.2 {worker supervision continues through a modal without extending its deadline} \
+        -setup {
+    find_reset
+    if {[llength [info commands ::els::win_worker_status]]} {
+        rename ::els::win_worker_status ::els::_modal_real_worker_status
+    }
+    set ::_modal_status_calls 0
+    proc ::els::win_worker_status {watch} {
+        incr ::_modal_status_calls
+        return running
+    }
+} -body {
+    set deadline [expr {[clock milliseconds] + 5000}]
+    set ::els::find_job [dict create watch test deadline_at $deadline kind search]
+    set ::els::swap_suspend 1
+    els::find_poll
+    list $::_modal_status_calls [expr {$::els::find_job ne ""}] \
+        [expr {$::els::find_poll_after ne ""}] \
+        [expr {[dict get $::els::find_job deadline_at] == $deadline}]
+} -cleanup {
+    catch {after cancel $::els::find_poll_after}
+    set ::els::find_poll_after ""
+    catch {rename ::els::win_worker_status {}}
+    if {[llength [info commands ::els::_modal_real_worker_status]]} {
+        rename ::els::_modal_real_worker_status ::els::win_worker_status
+    }
+    unset -nocomplain ::_modal_status_calls
+    set ::els::find_job {}
+    set ::els::swap_suspend 0
+} -result {1 1 1 1}
+
+test worker-modal-10.3 {a modal does not grant a timed-out worker additional runtime} \
+        -setup {
+    find_reset
+    if {[llength [info commands ::els::win_worker_kill]]} {
+        rename ::els::win_worker_kill ::els::_modal_real_worker_kill
+    }
+    set ::_modal_kill_calls 0
+    proc ::els::win_worker_kill {watch} { incr ::_modal_kill_calls }
+} -body {
+    set ::els::find_job [dict create watch test \
+        deadline_at [expr {[clock milliseconds] - 1}] kind search]
+    set ::els::swap_suspend 1
+    els::find_poll
+    list $::_modal_kill_calls [expr {$::els::find_job eq ""}] $::els::find_count
+} -cleanup {
+    catch {after cancel $::els::find_poll_after}
+    catch {after cancel $::els::find_reap_after}
+    set ::els::find_poll_after ""
+    set ::els::find_reap_after ""
+    set ::els::find_retired {}
+    catch {rename ::els::win_worker_kill {}}
+    if {[llength [info commands ::els::_modal_real_worker_kill]]} {
+        rename ::els::_modal_real_worker_kill ::els::win_worker_kill
+    }
+    unset -nocomplain ::_modal_kill_calls
+    set ::els::find_job {}
+    set ::els::swap_suspend 0
+} -result {1 1 {Search timed out}}
+
+test worker-modal-10.4 {every buffer-adopting find stage re-arms without work during a modal} \
+        -setup {
+    find_reset
+    rename ::els::find_update ::els::_modal_real_find_update
+    set ::_modal_update_calls 0
+    proc ::els::find_update {} { incr ::_modal_update_calls }
+} -body {
+    set snapshot [dict create marker snapshot]
+    set validation [dict create marker validation]
+    set highlight [dict create marker highlight]
+    set ::els::find_snapshot_build $snapshot
+    set ::els::find_validation $validation
+    set ::els::find_highlight_state $highlight
+    set ::els::swap_suspend 1
+    els::find_scheduled_update
+    els::find_snapshot_step
+    els::find_validation_step
+    els::find_highlight_step
+    list $::_modal_update_calls \
+        [expr {$::els::find_snapshot_build eq $snapshot}] \
+        [expr {$::els::find_validation eq $validation}] \
+        [expr {$::els::find_highlight_state eq $highlight}] \
+        [expr {$::els::find_after ne ""}] \
+        [expr {$::els::find_snapshot_after ne ""}] \
+        [expr {$::els::find_validation_after ne ""}] \
+        [expr {$::els::find_highlight_after ne ""}]
+} -cleanup {
+    foreach name {find_after find_snapshot_after find_validation_after find_highlight_after} {
+        catch {after cancel [set ::els::$name]}
+        set ::els::$name ""
+    }
+    set ::els::find_snapshot_build {}
+    set ::els::find_validation {}
+    set ::els::find_highlight_state {}
+    set ::els::swap_suspend 0
+    catch {rename ::els::find_update {}}
+    if {[llength [info commands ::els::_modal_real_find_update]]} {
+        rename ::els::_modal_real_find_update ::els::find_update
+    }
+    unset -nocomplain ::_modal_update_calls
+} -result {0 1 1 1 1 1 1 1}

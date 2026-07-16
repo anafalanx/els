@@ -476,6 +476,9 @@ namespace eval els {
     variable swap_interval     2000 ;# periodic tick period (ms)
     variable swap_debounce     400  ;# debounce after an edit (ms)
     variable swap_suspend      0    ;# re-entrancy guard: 1 while a modal pump / recovery runs
+    variable swap_suspend_tokens {} ;# overlapping guards, released by identity rather than stack order
+    variable swap_suspend_serial 0
+    variable swap_suspend_base 0
     variable swap_tick_count   0
     variable session_id_cached    ""
     variable session_token_cached ""
@@ -483,6 +486,9 @@ namespace eval els {
     variable lock_chan   ""         ;# pure-Tcl fallback: a held channel ("" = none)
     variable probe_quiet 0          ;# probe mode: alpha-0 every toplevel (no desktop flash)
     variable handoff_after ""       ;# primary's handoff-spool poll (single-instance)
+    variable drop_pending {}        ;# native drops held while a modal decision owns the context
+    variable drop_after ""
+    variable recover_boot_after "" ;# deferred startup session/recovery orchestration
     variable handoff_seen; array set handoff_seen {} ;# attempt-0 requests already raised once
     variable last_recover 0         ;# count from the last startup recovery scan (probe/report)
     variable recover_auto 0         ;# test/probe seam: auto-apply recovery instead of dialog
@@ -674,6 +680,48 @@ proc els::T {} {                                ;# the active Text widget ("" = 
 proc els::id_of {w} {                           ;# ".txt_d3" -> "d3"
     if {[regexp {^\.txt_(.+)$} $w -> id]} { return $id }
     return ""
+}
+
+# Background guards may overlap and need not finish in stack order: a native
+# dialog pumps events, and one of those events can open a grabbed Tcl dialog.
+# Tokens keep work suspended until the last participant leaves, while preserving
+# a pre-existing direct suspension used by recovery/tests.
+proc els::suspend_acquire {} {
+    if {![dict size $::els::swap_suspend_tokens]} {
+        set ::els::swap_suspend_base $::els::swap_suspend
+    }
+    set token [incr ::els::swap_suspend_serial]
+    dict set ::els::swap_suspend_tokens $token 1
+    set ::els::swap_suspend 1
+    return $token
+}
+proc els::suspend_release {token} {
+    if {![dict exists $::els::swap_suspend_tokens $token]} { return }
+    dict unset ::els::swap_suspend_tokens $token
+    if {[dict size $::els::swap_suspend_tokens]} {
+        set ::els::swap_suspend 1
+    } else {
+        set ::els::swap_suspend $::els::swap_suspend_base
+    }
+}
+
+# Native dialogs run a nested event loop.  Mark that entire interval so no
+# background callback can change the document or visible context underneath a
+# decision the user is still making.
+proc els::message_box {args} {
+    set suspendToken [els::suspend_acquire]
+    try {
+        tk_messageBox {*}$args
+    } finally {
+        els::suspend_release $suspendToken
+    }
+}
+
+# Non-blocking grabbed dialogs hold the same guard until their toplevel is
+# destroyed.  <Destroy> also reaches the toplevel bindtag for child widgets, so
+# restore only for the toplevel's own event.
+proc els::modal_window_release {top suspendToken destroyed} {
+    if {$destroyed eq $top} { els::suspend_release $suspendToken }
 }
 
 # ---- app resources / preferences ---------------------------------------
@@ -1363,7 +1411,7 @@ proc els::recent_clear {} {
 proc els::recent_open {p} {
     if {[winfo exists .recent]} { set par .recent } else { set par . }
     if {![file exists $p]} {
-        set ans [tk_messageBox -parent $par -icon question -type yesno -title els \
+        set ans [els::message_box -parent $par -icon question -type yesno -title els \
             -message "This file no longer exists:\n[els::display_path $p]\n\nRemove it from the list?"]
         if {$ans eq "yes"} { els::recent_remove $p }
         return ""
@@ -1645,7 +1693,7 @@ proc els::recent_manage_remove_missing {} {
 }
 proc els::recent_manage_clear {} {
     if {![llength $::els::recent]} { return }
-    set ans [tk_messageBox -parent .recent -icon question -type yesno -title els \
+    set ans [els::message_box -parent .recent -icon question -type yesno -title els \
         -message "Clear the recent files list?"]
     if {$ans eq "yes"} { els::recent_clear }
 }
@@ -1789,7 +1837,7 @@ proc els::open_default_apps {} {
 proc els::assoc_register {} {
     set exe [els::association_exe]
     if {$exe eq "" || ![file exists $exe]} {
-        tk_messageBox -parent .assoc -icon warning -title els \
+        els::message_box -parent .assoc -icon warning -title els \
             -message "els can only register itself from the built els.exe.\nBuild it (z build) and run that, then try again."
         return
     }
@@ -1798,7 +1846,7 @@ proc els::assoc_register {} {
         if {[catch {els::assoc_run $cmd} e]} { lappend errs $e }
     }
     if {[llength $errs]} {
-        tk_messageBox -parent .assoc -icon error -title els \
+        els::message_box -parent .assoc -icon error -title els \
             -message "Registration didn't fully complete:\n[join [lsort -unique $errs] \n]"
     }
     catch {els::assoc_render}
@@ -1812,7 +1860,7 @@ proc els::assoc_unregister {} {
     }
     if {[llength $errs]} {
         set parent [expr {[winfo exists .assoc] ? ".assoc" : "."}]
-        tk_messageBox -parent $parent -icon error -title els \
+        els::message_box -parent $parent -icon error -title els \
             -message "Removal didn't fully complete:\n[join [lsort -unique $errs] \n]"
     }
     catch {els::assoc_render}
@@ -1863,7 +1911,7 @@ proc els::assoc_render {} {
 }
 proc els::file_associations {} {
     if {$::tcl_platform(platform) ne "windows"} {
-        tk_messageBox -parent . -icon info -title els \
+        els::message_box -parent . -icon info -title els \
             -message "File associations are only available on Windows."
         return
     }
@@ -2463,10 +2511,8 @@ proc els::close_doc {id} {
     if {$idx < 0} { return }
     els::autosave_flush_doc $id   ;# auto-save on: a pathed doc closes saved, no prompt
     if {[els::doc_dirty $id]} {
-        set ::els::swap_suspend 1
-        set ans [tk_messageBox -parent . -icon warning -type yesnocancel \
+        set ans [els::message_box -parent . -icon warning -type yesnocancel \
             -title els -message "Save changes to [els::doc_name $id]?"]
-        set ::els::swap_suspend 0
         if {$ans eq "cancel"} { return }
         if {$ans eq "yes"} {
             els::switch_to $id
@@ -3972,7 +4018,7 @@ proc els::folder_fallback_argv {dir} {
 proc els::open_folder_error {dir detail} {
     set msg "Cannot open this folder:\n[els::display_path $dir]"
     if {[string trim $detail] ne ""} { append msg "\n\n[string trim $detail]" }
-    tk_messageBox -parent . -icon error -title els -message $msg
+    els::message_box -parent . -icon error -title els -message $msg
 }
 proc els::open_folder {dir} {
     if {$dir eq ""} { return 0 }
@@ -4058,7 +4104,7 @@ proc els::apply_enc {action enc bom} {
 proc els::reopen_with {enc bom} {
     set id $::els::active
     if {$::els::docPath($id) eq ""} {
-        tk_messageBox -parent . -icon info -title els \
+        els::message_box -parent . -icon info -title els \
             -message "Nothing to reopen — this document was never loaded from a file."
         return
     }
@@ -4068,13 +4114,13 @@ proc els::reopen_with {enc bom} {
         # decoding "" would silently blank it — refuse.  A legitimately EMPTY
         # (0-byte) file ALSO has docRaw "" but is safe to reopen: decoding "" under
         # any encoding just yields "", so let the user re-declare its charset (F21).
-        tk_messageBox -parent . -icon info -title els \
+        els::message_box -parent . -icon info -title els \
             -message "Nothing to reopen — this document's on-disk bytes aren't cached\
                       (recovered unsaved content). Save it first to re-read from disk."
         return
     }
     if {[els::doc_dirty $id]} {
-        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+        set ans [els::message_box -parent . -icon warning -type yesno -title els \
             -message "Reopen [els::doc_name $id] as [els::enc_label $enc $bom]?\
                       \nUnsaved changes will be lost."]
         if {$ans ne "yes"} return
@@ -4100,6 +4146,7 @@ proc els::reopen_with {enc bom} {
     $w edit reset
     $w edit modified 0
     els::swap_clear $id
+    els::recover_source_drop $id
     els::update_tab $id
     els::settitle
     els::disk_probe $id
@@ -4112,7 +4159,7 @@ proc els::reopen_with {enc bom} {
 # picks Cancel and chooses it from the menu.
 proc els::extmod_ask {id} {
     set name [file tail $::els::docPath($id)]
-    set ans [tk_messageBox -parent . -icon warning -type yesnocancel -title els \
+    set ans [els::message_box -parent . -icon warning -type yesnocancel -title els \
         -message "\"$name\" has changed on disk since you opened it." \
         -detail "Yes — save anyway, overwriting the version on disk.\nNo — reload from disk, discarding your edits.\nCancel — do nothing."]
     switch $ans {
@@ -4134,7 +4181,7 @@ proc els::extstate_ask {id state detail} {
         set action "Yes - try to overwrite it from this buffer.\nNo - do nothing."
     }
     if {$detail ne ""} { append action "\n\nSystem detail: $detail" }
-    return [expr {[tk_messageBox -parent . -icon warning -type yesno -title els \
+    return [expr {[els::message_box -parent . -icon warning -type yesno -title els \
         -message $message -detail $action] eq "yes"}]
 }
 # Opening with the wrong encoding can substitute U+FFFD for source bytes.  A
@@ -4142,7 +4189,7 @@ proc els::extstate_ask {id state detail} {
 # explicit consent even when every resulting character is encodable.
 proc els::decode_lossy_ask {id} {
     set name [els::doc_name $id]
-    return [expr {[tk_messageBox -parent . -icon warning -type yesno -title els \
+    return [expr {[els::message_box -parent . -icon warning -type yesno -title els \
         -message "\"$name\" contains replacement characters from decoding errors." \
         -detail "Saving will make those replacements permanent and the original bytes cannot be recovered from this file.\n\nYes - save anyway.\nNo - cancel; use Reopen with Encoding or Save As instead."] eq "yes"}]
 }
@@ -4211,7 +4258,7 @@ proc els::read_binary_guarded {path quiet consent} {
             return [dict create state failed error "the deferred-open list could not be saved"]
         }
         set mb [expr {max(1, int(ceil($::els::OPEN_WARN_SIZE / 1048576.0)))}]
-        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+        set ans [els::message_box -parent . -icon warning -type yesno -title els \
             -message "\"[file tail $path]\" is larger than $mb MB.\nOpening it may take a while and use a lot of memory. Open it anyway?"]
         if {$ans ne "yes"} { return [dict create state cancelled] }
         set consent 1
@@ -4231,7 +4278,7 @@ proc els::read_binary_guarded {path quiet consent} {
                 return [dict create state failed error "the deferred-open list could not be saved"]
             }
             set mb [expr {max(1, int(ceil($::els::OPEN_WARN_SIZE / 1048576.0)))}]
-            set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+            set ans [els::message_box -parent . -icon warning -type yesno -title els \
                 -message "\"[file tail $path]\" is larger than $mb MB.\nOpening it may take a while and use a lot of memory. Open it anyway?"]
             if {$ans ne "yes"} { return [dict create state cancelled] }
         }
@@ -4259,7 +4306,7 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
             catch {els::log error "quiet reload failed for $p: $err"}
             catch {els::status_note "file was not reloaded: [file tail $p]"}
         } else {
-            tk_messageBox -parent . -icon error -title els -message "Cannot reload file:\n$err"
+            els::message_box -parent . -icon error -title els -message "Cannot reload file:\n$err"
         }
         return 0
     }
@@ -4299,6 +4346,7 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
     $w edit reset
     $w edit modified 0
     els::swap_clear $id
+    els::recover_source_drop $id
     els::update_tab $id
     els::settitle
     els::disk_probe $id
@@ -4311,12 +4359,12 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
 proc els::reload {} {
     set id $::els::active
     if {$id eq "" || ![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} {
-        tk_messageBox -parent . -icon info -title els \
+        els::message_box -parent . -icon info -title els \
             -message "Nothing to reload — this document was never loaded from a file."
         return
     }
     if {[els::doc_dirty $id]} {
-        set ans [tk_messageBox -parent . -icon warning -type yesno -title els \
+        set ans [els::message_box -parent . -icon warning -type yesno -title els \
             -message "Reload [els::doc_name $id] from disk?\nUnsaved changes will be lost."]
         if {$ans ne "yes"} return
     }
@@ -4384,7 +4432,12 @@ proc els::open_quiet_failure {path err} {
 proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     set ::els::last_open_outcome cancelled
     if {$p eq ""} {
-        set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
+        set suspendToken [els::suspend_acquire]
+        try {
+            set p [tk_getOpenFile -parent . -filetypes [els::filetypes]]
+        } finally {
+            els::suspend_release $suspendToken
+        }
         if {$p eq ""} { return "" }
     }
     if {![els::remote_path $p] && ![catch {file normalize $p} np]} { set p $np }
@@ -4416,7 +4469,7 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
         if {$quiet} {
             els::open_quiet_failure $p $readErr
         } else {
-            tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$readErr"
+            els::message_box -parent . -icon error -title els -message "Cannot open file:\n$readErr"
         }
         return ""
     }
@@ -4469,7 +4522,7 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     if {$rc} {
         set ::els::last_open_outcome failed
         if {!$quiet} {
-            tk_messageBox -parent . -icon error -title els -message "Cannot open file:\n$err"
+            els::message_box -parent . -icon error -title els -message "Cannot open file:\n$err"
         } else {
             els::open_quiet_failure $p $err
         }
@@ -4691,13 +4744,21 @@ proc els::swap_serialize {id sid} {
     # throws on an unpaired surrogate (which the Tk text widget happily holds,
     # e.g. from a malformed clipboard paste) — and a throw here, swallowed by
     # swap_flush_doc's catch, would silently kill crash protection for the doc.
+    set savedSig [els::doc_saved_sig $id]
     set d [dict create schema 1 sessionId $sid docId $id \
                path $::els::docPath($id) enc $::els::docEnc($id) \
                bom $::els::docBom($id) eol $::els::docEol($id) \
                cursor [$w index insert] dirty [els::doc_dirty $id] \
-               savedSig [els::doc_saved_sig $id] mtime [clock seconds] \
+               savedSig $savedSig \
+               mtime [clock seconds] \
                host [els::host_tag] \
                text $text]
+    # Only a real, known full-content baseline receives the algorithm marker.
+    # Recovery conflict sentinels stay unmarked rather than claiming provenance
+    # they do not have.
+    if {[regexp {^[0-9]+:[0-9]+:[0-9]+$} $savedSig]} {
+        dict set d savedSigAlg full
+    }
     # No separate body CRC: the frame trailer below already length+crc32s the whole
     # payload and swap_read validates it, so a second whole-text encode+crc here was
     # write-only dead weight that doubled a large dirty doc's per-flush cost (F67).
@@ -5263,15 +5324,35 @@ proc els::raise_window {} {
 # and raise els to the front (the user dropped ONTO our window and expects it
 # focused).  Directories and vanished paths are skipped.  Unlike the quiet handoff
 # path, opens here are INTERACTIVE: a deliberate drop should surface the large-file
-# guard and any open error, and a modal is safe now (this runs from the event loop,
-# not a background timer or the pre-UI startup drain).
+# guard and any open error.  A native drop event can still arrive while another
+# decision surface owns the event loop, so retain it until that guard closes.
 proc els::drop_open {paths} {
+    if {$::els::swap_suspend} {
+        lappend ::els::drop_pending {*}$paths
+        if {$::els::drop_after eq ""} {
+            set ::els::drop_after [after 50 els::drop_resume]
+        }
+        return
+    }
+    if {[llength $::els::drop_pending]} {
+        set paths [concat $::els::drop_pending $paths]
+        set ::els::drop_pending {}
+        if {$::els::drop_after ne ""} { after cancel $::els::drop_after }
+        set ::els::drop_after ""
+    }
     set opened 0
     foreach p $paths {
         if {$p eq "" || [file isdirectory $p] || ![file exists $p]} { continue }
         if {[els::open $p] ne ""} { set opened 1 }
     }
     if {$opened} { els::raise_window }
+}
+proc els::drop_resume {} {
+    set ::els::drop_after ""
+    if {![llength $::els::drop_pending]} { return }
+    set paths $::els::drop_pending
+    set ::els::drop_pending {}
+    els::drop_open $paths
 }
 # Make a Tk window a native file drop target.  A no-op where the native helper is
 # absent (a dev tclsh run, or a build without windrop) — drag-drop is then simply
@@ -5330,14 +5411,30 @@ proc els::swap_scan_orphans {} {
     }
     return $out
 }
+# Resolve a swap's baseline and return both the recovery branch and the current
+# full-content signature.  Unmarked v0.93 records can still match by exact full
+# equality.  A v0.92 sampled large-file baseline is indistinguishable by shape,
+# so never promote sample equality to a verified match; that would miss a
+# same-size/same-mtime middle rewrite.  Unknown future algorithms remain
+# recoverable but reconcile conservatively.
+proc els::recover_sig_resolution {rec} {
+    set path [dict get $rec path]
+    if {$path eq ""} { return [dict create branch untitled] }
+    if {![file exists $path]} { return [dict create branch missing] }
+    if {[dict exists $rec savedSigAlg] && [dict get $rec savedSigAlg] ne "full"} {
+        return [dict create branch changed]
+    }
+    set base [dict get $rec savedSig]
+    if {$base eq ""} { return [dict create branch changed] }
+    set probe [els::file_sig_probe $path]
+    if {[dict get $probe state] ne "ok"} { return [dict create branch changed] }
+    set full [dict get $probe sig]
+    if {$full eq $base} { return [dict create branch match sig $full] }
+    return [dict create branch changed sig $full]
+}
 # branch: untitled | missing | match | changed
 proc els::recover_reconcile {rec} {
-    set path [dict get $rec path]
-    if {$path eq ""} { return untitled }
-    if {![file exists $path]} { return missing }
-    set base [dict get $rec savedSig]
-    if {$base ne "" && [els::file_sig $path] eq $base} { return match }
-    return changed
+    return [dict get [els::recover_sig_resolution $rec] branch]
 }
 # Claim an orphan session once so two live instances don't both recover it.
 # A separate marker (not the lock), exclusive-create; a crashed claimer's stale
@@ -5498,13 +5595,21 @@ proc els::recover_load {rec branch} {
     # usable signature gets a sentinel that deliberately conflicts with disk.
     set ::els::docRecovered($tid) 1
     if {$path ne ""} {
-        set recoveredSig ""
-        if {[dict exists $rec savedSig]} { set recoveredSig [dict get $rec savedSig] }
-        if {$recoveredSig ne "" || $branch eq "changed"} {
-            if {$recoveredSig eq ""} { set recoveredSig __els_recovery_no_baseline__ }
-            set ::els::savedSig($tid) $recoveredSig
-            set ::els::savedSigPath($tid) $path
+        set recoveredSig __els_recovery_no_baseline__
+        if {$branch eq "match"} {
+            set resolution [els::recover_sig_resolution $rec]
+            if {[dict get $resolution branch] eq "match" && [dict exists $resolution sig]} {
+                set recoveredSig [dict get $resolution sig]
+            }
+        } elseif {$branch ni {changed missing} && [dict exists $rec savedSig] \
+                && [dict get $rec savedSig] ne ""} {
+            # Internal/direct callers that already established a baseline may
+            # supply a non-reconcile branch label.  Preserve that known value;
+            # only explicit conflict branches are forced to the sentinel.
+            set recoveredSig [dict get $rec savedSig]
         }
+        set ::els::savedSig($tid) $recoveredSig
+        set ::els::savedSigPath($tid) $path
     }
     # NB: when merging onto an existing clean tab, its docRaw (loaded from disk by
     # els::open) is LEFT INTACT — clobbering it would blank a later "Reopen with
@@ -5549,10 +5654,9 @@ proc els::recover_load {rec branch} {
 # periodic pass retry the handoff.
 proc els::recover_apply {plan decision} {
     lassign $plan f rec branch
-    set oldSuspend $::els::swap_suspend
+    set suspendToken [els::suspend_acquire]
     set id ""
     set actionCode [catch {
-        set ::els::swap_suspend 1
         switch -- $decision {
             recover {
                 set id [els::recover_load $rec $branch]
@@ -5567,7 +5671,7 @@ proc els::recover_apply {plan decision} {
             default { error "unknown recovery decision: $decision" }
         }
     } actionError]
-    set ::els::swap_suspend $oldSuspend
+    els::suspend_release $suspendToken
     if {$actionCode} {
         catch {els::status_note "recovery action failed; original safety copy was retained"}
         return 0
@@ -5585,6 +5689,11 @@ proc els::recover_apply {plan decision} {
 
 # ---- startup orchestration + the consolidated dialog ----------------------
 proc els::recover_boot {openedArgs} {
+    set ::els::recover_boot_after ""
+    if {$::els::swap_suspend} {
+        set ::els::recover_boot_after [after 50 [list els::recover_boot $openedArgs]]
+        return
+    }
     catch {els::swap_sweep}
     if {!$openedArgs} {
         # a plain start owns the stored session from here on (whether or not
@@ -5702,8 +5811,8 @@ proc els::recover_offer {records} {
         {els::recover_dialog_key [winfo toplevel %W] recover; break}
     bind ElsRecoveryTree <KeyPress-KP_Enter> \
         {els::recover_dialog_key [winfo toplevel %W] recover; break}
-    bind ElsRecoveryTree <KeyPress-Delete> \
-        {els::recover_dialog_key [winfo toplevel %W] discard; break}
+    # Permanent discard stays behind the visible, deliberate dialog action.
+    bind ElsRecoveryTree <KeyPress-Delete> {break}
     bind $top <Escape> [list els::recover_dialog_close $top]
     wm protocol $top WM_DELETE_WINDOW [list els::recover_dialog_close $top]
     update idletasks
@@ -5839,20 +5948,25 @@ $choice"
     pack $top.b   -padx 16 -pady {0 12}
     wm protocol $top WM_DELETE_WINDOW {set ::els::lossy_answer cancel}
     bind $top <Escape> {set ::els::lossy_answer cancel}
-    update idletasks
-    set x [expr {[winfo rootx .] + ([winfo width .] - [winfo reqwidth $top]) / 2}]
-    set y [expr {[winfo rooty .] + 120}]
-    wm geometry $top +$x+$y
-    if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
-    wm deiconify $top
-    raise $top
-    if {"utf8" in $actions} { focus $top.b.utf8 } else { focus $top.b.cancel }
-    grab $top
-    set ::els::lossy_answer ""
-    vwait ::els::lossy_answer
-    set ans $::els::lossy_answer
-    catch {grab release $top}
-    catch {destroy $top}
+    set suspendToken [els::suspend_acquire]
+    try {
+        update idletasks
+        set x [expr {[winfo rootx .] + ([winfo width .] - [winfo reqwidth $top]) / 2}]
+        set y [expr {[winfo rooty .] + 120}]
+        wm geometry $top +$x+$y
+        if {$::els::probe_quiet} { catch {wm attributes $top -alpha 0.0} }
+        wm deiconify $top
+        raise $top
+        if {"utf8" in $actions} { focus $top.b.utf8 } else { focus $top.b.cancel }
+        grab $top
+        set ::els::lossy_answer ""
+        vwait ::els::lossy_answer
+        set ans $::els::lossy_answer
+    } finally {
+        catch {grab release $top}
+        catch {destroy $top}
+        els::suspend_release $suspendToken
+    }
     if {$ans ni {utf8 lossy cancel}} { set ans cancel }
     return $ans
 }
@@ -6004,12 +6118,27 @@ proc els::autosave_soon {id} {
 }
 proc els::autosave_flush_pending {} {
     set ::els::autosave_after ""
+    if {!$::els::autosave} {
+        set ::els::autosave_pending {}
+        return
+    }
+    if {$::els::swap_suspend} {
+        set ::els::autosave_after [after 250 els::autosave_flush_pending]
+        return
+    }
     set pend $::els::autosave_pending
     set ::els::autosave_pending {}
     foreach id [dict keys $pend] { els::autosave_flush_doc $id }
 }
 proc els::autosave_flush_doc {id} {
     if {!$::els::autosave} { return }
+    if {$::els::swap_suspend} {
+        if {$id ne ""} { dict set ::els::autosave_pending $id 1 }
+        if {$::els::autosave_after eq ""} {
+            set ::els::autosave_after [after 250 els::autosave_flush_pending]
+        }
+        return
+    }
     if {$id eq "" || $id ni $::els::docs} { return }
     if {![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} { return }
     if {[info exists ::els::docRecovered($id)]} { return }    ;# foreground save must settle recovery
@@ -6163,7 +6292,7 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
         if {$quiet} {
             els::status_note "auto-save failed: [file tail $docPath($id)]"
         } else {
-            tk_messageBox -parent . -icon error -title els -message "Cannot save file:\n$err"
+            els::message_box -parent . -icon error -title els -message "Cannot save file:\n$err"
         }
         els::disk_probe $id
         return 0
@@ -6195,8 +6324,7 @@ proc els::saveas {} {
     # open.  Capture the invoking document and suspend swap/handoff work across
     # the whole transaction so no temporary target path leaks into recovery.
     set id $active
-    set oldSuspend $::els::swap_suspend
-    set ::els::swap_suspend 1
+    set suspendToken [els::suspend_acquire]
     try {
         set p [tk_getSaveFile -parent . -filetypes [els::filetypes] \
                    -defaultextension .txt \
@@ -6208,7 +6336,7 @@ proc els::saveas {} {
         foreach other $::els::docs {
             if {$other ne $id && [info exists docPath($other)] && \
                     [els::same_path $docPath($other) $p]} {
-                tk_messageBox -parent . -icon warning -title els \
+                els::message_box -parent . -icon warning -title els \
                     -message "That file is already open in another tab.\
                               \nClose it there first, or choose a different name."
                 return 0
@@ -6253,7 +6381,7 @@ proc els::saveas {} {
         els::disk_probe $id
         return 1
     } finally {
-        set ::els::swap_suspend $oldSuspend
+        els::suspend_release $suspendToken
     }
 }
 proc els::session_restore {} {
@@ -6481,10 +6609,8 @@ proc els::quit {} {
     foreach id $docs {
         if {[els::doc_dirty $id]} {
             els::switch_to $id
-            set ::els::swap_suspend 1
-            set ans [tk_messageBox -parent . -icon warning -type yesnocancel \
+            set ans [els::message_box -parent . -icon warning -type yesnocancel \
                 -title els -message "Save changes to [els::doc_name $id]?"]
-            set ::els::swap_suspend 0
             if {$ans eq "cancel"} { return }   ;# aborted quit: autosave stays armed
             if {$ans eq "yes"} {
                 els::save $id   ;# save the PROMPTED doc, never a since-changed $active
@@ -7066,7 +7192,15 @@ proc els::find_history_recall {dir} {
 proc els::find_schedule {} {
     variable find_after
     after cancel $find_after
-    set find_after [after 130 els::find_update]
+    set find_after [after 130 els::find_scheduled_update]
+}
+proc els::find_scheduled_update {} {
+    set ::els::find_after ""
+    if {$::els::swap_suspend} {
+        set ::els::find_after [after 20 els::find_scheduled_update]
+        return
+    }
+    els::find_update
 }
 
 # escape ARE metacharacters so a literal string searches literally
@@ -7359,6 +7493,10 @@ proc els::find_snapshot_ensure {} {
 proc els::find_snapshot_step {} {
     set ::els::find_snapshot_after ""
     if {$::els::find_snapshot_build eq ""} { return }
+    if {$::els::swap_suspend} {
+        set ::els::find_snapshot_after [after 20 els::find_snapshot_step]
+        return
+    }
     set b $::els::find_snapshot_build
     set id [dict get $b doc]
     set w [els::W $id]
@@ -7516,8 +7654,9 @@ proc els::find_start_worker {pending} {
 proc els::find_poll {} {
     set ::els::find_poll_after ""
     if {$::els::find_job eq ""} { return }
+    set now [clock milliseconds]
     set job $::els::find_job
-    if {[clock milliseconds] > [dict get $job deadline_at]} {
+    if {$now > [dict get $job deadline_at]} {
         set ::els::find_job {}
         els::find_retire_job $job 1
         els::find_finish_kind [dict get $job kind]
@@ -7713,6 +7852,10 @@ proc els::find_decimal {digits} {
 proc els::find_validation_step {} {
     set ::els::find_validation_after ""
     if {$::els::find_validation eq ""} { return }
+    if {$::els::swap_suspend} {
+        set ::els::find_validation_after [after 20 els::find_validation_step]
+        return
+    }
     set v $::els::find_validation
     if {[catch {set chunk [read [dict get $v chan] $::els::FIND_SLICE_BYTES]}]} {
         catch {close [dict get $v chan]}
@@ -7861,6 +8004,10 @@ proc els::find_adopt_search {job result} {
 proc els::find_highlight_step {} {
     set ::els::find_highlight_after ""
     if {$::els::find_highlight_state eq ""} { return }
+    if {$::els::swap_suspend} {
+        set ::els::find_highlight_after [after 20 els::find_highlight_step]
+        return
+    }
     set h $::els::find_highlight_state
     set job [dict get $h job]
     if {$::els::find_result_job eq "" || [dict get $job generation] != $::els::find_generation \
@@ -7934,6 +8081,10 @@ proc els::find_decode_chunk {data final} {
 proc els::find_output_step {} {
     set ::els::find_output_after ""
     if {$::els::find_output_read eq ""} { return }
+    if {$::els::swap_suspend} {
+        set ::els::find_output_after [after 20 els::find_output_step]
+        return
+    }
     set o $::els::find_output_read
     if {[catch {set chunk [read [dict get $o chan] $::els::FIND_SLICE_BYTES]}]} {
         catch {close [dict get $o chan]}
@@ -8213,51 +8364,70 @@ proc els::find_replace_all {} {
 
 # ---- go to line + whitespace --------------------------------------------
 proc els::goto_line {} {
-    set w [els::T]
-    if {$w eq ""} { return }
-    set max [els::line_count]
+    set id $::els::active
+    if {$id eq ""} { return }
+    set w [els::W $id]
+    if {![winfo exists $w]} { return }
+    set max [lindex [split [$w index "end - 1 char"] .] 0]
+    if {$max < 1} { set max 1 }
     set top .goto
     catch {destroy $top}
     toplevel $top -bg $::els::PAGE
-    wm title $top "Go to Line"
-    wm resizable $top 0 0
-    wm transient $top .
-    ttk::frame $top.f -padding 12
-    ttk::label $top.f.l -text "Line (1 - $max):" -font elsUI
-    # digits only at the KEYBOARD: rejecting non-numeric input beats silently
-    # ignoring it at Go time
-    ttk::entry $top.f.e -width 10 -font elsMono \
-        -validate key -validatecommand {string is digit %P}
-    ttk::frame $top.f.b
-    ttk::button $top.f.b.ok     -text "Go"     -style Dialog.TButton -default active \
-        -command [list els::goto_do $top]
-    ttk::button $top.f.b.cancel -text "Cancel" -style Dialog.TButton -command [list destroy $top]
-    pack $top.f.b.ok $top.f.b.cancel -side left -padx 3
-    grid $top.f.l -row 0 -column 0 -sticky w
-    grid $top.f.e -row 0 -column 1 -padx 6 -sticky ew
-    grid $top.f.b -row 1 -column 0 -columnspan 2 -pady {10 0}
-    pack $top.f
-    bind $top.f.e <Return> [list els::goto_do $top]
-    bind $top <Escape> [list destroy $top]
-    update idletasks
-    set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
-    set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
-    wm geometry $top +$x+$y
-    focus $top.f.e
-    catch {grab $top}
+    set suspendToken [els::suspend_acquire]
+    try {
+        bind $top <Destroy> [list els::modal_window_release $top $suspendToken %W]
+        wm title $top "Go to Line"
+        wm resizable $top 0 0
+        wm transient $top .
+        ttk::frame $top.f -padding 12
+        ttk::label $top.f.l -text "Line (1 - $max):" -font elsUI
+        # digits only at the KEYBOARD: rejecting non-numeric input beats silently
+        # ignoring it at Go time
+        ttk::entry $top.f.e -width 10 -font elsMono \
+            -validate key -validatecommand {string is digit %P}
+        ttk::frame $top.f.b
+        ttk::button $top.f.b.ok     -text "Go"     -style Dialog.TButton -default active \
+            -command [list els::goto_do $top $id]
+        ttk::button $top.f.b.cancel -text "Cancel" -style Dialog.TButton -command [list destroy $top]
+        pack $top.f.b.ok $top.f.b.cancel -side left -padx 3
+        grid $top.f.l -row 0 -column 0 -sticky w
+        grid $top.f.e -row 0 -column 1 -padx 6 -sticky ew
+        grid $top.f.b -row 1 -column 0 -columnspan 2 -pady {10 0}
+        pack $top.f
+        bind $top.f.e <Return> [list els::goto_do $top $id]
+        bind $top <Escape> [list destroy $top]
+        update idletasks
+        set x [expr {[winfo rootx .] + ([winfo width .]  - [winfo reqwidth  $top]) / 2}]
+        set y [expr {[winfo rooty .] + ([winfo height .] - [winfo reqheight $top]) / 3}]
+        wm geometry $top +$x+$y
+        focus $top.f.e
+        catch {grab $top}
+    } on error {result options} {
+        catch {destroy $top}
+        els::suspend_release $suspendToken
+        return -options $options $result
+    }
 }
-proc els::goto_do {top} {
-    set w [els::T]
+proc els::goto_do {top id} {
     set ln [string trim [$top.f.e get]]
+    set validTarget [expr {$id in $::els::docs && [winfo exists [els::W $id]]}]
+    set validLine [expr {[regexp {^[0-9]+$} $ln] && [scan $ln %d ln] == 1 && $ln >= 1}]
     # plain decimal only — reject hex (0x1F) and signed (+5), which Tcl's
     # `string is integer` would otherwise accept; scan past leading zeros safely
-    if {$w ne "" && [regexp {^[0-9]+$} $ln] && [scan $ln %d ln] == 1 && $ln >= 1} {
-        set ln [expr {min($ln, [els::line_count])}]
+    destroy $top
+    if {$validTarget && $validLine} {
+        set w [els::W $id]
+        set max [lindex [split [$w index "end - 1 char"] .] 0]
+        if {$max < 1} { set max 1 }
+        set ln [expr {min($ln, $max)}]
+        els::switch_to $id
         $w mark set insert $ln.0
         $w see $ln.0
         els::refresh_view
+        focus $w
+        return
     }
-    destroy $top
+    set w [els::T]
     if {$w ne ""} { focus $w }
 }
 
@@ -8607,7 +8777,8 @@ proc els::main {} {
                 }
             }
         }
-        after 80 [list els::recover_boot $openedArgs]   ;# session restore + crash recovery
+        set ::els::recover_boot_after \
+            [after 80 [list els::recover_boot $openedArgs]]   ;# session restore + crash recovery
         if {$startupProbe} {
             # ELS_PROBE_LINGER keeps the probe alive longer before reporting, so
             # a SECOND process can hand a file off to it (single-instance test).

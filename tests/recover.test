@@ -27,11 +27,12 @@ proc recover_reset {} {
     }
 }
 # Forge a swap file as if written by another (dead) session.
-proc forge_swap {sid docId text {path ""} {savedSig ""} {enc utf-8} {eol lf}} {
+proc forge_swap {sid docId text {path ""} {savedSig ""} {enc utf-8} {eol lf} {savedSigAlg ""}} {
     set d [dict create schema 1 sessionId $sid docId $docId path $path enc $enc \
                bom 0 eol $eol cursor 1.0 dirty 1 savedSig $savedSig \
                mtime [clock seconds] host forged \
                bodyCrc [zlib crc32 [encoding convertto utf-8 $text]] text $text]
+    if {$savedSigAlg ne ""} { dict set d savedSigAlg $savedSigAlg }
     set payload [encoding convertto utf-8 $d]
     set bytes "ELSSWAP v1\n$payload\nELSSWAPEND [string length $payload] [zlib crc32 $payload]\n"
     set f [file join [els::swap_dir] "swp-$sid-$docId.swp"]
@@ -45,6 +46,32 @@ proc forge_lock {sid alive} {
     file mtime $lp [expr {$alive ? [clock seconds] : [clock seconds] - 9999}]
 }
 
+test modal-boot-1.1 {startup session and recovery work waits for an open modal guard} \
+        -setup {
+    recover_reset
+    rename ::els::recover_scan ::els::_modal_real_recover_scan
+    set ::_modal_recover_scans 0
+    proc ::els::recover_scan {} { incr ::_modal_recover_scans ; return {} }
+} -body {
+    set ::els::swap_suspend 1
+    els::recover_boot 1
+    set during [list $::_modal_recover_scans [expr {$::els::recover_boot_after ne ""}]]
+    catch {after cancel $::els::recover_boot_after}
+    set ::els::recover_boot_after ""
+    set ::els::swap_suspend 0
+    els::recover_boot 1
+    list $during $::_modal_recover_scans $::els::recover_boot_after
+} -cleanup {
+    catch {after cancel $::els::recover_boot_after}
+    set ::els::recover_boot_after ""
+    catch {rename ::els::recover_scan {}}
+    if {[llength [info commands ::els::_modal_real_recover_scan]]} {
+        rename ::els::_modal_real_recover_scan ::els::recover_scan
+    }
+    unset -nocomplain ::_modal_recover_scans
+    set ::els::swap_suspend 0
+} -result {{0 1} 1 {}}
+
 # ===== swap file: write + round-trip + self-validation =====================
 
 test swap-write-1.1 {swap_flush_doc writes a valid, round-trippable swap} -setup recover_reset -body {
@@ -55,8 +82,8 @@ test swap-write-1.1 {swap_flush_doc writes a valid, round-trippable swap} -setup
     set rec [els::swap_read [els::swap_path [els::session_id] $id]]
     list $rc [expr {$rec ne ""}] \
         [expr {[dict get $rec text] eq "hello\nworld"}] \
-        [dict get $rec schema]
-} -result {1 1 1 1}
+        [dict get $rec schema] [dict exists $rec savedSigAlg]
+} -result {1 1 1 1 0}
 
 test swap-write-1.2 {swap stores lossless UTF-8, not the doc's lossy encoding} -setup recover_reset -body {
     set id [els::new_doc]
@@ -73,6 +100,18 @@ test swap-write-1.3 {the swap write is atomic -- no .tmp residue} -setup recover
     els::swap_flush_doc $id
     llength [glob -nocomplain -directory [els::swap_dir] .swp-*.tmp]
 } -result 0
+
+test swap-write-1.4 {a known full file baseline is marked in a new swap} \
+        -setup recover_reset -body {
+    set p [file join $::ELS_TMP marked-baseline.txt]
+    raw_write $p "disk\n"
+    set id [els::open $p]
+    [els::W $id] insert end "edit"
+    set ::els::dirtySince($id) 1
+    els::swap_flush_doc $id
+    set rec [els::swap_read [els::swap_path [els::session_id] $id]]
+    list [dict get $rec savedSigAlg] [expr {[dict get $rec savedSig] eq [els::file_sig $p]}]
+} -result {full 1}
 
 test swap-validate-1.1 {swap_read rejects missing-magic / truncated swaps, never raises} -setup recover_reset -body {
     set f [file join [els::swap_dir] swp-x-d0.swp]
@@ -154,6 +193,83 @@ test reconcile-1.1 {branch selection: match / changed / missing / untitled} -set
          [els::recover_reconcile [dict create path [file join $::ELS_TMP gone.txt] savedSig ""]] \
          [els::recover_reconcile [dict create path "" savedSig ""]]
 } -result {match changed missing untitled}
+
+test reconcile-1.2 {an ambiguous v0.92 sampled large-file baseline stays conservative} \
+        -setup {recover_reset} -cleanup {
+    set ::els::SWAP_FILE_CRC_CAP 16777216
+} -body {
+    set ::els::SWAP_FILE_CRC_CAP 100000
+    set bytes [string repeat A 200000]
+    set p [file join $::ELS_TMP legacy-large.txt]
+    raw_write $p $bytes
+    set mt [file mtime $p]
+    set sampled "[string range $bytes 0 65535][string range $bytes end-65535 end]"
+    set legacySig "[string length $bytes]:$mt:[zlib crc32 $sampled]"
+    set fullSig [els::file_sig $p]
+    set rec [dict create schema 1 sessionId legacy-092 docId d0 path $p \
+        enc utf-8 bom 0 eol lf cursor 1.0 dirty 1 savedSig $legacySig \
+        mtime [clock seconds] host forged text "recovered edits"]
+    set branch [els::recover_reconcile $rec]
+    set id [els::recover_load $rec $branch]
+    set conservative [expr {$::els::savedSig($id) eq "__els_recovery_no_baseline__"}]
+    set ::els_test_mbcount 0
+    set ::els_test_mbanswer cancel
+    set saved [els::save $id]
+    list [expr {$legacySig ne $fullSig}] $branch $conservative $saved \
+        $::els_test_mbcount [expr {[raw_read $p] eq $bytes}]
+} -result {1 changed 1 0 1 1}
+
+test reconcile-1.3 {a full-signature marker never enables the legacy sampled fallback} \
+        -setup {recover_reset} -cleanup {
+    set ::els::SWAP_FILE_CRC_CAP 16777216
+} -body {
+    set ::els::SWAP_FILE_CRC_CAP 100000
+    set bytes [string repeat A 200000]
+    set p [file join $::ELS_TMP marked-full-large.txt]
+    raw_write $p $bytes
+    set mt [file mtime $p]
+    set sampled "[string range $bytes 0 65535][string range $bytes end-65535 end]"
+    set sampledSig "[string length $bytes]:$mt:[zlib crc32 $sampled]"
+    els::recover_reconcile [dict create path $p savedSig $sampledSig savedSigAlg full]
+} -result changed
+
+test reconcile-1.4 {an unmarked v0.93 full baseline still reconciles normally} \
+        -setup recover_reset -body {
+    set p [file join $::ELS_TMP unmarked-full.txt]
+    raw_write $p "unchanged\n"
+    els::recover_reconcile [dict create path $p savedSig [els::file_sig $p]]
+} -result match
+
+test reconcile-1.5 {an unknown future signature marker keeps the recovery text visible but conservative} \
+        -setup recover_reset -body {
+    set p [file join $::ELS_TMP future-signature.txt]
+    raw_write $p "unchanged\n"
+    set f [forge_swap host-future-dead d0 "recovered edits" $p \
+        [els::file_sig $p] utf-8 lf future-v2]
+    set rec [els::swap_read $f]
+    list [expr {$rec ne ""}] [dict get $rec savedSigAlg] \
+        [els::recover_reconcile $rec] [dict get $rec text]
+} -result {1 future-v2 changed {recovered edits}}
+
+test reconcile-1.6 {a v0.92 sample cannot hide a same-size same-time middle rewrite} \
+        -setup {recover_reset} -cleanup {
+    set ::els::SWAP_FILE_CRC_CAP 16777216
+} -body {
+    set ::els::SWAP_FILE_CRC_CAP 100000
+    set original [string repeat A 200000]
+    set p [file join $::ELS_TMP legacy-middle-rewrite.txt]
+    raw_write $p $original
+    set mt [file mtime $p]
+    set sampled "[string range $original 0 65535][string range $original end-65535 end]"
+    set legacySig "[string length $original]:$mt:[zlib crc32 $sampled]"
+    set changed [string replace $original 90000 109999 [string repeat B 20000]]
+    raw_write $p $changed
+    file mtime $p $mt
+    set currentSample "[string range $changed 0 65535][string range $changed end-65535 end]"
+    list [expr {$legacySig eq "[string length $changed]:[file mtime $p]:[zlib crc32 $currentSample]"}] \
+        [expr {[els::file_sig $p] ne $legacySig}] \
+        [els::recover_reconcile [dict create path $p savedSig $legacySig]]
+} -result {1 1 changed}
 
 # ===== recovery loads a DIRTY buffer and never writes the user's file ======
 
@@ -294,7 +410,7 @@ test recover-consolidated-1.1 {N orphans -> one plan batch; recover_auto applies
 
 # ---- interactive recovery dialog (bounded treeview + selected-item actions).
 # recover_offer is non-blocking, and probe_quiet keeps it transparent throughout.
-test recover-dialog-1.1 {Delete discards ONLY selected swaps; unselected are left for later} -setup recover_reset -body {
+test recover-dialog-1.1 {Delete is inert; Discard selected discards only the selection} -setup recover_reset -body {
     set ::els::probe_quiet 1
     forge_swap host-a-dead d0 "body-a" "" "" ; forge_lock host-a-dead 0
     forge_swap host-b-dead d0 "body-b" "" "" ; forge_lock host-b-dead 0
@@ -309,8 +425,10 @@ test recover-dialog-1.1 {Delete discards ONLY selected swaps; unselected are lef
     focus -force $tree
     update
     event generate $tree <KeyPress-Delete> -when now ; update
-    list $built [file exists $f0] [file exists $f1] [winfo exists .recover]
-} -result {1 1 0 0}
+    set afterDelete [list [file exists $f0] [file exists $f1] [winfo exists .recover]]
+    .recover.f.btns.dis invoke ; update
+    list $built $afterDelete [file exists $f0] [file exists $f1] [winfo exists .recover]
+} -result {1 {1 1 1} 1 0 0}
 
 test recover-dialog-1.2 {Return recovers the selected swap as a tab and consumes its file} -setup recover_reset -body {
     set ::els::probe_quiet 1
@@ -827,6 +945,35 @@ test review-reopen-1.1 {reopen_with refuses to blank a recovered tab with no cac
     els::reopen_with utf-8 0
     list $::els::docRaw($id) [els_text $id] [expr {$::els_test_mbcount >= 1}]
 } -result [list {} {recovered text} 1]
+
+test review-reopen-1.2 {Reload from Disk retires a retained pre-recovery safety copy} \
+        -setup recover_reset -body {
+    set p [file join $::ELS_TMP reload-retained-source.txt]
+    raw_write $p "disk version"
+    set id [els::open $p]
+    [els::W $id] insert end " local edits"
+    set orphan [file join [els::swap_dir] retained-reload.swp]
+    raw_write $orphan "retained recovery source"
+    set ::els::docRecoverySource($id) $orphan
+    set rc [els::reload_from_disk $id]
+    list $rc [file exists $orphan] [info exists ::els::docRecoverySource($id)] \
+        [els::doc_dirty $id] [els_text $id]
+} -result {1 0 0 0 {disk version}}
+
+test review-reopen-1.3 {Reopen with Encoding retires a retained pre-recovery safety copy} \
+        -setup recover_reset -body {
+    set p [file join $::ELS_TMP reopen-retained-source.txt]
+    raw_write $p "disk version"
+    set id [els::open $p]
+    [els::W $id] insert end " local edits"
+    set orphan [file join [els::swap_dir] retained-reopen.swp]
+    raw_write $orphan "retained recovery source"
+    set ::els::docRecoverySource($id) $orphan
+    set ::els_test_mbanswer yes
+    els::reopen_with utf-8 0
+    list [file exists $orphan] [info exists ::els::docRecoverySource($id)] \
+        [els::doc_dirty $id] [els_text $id]
+} -result {0 0 0 {disk version}}
 
 test review-filesig-1.1 {file_sig streams a full-content CRC regardless of the legacy cap} -setup recover_reset -body {
     set saved $::els::SWAP_FILE_CRC_CAP

@@ -2710,3 +2710,29 @@ test drop-1.7 {drop_open on an already-open file switches to it, no duplicate ta
 } -cleanup {
     if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
 } -result {2 1}
+
+test drop-1.8 {a native drop waits until the active modal guard has closed} \
+        -setup {ui_reset} -body {
+    rename ::els::raise_window ::_els_raise_real
+    set ::_drop_raised 0
+    proc ::els::raise_window {} { incr ::_drop_raised }
+    set p [els_tmpfile drop_modal.txt "deferred\n"]
+    set ::els::swap_suspend 1
+    els::drop_open [list $p]
+    set during [list [els::doc_name $::els::active] [llength $::els::drop_pending] \
+        [expr {$::els::drop_after ne ""}] $::_drop_raised]
+    catch {after cancel $::els::drop_after}
+    set ::els::drop_after ""
+    set ::els::swap_suspend 0
+    els::drop_resume
+    rename ::els::raise_window {} ; rename ::_els_raise_real ::els::raise_window
+    list $during [file tail $::els::docPath($::els::active)] \
+        [llength $::els::drop_pending] $::els::drop_after $::_drop_raised
+} -cleanup {
+    catch {after cancel $::els::drop_after}
+    set ::els::drop_after ""
+    set ::els::drop_pending {}
+    set ::els::swap_suspend 0
+    if {[llength [info commands ::_els_raise_real]]} { catch {rename ::els::raise_window {}} ; rename ::_els_raise_real ::els::raise_window }
+    unset -nocomplain ::_drop_raised
+} -result {{untitled 1 1 0} drop_modal.txt 0 {} 1}

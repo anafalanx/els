@@ -315,7 +315,7 @@ proc release_tool_lock {} {
 proc task_uses_tool_lock {task} {
     return [expr {$task in {
         build build-ext native-startup-check release-check sign test stress
-        probe-exe shot readme-shots icon toolcheck
+        probe-exe shot readme-shots icon toolcheck run
     }}]
 }
 
