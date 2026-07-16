@@ -304,29 +304,63 @@ static int RunPrivate_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
         failure_action = "SetInformationJobObject"; failure_code = GetLastError(); goto cleanup;
     }
 
-    STARTUPINFOW si = {0};
-    si.cb = sizeof(si);
-    si.lpDesktop = desktop_name;
+    /* Assign the child to the kill-on-close job ATOMICALLY at creation via
+     * PROC_THREAD_ATTRIBUTE_JOB_LIST (mirrors src/winfs.c WorkerSpawnWatch_Cmd).
+     * Assigning only AFTER CreateProcessW leaves a window where a crash of THIS
+     * process between create and assign would orphan the suspended child -- no job
+     * ever kills it, and it holds its private desktop until reboot (R30). */
+    SIZE_T attrBytes = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attrBytes);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+    if (attrBytes > 0) {
+        attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, attrBytes);
+    }
+    if (attrs == NULL || !InitializeProcThreadAttributeList(attrs, 1, 0, &attrBytes)) {
+        failure_action = "InitializeProcThreadAttributeList(private desktop)";
+        failure_code = GetLastError();
+        if (attrs != NULL) HeapFree(GetProcessHeap(), 0, attrs);
+        goto cleanup;
+    }
+    HANDLE jobs[1] = {job};
+    if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            jobs, sizeof(jobs), NULL, NULL)) {
+        failure_action = "UpdateProcThreadAttribute(private desktop job)";
+        failure_code = GetLastError();
+        DeleteProcThreadAttributeList(attrs);
+        HeapFree(GetProcessHeap(), 0, attrs);
+        goto cleanup;
+    }
+
+    STARTUPINFOEXW si = {0};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.lpDesktop = desktop_name;
     /* A GUI-subsystem child otherwise enables Windows' startup-feedback cursor
      * heuristics.  Its windows are private, and its pointer feedback must be
      * just as invisible on the user's input desktop. */
-    si.dwFlags = STARTF_FORCEOFFFEEDBACK;
-    if (!CreateProcessW(application, cmd.data, NULL, NULL, FALSE,
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, NULL, NULL, &si, &pi)) {
+    si.StartupInfo.dwFlags = STARTF_FORCEOFFFEEDBACK;
+    si.lpAttributeList = attrs;
+    BOOL created = CreateProcessW(application, cmd.data, NULL, NULL, FALSE,
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            NULL, NULL, &si.StartupInfo, &pi);
+    DWORD createErr = created ? 0u : GetLastError();
+    DeleteProcThreadAttributeList(attrs);
+    HeapFree(GetProcessHeap(), 0, attrs);
+    if (!created) {
         failure_action = "CreateProcessW(private desktop)";
-        failure_code = GetLastError();
+        failure_code = createErr;
         goto cleanup;
     }
     child_pid = pi.dwProcessId;
-    if (!AssignProcessToJobObject(job, pi.hProcess)) {
-        DWORD assign_error = GetLastError();
+    /* Membership is atomic on a successful create; confirm it (belt-and-braces,
+     * mirrors winfs.c).  Closing the kill-on-close job at cleanup then reaps it. */
+    BOOL inJob = FALSE;
+    if (!IsProcessInJob(pi.hProcess, job, &inJob) || !inJob) {
         DWORD cleanup_error = 0;
         if (!terminate_process_bounded(pi.hProcess, 1, 5000, &cleanup_error)) {
             failure_action = "terminating unassigned private child";
             failure_code = cleanup_error;
         } else {
-            failure_action = "AssignProcessToJobObject";
-            failure_code = assign_error;
+            failure_action = "private child did not join its job";
         }
         goto cleanup;
     }
