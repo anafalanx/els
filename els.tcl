@@ -276,7 +276,7 @@ proc ::elsworker::run_job {jobdir token request source} {
             ::elsworker::append_output output outputBytes outputCrc $outputLimit \
                 [string range $source $cursor end]
         }
-    } trap {*} {e o} {
+    } on error {e o} {
         set status error
         set err $e
     } finally {
@@ -5856,12 +5856,17 @@ proc els::build_findbar {} {
     grid columnconfigure .find 0 -weight 1
 
     bind .find.fr.q <KeyRelease> {
-        # Return/KP_Enter already did their work in the <Return> KeyPress binding
-        # (step + the "(wrapped)" announcement); excluding them here stops the
-        # release from arming the 130 ms incremental-search debounce, whose
-        # find_update would rewrite the count and erase "(wrapped)" (and re-scan
-        # the whole buffer redundantly).  Up/Down are history recall.
-        if {"%K" ni {Up Down Return KP_Enter}} { set ::els::find_hidx -1 ; els::find_schedule }
+        # Only arm the 130 ms incremental-search debounce for keys that can change
+        # the query TEXT.  Return/KP_Enter already stepped in the <Return> KeyPress
+        # binding (excluding them keeps the "(wrapped)" note and avoids a redundant
+        # re-scan); Up/Down are history recall.  Navigation and modifier keys change
+        # nothing, so they must not arm a search: that search supersedes and silently
+        # cancels a running Replace All (R06).
+        if {"%K" ni {Up Down Return KP_Enter Left Right Home End Prior Next
+                     Tab ISO_Left_Tab Shift_L Shift_R Control_L Control_R
+                     Alt_L Alt_R Meta_L Meta_R Super_L Super_R Caps_Lock}} {
+            set ::els::find_hidx -1 ; els::find_schedule
+        }
     }
     bind .find.fr.q <Return>       { els::find_history_push $::els::find_q
                                      els::find_step 1  ; break }
@@ -6329,6 +6334,14 @@ proc els::find_cancel {{reason cancel}} {
         els::find_restore_search "Cancelled"
     } elseif {$reason eq "user" && $::els::find_mode ne ""} {
         set ::els::find_count "Cancelled"
+    }
+    # A replace that was actually running gets silently torn down by a passive
+    # event -- a tab switch/close (context), closing the find bar (hidden), a
+    # user edit (edit), or changing the query (superseded) -- and the find-count
+    # label is immediately overwritten by the new context/search.  Leave a durable
+    # status-bar note so the user is never left believing a replace completed (R08).
+    if {$restoreSearch && $reason in {context hidden edit superseded}} {
+        catch {els::status_note "Replace cancelled"}
     }
 }
 
@@ -7297,6 +7310,12 @@ proc els::find_step {dir} {
 
 proc els::find_replace_one {} {
     if {$::els::find_mode eq "" || [els::T] eq ""} { return }
+    # A replace is already running: a second Enter must NOT fall through to
+    # find_update -> find_request search, which supersedes and kills the in-flight
+    # replace worker before it commits (v0.92 was synchronous, so N Enter presses
+    # made N replacements).  Ignore the extra press; the running replace commits
+    # and re-searches, repositioning the caret for the next Enter (R06).
+    if {[els::find_replacement_in_flight]} { return }
     if {$::els::find_result_job eq "" || $::els::find_total <= 0} {
         els::find_update
         if {$::els::find_result_job eq "" || $::els::find_total <= 0} { return }

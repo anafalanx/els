@@ -1142,3 +1142,48 @@ test worker-modal-10.4 {every buffer-adopting find stage re-arms without work du
     }
     unset -nocomplain ::_modal_update_calls
 } -result {0 1 1 1 1 1 1 1}
+
+# ---- R06/R08: async replace/UX regressions ------------------------------
+# The async worker made replace supersedable; these lock in the guards that keep
+# a running replace from being silently killed (R06) or silently cancelled (R08).
+
+test replaceux-11.1 {a Replace Enter during an in-flight replace is ignored, never a superseding search (R06)} -setup {find_reset} -body {
+    set w [els::T] ; $w insert end "cat cat cat"
+    set ::els::find_q cat ; set ::els::find_r dog ; els::find_update
+    set gen0 $::els::find_generation
+    set job0 $::els::find_result_job
+    set ::els::find_replace_all_busy 1     ;# simulate a replace already running
+    els::find_replace_one                  ;# must be a no-op, never a superseding search
+    set out [list [expr {$::els::find_generation == $gen0}] \
+                  [expr {$::els::find_result_job eq $job0}] \
+                  [$w get 1.0 "end - 1 char"]]
+    set ::els::find_replace_all_busy 0
+    set out
+} -result {1 1 {cat cat cat}}
+
+test replaceux-11.2 {navigation keys in the find field never arm a search that would cancel a running replace (R06)} -setup {find_reset} -body {
+    els::find_show find
+    set armed {}
+    foreach ks {Home End Left Right Prior Next} {
+        after cancel $::els::find_after ; set ::els::find_after ""
+        event generate .find.fr.q <KeyRelease> -keysym $ks ; update
+        lappend armed [expr {$::els::find_after ne ""}]
+    }
+    # a text key still arms the incremental search
+    after cancel $::els::find_after ; set ::els::find_after ""
+    event generate .find.fr.q <KeyRelease> -keysym a ; update
+    set textArmed [expr {$::els::find_after ne ""}]
+    after cancel $::els::find_after ; set ::els::find_after ""
+    els::find_hide
+    list $armed $textArmed
+} -result {{0 0 0 0 0 0} 1}
+
+test replaceux-11.3 {a passively-cancelled in-flight replace leaves a durable status note (R08)} -setup {find_reset} -body {
+    set ::els::find_replace_all_busy 1          ;# a Replace All is "running"
+    catch {after cancel $::els::status_note_after} ; set ::els::status_note_after ""
+    .sb.name configure -text ""
+    els::find_cancel context                    ;# tab-switch style teardown
+    set note [.sb.name cget -text]
+    catch {after cancel $::els::status_note_after} ; set ::els::status_note_after ""
+    string match "*Replace cancelled*" $note
+} -result 1
