@@ -62,7 +62,7 @@ what Tk 9 can actually render well.
 ### The caret
 
 A **steady** 4px red bar (`-insertwidth 4 -insertofftime 0`). A blinking cursor
-is a documented distraction; a solid red caret is calmer *and* more distinctive.
+pulls the eye; a solid red caret is calmer *and* more distinctive.
 It is els's signature.
 
 ### Screen-reader limitation
@@ -137,8 +137,8 @@ Tabs are identifiers, not merely filenames:
   them. Middle elision preserves both that discriminator and the filename; if two
   labels still collide under the character/pixel cap, a stable short document
   discriminator is added.
-- Compact leading marks carry state without consuming the identity: `•` dirty,
-  `↺` recovered, and `�` text that acquired replacement characters while decoding.
+- Compact leading marks carry state without consuming the identity: `•` dirty and
+  `�` text that acquired replacement characters while decoding.
   Full paths and warnings remain available in the tab tooltip.
 - The layout always keeps the active tab and its close button visible. It packs a
   contiguous neighbourhood into the remaining width; the right-hand overflow
@@ -147,7 +147,7 @@ Tabs are identifiers, not merely filenames:
 ## Large files and disk state
 
 An interactive open or reload asks before reading more than 25 MiB. Quiet paths
-(startup arguments, session restore and single-instance handoff) may not make that
+(startup arguments and session restore) may not make that
 memory decision or display a timer-driven prompt. They persist the path in
 `els.deferred`; **File > Deferred Opens...** is the explicit foreground consent
 surface. Obvious UNC/network paths follow the same route during quiet work so an
@@ -164,8 +164,10 @@ before replacing a target, so the label is never treated as permission to write.
 ## Adjacent state
 
 There is one state root: beside `els.exe` when packaged, beside `els.tcl` in a
-source run. `els.conf`, `els.deferred`, `swap\`, `backups\`, `handoff\`,
-`els.log`/`els.log.1`, and transient `.els-find\` all live there. No user-profile
+source run. `els.conf`, `els.deferred`, `backups\`, `els.log`/`els.log.1`, and
+transient `.els-find\` all live there. (0.95 removed crash recovery and the
+single-instance handoff, so there are no `swap\`/`handoff\` dirs; a boot-time
+sweep reaps either left behind by a pre-0.95 install.) No user-profile
 path is a fallback, migration source or deletion target. The sole compatibility
 case is an adjacent `config.tcl`: when `els.conf` is absent, it is copied once to
 the new name and retained. Corrupt deferred-open state is quarantined rather than

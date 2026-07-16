@@ -31,15 +31,15 @@ els builds against z's runtime payloads under `<z>/.z/r` — owned by z,
 shared across projects, never copied into the repo. `z.exe` exports `Z_HOME`
 (and may also export `Z_ROOT`, plus `Z_PROJECT_ROOT`/`Z_PROJECT_NAME` inside a project);
 `tools/tasks.tcl` resolves the three payload roots from the optional `Z_*`
-override variables below when set, otherwise deriving them from `Z_ROOT` or
-the hosted layout (`<z>/_els` → `<z>/.z/r/...`). `z tasks env` prints the
+override variables below when set, otherwise deriving them from `Z_HOME`, then
+`Z_ROOT` (as `$Z_ROOT/.z`), then the hosted layout (`<z>/_els` → `<z>/.z/r/...`). `z tasks env` prints the
 resolved paths:
 
 | Variable | Root | What | Version / note |
 |---|---|---|---|
 | `Z_TCLTK` | `r/tcltk/9.0.3` | Tcl/Tk 9 shared build (`tcl9/`), static build + link libs (`tcl9s/`), staged script libraries (`tcllib/`), source snippets (`tclsrc/`), and the Markdown manual (`manual/INDEX.md`) | 9.0.3 |
 | `Z_MSYS2` | `r/msys2` | gcc, binutils, windres, strip (`ucrt64/bin`) | gcc 16.1.0 |
-| `Z_TWAPI` | `r/twapi/5.2.0` | Windows API extension used by screenshot tooling | 5.2.0 |
+| `Z_TWAPI` | `r/twapi/5.2.0` | Windows API extension (twapi); a z-shared payload `z check` verifies -- els's private-desktop screenshots no longer use it | 5.2.0 |
 
 `z check` checks the payload pieces els uses. `z check --deep` also runs
 functional probes: Tcl evaluation, Tk widget creation, twapi loading, C23
@@ -84,12 +84,12 @@ z stress             UI-driven encoding stress test
 z run [file ...]     launch the editor
 z colors [name ...]  browse Tk named colors
 z icon [size]        regenerate resources/icon.png
-z shot <out> [file]  screenshot the editor via twapi + PrintWindow
+z shot <out> [file]  screenshot the editor on a private desktop via PrintWindow
 z readme-shots       regenerate README screenshots
 z build [out]        development build -> build/els-dev.exe; out must be build/*.exe
 z release-check      fail-closed clean build/test/probe -> dist/els-unsigned.exe
 z sign [in]          sign a verified artifact, re-probe, promote -> dist/els.exe
-z probe-exe [exe]    verify fused exe startup/session/recovery behavior
+z probe-exe [exe]    verify fused exe startup and session-restore behavior
 z pecheck [mode] [exe] verify AMD64/GUI/mitigation/manifest/certificate-table policy
 z build-ext          compile the five loadable C23 modules -> build/*.dll
 z native-startup-check build/package a test-only init failure and prove fail-closed exit
@@ -116,8 +116,9 @@ gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS ^
 ```
 
 `src/icudet.c` dynamically loads the Windows system ICU (`icu.dll`) to expose
-charset detection to Tcl. `src/winfs.c` provides Win32 helpers for atomic saves
-and crash-recovery liveness locks. `src/windrop.c` registers Explorer
+charset detection to Tcl. `src/winfs.c` provides Win32 helpers for atomic,
+durable saves (ReplaceFileW + FlushFileBuffers) and the isolated find/replace
+worker. `src/windrop.c` registers Explorer
 drag-and-drop so files dropped on the window open as tabs. `src/cap.c` supports
 screenshot capture for `tools/shot.tcl`. `src/els_main.c` is the exe entry point
 and is never built as a loadable extension. `cap` and `elsx` remain development/
@@ -165,9 +166,10 @@ z shot --selftest
 
 `z probe-exe build/els-dev.exe` copies that exact candidate into isolated
 standalone directories and launches real child processes with controlled
-profile, state, and temporary paths. It verifies adjacent-state behavior,
-explicit and restored opens, recovery, and single-instance handoff without
-depending on an installed or previously released copy. Separately, `z pecheck`
+profile, state, and temporary paths. It verifies adjacent-state behavior and
+explicit and restored (session) opens, and it exercises the fused worker's
+watch-before-go dispatch, without depending on an installed or previously
+released copy. Separately, `z pecheck`
 parses the PE and permits only its reviewed Windows system/API-set import
 surface; it also checks whether the Authenticode certificate table is absent or
 present as requested. It does **not** establish signer trust or identity:
@@ -238,9 +240,11 @@ removed manually only after confirming that owner is no longer running.
 
 ## Screenshots
 
-`tools/shot.tcl` uses twapi to find the target window and the `cap` C extension
-to capture it with `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)`. The converter
-selftest is:
+`tools/shot.tcl` renders the editor on a private Win32 desktop (created by the
+`cap` C extension's `elscap::run_private`, never the input desktop, so nothing
+flashes on screen), and the staged child captures its own toplevel with
+`PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)`. This replaced the earlier twapi
+window-finding design and is twapi-free. The converter selftest is:
 
 ```
 z shot --selftest
@@ -259,8 +263,8 @@ verify the executable but are not runtime dependencies. `LICENSE.txt` and
 contains the exact applicable Tcl, Tk, MinGW-w64 runtime, GCC GPLv3 and runtime-exception,
 zlib, and LibTomMath notice files used by the build.
 
-At runtime, the packaged app keeps `els.conf`, `els.deferred`, `swap\`,
-`backups\`, `handoff\`, rotating `els.log`/`els.log.1`, and transient
+At runtime, the packaged app keeps `els.conf`, `els.deferred`,
+`backups\`, rotating `els.log`/`els.log.1`, and transient
 `.els-find\` only beside `els.exe`; a source run uses the directory containing
 `els.tcl`. There is no profile fallback, migration, or deletion of old profile
 state. The sole legacy bridge is adjacent: when `els.conf` is absent but

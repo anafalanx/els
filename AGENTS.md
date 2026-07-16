@@ -61,9 +61,12 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   Tcl UI startup; `z test` runs the packaging-independent suite. Never debug a GUI
   build by running it on a failure and waiting for stderr; read the selftest
   report, or build a console-subsystem twin.
-- The packaged application keeps `els.conf`, `els.deferred`, `swap\`,
-  `backups\`, `handoff\`, rotating `els.log`/`els.log.1`, and transient
-  `.els-find\` only beside `els.exe`; a source run uses the `els.tcl` directory.
+- The packaged application keeps `els.conf`, `els.deferred`, `backups\`,
+  rotating `els.log`/`els.log.1`, and transient `.els-find\` only beside
+  `els.exe`; a source run uses the `els.tcl` directory.  (0.95 removed
+  crash-recovery snapshots and the single-instance handoff, so there are no
+  `swap\`/`handoff\` dirs; a boot-time sweep reaps either left by a pre-0.95
+  install.)
   There is no user-profile fallback or migration; old profile state is
   deliberately ignored. The sole legacy bridge is a one-time copy from an
   adjacent `config.tcl` when `els.conf` is absent. The directory must be

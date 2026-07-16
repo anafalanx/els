@@ -6,10 +6,12 @@ A tiny text editor for Windows: calm, opinionated, no-frills.
 
 els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset
-auto-detection. It is built to never lose your text:
-saves are atomic, unsaved work is continuously crash-protected, and opening a
-file while els is running joins the existing window instead of spawning a
-second one (see [Data safety](#data-safety)). The look is deliberately quiet:
+auto-detection. It is built never to lose text you have saved:
+saves are atomic and durable, every overwrite keeps the file's previous version
+as a backup, and optional auto-save can write for you (see
+[Data safety](#data-safety)). It does not try to recover text you never saved — on
+a crash that unsaved text is gone, by design, exactly as in a plain editor. The
+look is deliberately quiet:
 a calm grey page, flat chrome, and a single precise caret. It ships as a
 self-contained native **`els.exe`** (~5.1 MB, zero non-system dependencies): a
 real Windows executable with Tcl/Tk 9 and its C23 extensions compiled in.
@@ -43,10 +45,11 @@ in **Settings > Default apps**.
 
 ## Features
 
-- **Data safety, built in**: atomic saves (an interrupted save leaves the
-  original intact), continuous crash protection for unsaved changes, a guard against saves that
-  would silently lose characters, and one editor window that collects
-  everything you open. Explained in [Data safety](#data-safety).
+- **Data safety, built in**: atomic, durable saves (an interrupted save leaves
+  the original intact), previous-version backups on every overwrite, and a guard
+  against saves that would silently lose characters. Recovering text you never
+  saved is a deliberate non-goal — a crash loses unsaved work, as in a plain
+  editor. Explained in [Data safety](#data-safety).
 - **Auto-save, opt-in** (File > Auto-save, off by default): documents that
   have a file are saved a moment after you begin editing, on tab switch, on
   focus loss, and on exit.
@@ -56,7 +59,7 @@ in **Settings > Default apps**.
 - **Multi-file tabs**: each document keeps its own undo, selection and dirty
   state under a flat tab strip; drag a tab to reorder. Same-named files gain the
   shortest distinguishing parent path, untitled documents are numbered, and
-  compact marks show dirty (`•`), recovered (`↺`) and decode-lossy (`�`) state.
+  compact marks show dirty (`•`) and decode-lossy (`�`) state.
   The active tab always remains visible; the **Tabs** menu and right-hand
   overflow button expose every open document.
 - **Drag and drop**: drop files from Explorer onto the text area to open each in
@@ -69,8 +72,8 @@ in **Settings > Default apps**.
   (up to its 1,000,000-match safety ceiling), zero-width matches are supported,
   and Replace All commits atomically as one undo step.
 - **Large-file guard**: an interactive open or reload asks before reading more
-  than 25 MiB. Large files encountered by startup, session restore or handoff
-  are durably queued instead of loaded in the background; inspect them with
+  than 25 MiB. Large files encountered by startup or session restore are durably
+  queued instead of loaded in the background; inspect them with
   **File > Deferred Opens...**.
 - **Text commands** (Buffer menu): a curated, undo-atomic set — move lines up/down
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
@@ -112,12 +115,14 @@ in **Settings > Default apps**.
 
 ## Data safety
 
-A text editor's one unforgivable failure is losing text. els defends against
-that with a set of mechanisms that work together. They arm immediately using
-the writable state directory beside `els.exe`; there is no location chooser or
-profile fallback. Crash snapshots and backups are sidecars, not writes into the
-open document. Automatic document writes happen only when you explicitly turn
-on **File > Auto-save**.
+A text editor's one unforgivable failure is losing text you *saved*. els defends
+the saved file with atomic, durable writes, keeps the previous version of every
+file it overwrites, and can auto-save for you — all arming immediately from the
+writable state directory beside `els.exe`, with no location chooser or profile
+fallback. What els deliberately does **not** do is recover text you never saved:
+on a crash or power loss that unsaved text is gone (see "No recovery of unsaved
+text" below). Backups are sidecars, not writes into the open document; automatic
+document writes happen only when you turn on **File > Auto-save**.
 
 **Adjacent state inventory.** In a packaged run the directory containing
 `els.exe` is the one and only state directory; a source run uses the directory
@@ -125,15 +130,15 @@ containing `els.tcl` instead.
 
 - `els.conf` stores settings, window state, recents and session paths.
 - `els.deferred` is the durable queue for large or network files that a quiet
-  startup, restore or handoff refused to read without foreground consent.
-- `swap\` holds crash-recovery snapshots plus short-lived session locks,
-  listening markers and recovery claims.
+  startup or restore refused to read without foreground consent.
 - `backups\` holds the bounded previous-version ring when backups are enabled.
-- `handoff\` holds durable open requests while one running window receives work
-  from another launch.
 - `els.log` and its one rotated generation, `els.log.1`, hold diagnostics.
 - `.els-find\` is transient scratch for immutable find snapshots, isolated
   worker jobs, result indexes and staged replacements.
+
+0.95 removed crash-recovery snapshots and the single-instance handoff, so there
+are no longer any `swap\` or `handoff\` folders; a boot-time sweep deletes either
+one left behind by a pre-0.95 install.
 
 There is no profile fallback, migration or deletion. If `els.conf` does not yet
 exist but an old **adjacent** `config.tcl` does, els makes a one-time copy to
@@ -159,52 +164,40 @@ If writing the temporary file or replacing the target fails, the original is
 never opened for truncation. A complete temporary copy is retained and named in
 the error when replacement itself fails. A durability error is necessarily
 later: the target may already contain the new bytes, but els still reports the
-save as failed, keeps the tab dirty, and retains its recovery snapshot until a
-retry is confirmed. Thus a lock, long-path edge case, full disk, or device error
-fails safely instead of falling back to a risky direct write.
+save as failed and keeps the tab dirty until a retry is confirmed. Thus a lock,
+long-path edge case, full disk, or device error fails safely instead of falling
+back to a risky direct write.
 
-**Crash recovery.** Between saves, your unsaved changes exist only in memory,
-which is exactly what a crash, a forced reboot, or a power cut destroys. So
-while you edit, els continuously snapshots every modified document into a
-small swap file (in a `swap` folder next to `els.conf`): a snapshot is taken
-about every two seconds, and shortly after each pause in typing. Documents
-with nothing unsaved have no swap file; saving or closing a document removes
-its snapshot only after a confirmed save or an explicit discard, because the
-file on disk is then the truth. If els ends
-abnormally, those snapshots survive. The next start detects them, checks each
-against the current file on disk, and offers everything in one dialog. Each
-item you choose to recover loads into a dirty tab, reusing a matching clean
-session-restored tab where possible, and is marked "(recovered)". Recovered
-content is excluded from auto-save until a foreground save succeeds. Recovery
-never touches the files themselves; it only brings text back into the editor,
-and it tells you when a file changed on disk since the snapshot so you can
-decide which version wins. Untitled notes that were never saved anywhere are
-protected the same way. Snapshots are also crash-consistent themselves: they
-are written atomically and verified with a checksum, so a half-written
-snapshot is discarded rather than trusted.
+**No recovery of unsaved text — by design.** Between saves, your unsaved changes
+exist only in memory, which is exactly what a crash, a forced reboot, or a power
+cut destroys. els deliberately does **not** try to recover them. For a minimal
+editor, snapshotting every edit to a hidden sidecar — plus the liveness locks
+needed to tell a live session's snapshots from a dead one's, plus the dialog that
+reconciles them against the file on disk — is far more machinery, and more failure
+surface, than the promise is worth. So on an abnormal exit, anything you had not
+saved (yourself, or through auto-save) is gone, exactly as in a plain editor. What
+protects your data instead is the rest of this section: saves are atomic and
+durable, every overwrite keeps the file's previous version as a backup, and
+optional auto-save writes real files for you. If you want a document to survive a
+crash, save it — or turn on auto-save so that happens for you automatically.
 
-**Single instance.** Opening a file "with els" while els is already running
-does not start a second editor. The new launch notices the running one, hands
-the file over, and exits; your existing window opens it as a new tab and comes
-to the front. One window means one session, one recent-files list, and one
-place where unsaved work lives, which keeps the two mechanisms above simple
-and predictable. The handoff is also why two instances cannot quietly fight
-over the same file with last-save-wins. If you deliberately want independent
-instances, set the environment variable `ELS_NO_SINGLE_INSTANCE=1` for the
-extra launch: the safety layer was designed for that case too, so each
-instance keeps its own protected snapshots (a live instance's snapshots are
-guarded by a lock that Windows releases only when that process is truly
-gone, so one instance can never "recover" another's open work).
+**Independent windows.** Every launch is its own window with its own tabs; els has
+no single-instance owner. Opening a file "with els" while els is already running
+simply opens a second window. Because nothing is shared between windows and no
+unsaved text is written to a sidecar, there is no lock or handoff machinery that
+could get it wrong — and the only way two windows can disagree about a file is the
+ordinary one: whoever saves last wins, and the on-disk change guard (below) warns
+the other before it overwrites.
 
 **Large and network files wait for you.** An interactive open or reload asks
 before reading a file larger than 25 MiB; for an open, the decision comes before
 a tab is created. Startup
-arguments, session restore and handoff are deliberately quiet: if they encounter
+arguments and session restore are deliberately quiet: if they encounter
 a large file—or an obvious UNC/network path that could stall Tk's single UI
 thread—they durably add its path to `els.deferred`. **File > Deferred Opens...**
-shows the full paths and lets you explicitly open or forget selected entries.
-Only an opened/already-open file or a successfully persisted deferred entry
-counts as delivered by the handoff machinery.
+shows the full paths and lets you explicitly open or forget selected entries; a
+deferred file also stays in the saved session, so it never silently disappears
+from a future startup.
 
 **No save is silently lossy.** A document's encoding is preserved on save,
 and some encodings cannot represent every character you can type. When that
@@ -256,11 +249,12 @@ files you later delete or move.
 turn it on, every document that has a file is saved automatically: a moment
 after you begin editing, when you switch tabs, when the els window loses focus,
 and when you close a file or exit, always through the same atomic save.
-Untitled notes are never auto-saved (no filename is invented; crash recovery
-protects them), a save that would lose characters pauses auto-saving for that
-document until one manual save settles the question, recovered documents and
-disk-state conflicts likewise wait for a manual save, and a failing auto-save
-shows a quiet statusbar note instead of a dialog. With auto-save on, the file
+Untitled notes are never auto-saved — no filename is invented, so with no crash
+recovery their text is simply not on disk until you save it with a name. A save
+that would lose characters pauses auto-saving for that document until one manual
+save settles the question, an on-disk conflict likewise waits for a manual save,
+and a failing auto-save shows a quiet statusbar note instead of a dialog. With
+auto-save on, the file
 on disk follows the buffer, so closing without saving stops being a way to
 discard an editing accident; the backups folder above is what makes such an
 accident recoverable anyway.
@@ -280,7 +274,7 @@ Stated plainly so you know before you rely on it:
   but those are untested and path handling degrades without the UTF-8 code page.
   There is no 32-bit build.
 - **A writable directory for `els.exe`.** Settings, the deferred-open queue,
-  recovery, backups, handoff state, find-worker scratch and diagnostics are
+  backups, find-worker scratch and diagnostics are
   intentionally stored beside the executable, never in the user profile. A
   read-only application directory prevents those facilities from persisting;
   move els and its adjacent state to a writable directory.
@@ -379,9 +373,9 @@ not linked into the product. A real product example,
 **`src/icudet.c`**, dynamically loads the Windows system ICU (`icu.dll`) to expose
 its charset detector to Tcl (the basis of els's encoding auto-detection); it is
 compiled into the shipped exe together with **`src/winfs.c`**, the Win32 helper
-behind atomic saves and the crash-recovery liveness locks, and **`src/windrop.c`**,
-the Explorer drag-and-drop handler. Tests live in `tests/elsx.test` and
-`tests/winfs.test`.
+behind atomic saves (ReplaceFileW + FlushFileBuffers) and the isolated find/replace
+worker, and **`src/windrop.c`**, the Explorer drag-and-drop handler. Tests live in
+`tests/elsx.test` and `tests/winfs.test`.
 
 ## About
 

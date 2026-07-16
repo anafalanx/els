@@ -11,11 +11,31 @@
 
 **Scope:** a robustness audit and prioritized hardening plan for els (single-file Tcl/Tk 9.0.3 Windows text editor, `els.tcl`, ~3000 lines). Goal is *robustness, not features*. Grounded in direct code reads, six parallel audits (several with live probes driven via `tests/helpers.tcl` under `tclsh90.exe`), and an adversarial verification pass on every critical/high data-loss claim. Each claim below is tagged **[OBSERVED]** (reproduced by live probe), **[CODE-READ]** (confirmed in source), or **[INFERRED]**.
 
+> ## STATUS UPDATE — 2026-07-16 (els 0.95): crash recovery + single-instance REMOVED
+>
+> 0.95 deliberately **removes** the entire crash-recovery subsystem (the R2 swap
+> files, the recovery scan/dialog, the `↺` recovered mark, `ELS_RECOVER_AUTO`), the
+> single-instance/handoff machinery (handoff spool, listen markers, `primary_running`,
+> `ELS_NO_SINGLE_INSTANCE`), and the Win32 byte-range session locks
+> (`win_lock_file`/`win_unlock_file`/`win_try_lock`). Every **R2** finding and every
+> swap/lock/handoff reference below therefore describes **superseded** design, kept
+> only as historical evidence — do not treat it as current.
+>
+> The shipped data-safety story is now: **atomic, durable save** (`write_atomic` +
+> ReplaceFileW + `FlushFileBuffers`), the **previous-version backup ring** (on by
+> default — the primary net), and **opt-in autosave** (which writes the real file
+> through the normal save). Between saves, unsaved text lives only in memory: on a
+> crash or power loss it is **gone, by design** — recovering it is an explicit
+> non-goal for a minimal editor. There is no single instance; every launch is its
+> own window. So there are no `swap\` or `handoff\` folders (a boot-time sweep reaps
+> either one left by a pre-0.95 install) and no `↺` tab mark.
+>
 > ## STATUS UPDATE — 2026-07-15
 >
 > This later closure supersedes several implementation choices recorded below;
 > the baseline findings and proposal text remain as historical evidence, with
-> current status annotations added where the shipped design moved on.
+> current status annotations added where the shipped design moved on. (Note: the
+> 2026-07-16 update above further supersedes the swap/handoff items in this block.)
 >
 > - **One adjacent state location.** The packaged app keeps `els.conf`,
 >   `els.deferred`, `swap\`, `backups\`, `handoff\`, rotating

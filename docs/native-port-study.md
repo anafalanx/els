@@ -32,6 +32,13 @@
 >   `config.tcl` when `els.conf` is absent. `z build` is a development build;
 >   publication now requires `z release-check` followed by `z sign`, as documented
 >   in `toolchain.md`.
+> - **0.95 removed crash recovery and single-instance.** The swap-file crash
+>   recovery of unsaved buffers, the single-instance/handoff machinery, and the
+>   Win32 byte-range session locks are all gone. Wherever this study (including the
+>   `z probe-exe` description in §5) mentions recovery, swap files, single-instance,
+>   or handoff as things the exe does or the probe verifies, read them as removed:
+>   0.95 recovers nothing unsaved on a crash (by design), and every launch is its
+>   own independent window.
 > - **Treat every command below that names `.toolchain`, `z build-wish`,
 >   `tools/exeicon.tcl`, `z build --wish`, or `z build dist/els.exe` as historical
 >   evidence, not an instruction.** Those paths/tasks are gone, and the current
