@@ -594,7 +594,7 @@ namespace eval els {
     variable refresh_after ""    ;# coalesced full-view refresh (resize bursts)
     variable tp_zoom_acc 0       ;# accumulated Ctrl+touchpad zoom delta
     variable recent_row_tip -1   ;# recent-list row whose hover tip is active
-    variable recent_sel_path ""  ;# Maintain List selection, tracked by PATH
+    variable recent_sel_path ""  ;# Manage List selection, tracked by PATH
     variable tabs_layout_after "" ;# coalesced tab-strip overflow layout
     variable tabs_menu_choice ""  ;# radiobutton scratch state for the Tabs menu
     variable TAB_LABEL_MAX 22      ;# hard character cap; active tab fits the minimum window
@@ -1404,7 +1404,7 @@ proc els::recent_add {p} {
     set ::els::recent [els::recent_sanitize [linsert $rest 0 $p]]
     els::recent_rebuild
     els::save_geometry
-    # the Maintain List dialog is modeless and maps row indices into THIS list:
+    # the Manage List dialog is modeless and maps row indices into THIS list:
     # without a refresh (it no-ops when closed), every action past the
     # insertion point — Remove, Open, the detail label, the hover tip — acted
     # on a DIFFERENT file than the row displayed
@@ -1475,7 +1475,7 @@ proc els::recent_rebuild {} {
         }
     }
     $m add separator
-    $m add command -label "Maintain List..." -command els::recent_manage
+    $m add command -label "Manage List..." -command els::recent_manage
 }
 proc els::recent_manage {} {
     catch {destroy .recent}
@@ -1610,7 +1610,7 @@ proc els::recent_row_motion {x y rx ry} {
     set ::els::tip_after [after 550 \
         [list els::tip_pop_at [els::path_tip $p] [expr {$rx + 14}] [expr {$ry + 18}]]]
 }
-# The Maintain List scrollbar appears only when the list overflows.  The
+# The Manage List scrollbar appears only when the list overflows.  The
 # grid/grid-remove is a geometry change, so it is deferred to idle and
 # coalesced (same discipline as the editor's own bars).
 proc els::recent_vs {first last} {
@@ -1862,7 +1862,7 @@ proc els::assoc_register {} {
     set exe [els::association_exe]
     if {$exe eq "" || ![file exists $exe]} {
         els::message_box -parent .assoc -icon warning -title els \
-            -message "els can only register itself from the built els.exe.\nBuild it (z build) and run that, then try again."
+            -message "File associations can only be registered from the built els.exe, not a source run.\nRun the packaged els.exe and try again."
         return
     }
     set errs {}
@@ -2142,7 +2142,7 @@ proc els::build {} {
     .menu.view add checkbutton -label "Always on Top" -variable ::els::always_on_top \
         -command els::set_always_on_top
     .menu.view add separator
-    .menu.view add command -label "Zoom In"    -accelerator Ctrl++ -command {els::zoom 1}
+    .menu.view add command -label "Zoom In"    -accelerator Ctrl+= -command {els::zoom 1}
     .menu.view add command -label "Zoom Out"   -accelerator Ctrl+- -command {els::zoom -1}
     .menu.view add command -label "Reset Zoom" -accelerator Ctrl+0 -command els::zoom_reset
     menu .menu.help
@@ -2166,7 +2166,7 @@ proc els::build {} {
     bind .tabs.more <KeyPress-KP_Enter> {els::tabs_popup; break}
     bind .tabs.more <KeyPress-space> {els::tabs_popup; break}
     bind .tabs <Configure> {els::tabs_schedule}
-    els::tooltip .tabs.more "All open documents  (Ctrl+T)"
+    els::tooltip .tabs.more "All open tabs  (Ctrl+T)"
 
     # the shared line-number gutter — a Canvas that draws only the numbers for
     # the display rows currently on screen (see els::draw_gutter), so it is
@@ -2222,7 +2222,7 @@ proc els::build {} {
     # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
     pack .sb.name -side left  -padx {12 8}  -pady 4 -fill x -expand 1
     pack .sb.enc     -side right -padx {8 12}  -pady 4
-    pack .sb.sep_enc -side right -padx {2 2}   -pady {7 6} -fill y
+    pack .sb.sep_enc -side right -padx {8 2}   -pady {7 6} -fill y
     pack .sb.eol     -side right -padx {8 2}   -pady 4
     pack .sb.sep_eol -side right -padx {8 2}   -pady {7 6} -fill y
     pack .sb.pos  -side right -padx {12 0}  -pady 4
@@ -2575,7 +2575,8 @@ proc els::close_doc {id} {
     els::autosave_flush_doc $id   ;# auto-save on: a pathed doc closes saved, no prompt
     if {[els::doc_dirty $id]} {
         set ans [els::message_box -parent . -icon warning -type yesnocancel \
-            -title els -message "Save changes to [els::doc_name $id]?"]
+            -title els -message "Save changes to [els::doc_name $id]?" \
+            -detail "No discards the unsaved changes; Cancel keeps the file open."]
         if {$ans eq "cancel"} { return }
         if {$ans eq "yes"} {
             els::switch_to $id
@@ -4264,7 +4265,7 @@ proc els::reopen_with {enc bom} {
 proc els::extmod_ask {id} {
     set name [file tail $::els::docPath($id)]
     set ans [els::message_box -parent . -icon warning -type yesnocancel -title els \
-        -message "\"$name\" has changed on disk since you opened it." \
+        -message "\"$name\" has changed on disk since els last read it." \
         -detail "Yes — save anyway, overwriting the version on disk.\nNo — reload from disk, discarding your edits.\nCancel — do nothing."]
     switch $ans {
         yes { return overwrite }
@@ -4279,10 +4280,10 @@ proc els::extstate_ask {id state detail} {
     set name [file tail $::els::docPath($id)]
     if {$state eq "missing"} {
         set message "\"$name\" has been removed since you opened it."
-        set action "Yes - recreate it from this buffer.\nNo - do nothing."
+        set action "Yes — recreate it from this buffer.\nNo — do nothing."
     } else {
         set message "\"$name\" cannot currently be read or inspected."
-        set action "Yes - try to overwrite it from this buffer.\nNo - do nothing."
+        set action "Yes — try to overwrite it from this buffer.\nNo — do nothing."
     }
     if {$detail ne ""} { append action "\n\nSystem detail: $detail" }
     return [expr {[els::message_box -parent . -icon warning -type yesno -title els \
@@ -4295,7 +4296,7 @@ proc els::decode_lossy_ask {id} {
     set name [els::doc_name $id]
     return [expr {[els::message_box -parent . -icon warning -type yesno -title els \
         -message "\"$name\" contains replacement characters from decoding errors." \
-        -detail "Saving will make those replacements permanent and the original bytes cannot be recovered from this file.\n\nYes - save anyway.\nNo - cancel; use Reopen with Encoding or Save As instead."] eq "yes"}]
+        -detail "Saving will make those replacements permanent and the original bytes cannot be recovered from this file.\n\nYes — save anyway.\nNo — cancel; use Reopen with Encoding or Save As instead."] eq "yes"}]
 }
 # One binary reader for document reloads, opens, and backups.  Keep the channel
 # lifecycle here so an error from fconfigure/read can never strand an open file
@@ -5713,7 +5714,7 @@ proc els::shortcuts {} {
                 Ctrl+V  {Paste}
                 Ctrl+A  {Select all}
             }
-            Lines {
+            Buffer {
                 {Alt+↑/↓}       {Move line up / down}
                 Ctrl+D          {Duplicate line}
                 Ctrl+Shift+K    {Delete line}
@@ -5807,7 +5808,8 @@ proc els::quit {} {
         if {[els::doc_dirty $id]} {
             els::switch_to $id
             set ans [els::message_box -parent . -icon warning -type yesnocancel \
-                -title els -message "Save changes to [els::doc_name $id]?"]
+                -title els -message "Save changes to [els::doc_name $id]?" \
+                -detail "No discards the unsaved changes; Cancel cancels quitting."]
             if {$ans eq "cancel"} { return }   ;# aborted quit: autosave stays armed
             if {$ans eq "yes"} {
                 els::save $id   ;# save the PROMPTED doc, never a since-changed $active
@@ -6605,7 +6607,7 @@ proc els::find_cancel {{reason cancel}} {
     # label is immediately overwritten by the new context/search.  Leave a durable
     # status-bar note so the user is never left believing a replace completed (R08).
     if {$restoreSearch && $reason in {context hidden edit superseded}} {
-        catch {els::status_note "Replace cancelled"}
+        catch {els::status_note "replace cancelled"}
     }
 }
 

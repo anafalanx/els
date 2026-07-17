@@ -1185,7 +1185,7 @@ test replaceux-11.3 {a passively-cancelled in-flight replace leaves a durable st
     els::find_cancel context                    ;# tab-switch style teardown
     set note [.sb.name cget -text]
     catch {after cancel $::els::status_note_after} ; set ::els::status_note_after ""
-    string match "*Replace cancelled*" $note
+    string match "*replace cancelled*" $note
 } -result 1
 
 test worker-life-8.10 {find_prune_stale reclaims stale FOREIGN-session job dirs + snapshots, keeps own and fresh} -setup {find_reset} -cleanup {

@@ -1286,13 +1286,13 @@ test recent-1.6 {Open Recent menu exposes a maintain-list window, not a removal 
             lappend labels [.menu.file.recent entrycget $i -label]
         }
     }
-    .menu.file.recent invoke "Maintain List..."
+    .menu.file.recent invoke "Manage List..."
     set exists [winfo exists .recent]
     set min [wm minsize .recent]
     set buttonStyle [.recent.f.buttons.open cget -style]
     set req [winfo reqwidth .recent]
     catch {destroy .recent}
-    list [expr {"Maintain List..." in $labels}] \
+    list [expr {"Manage List..." in $labels}] \
          [expr {"Remove from List" ni $labels}] $exists \
          [expr {[lindex $min 0] >= $req}] $buttonStyle
 } -result {1 1 1 1 Dialog.TButton}
@@ -2205,7 +2205,7 @@ test issue-a.7 {find/replace entries grow a clear button while non-empty} -setup
     event generate .find.fr.q.clearx <Button-1> ; update
     list $shown $::els::find_q [winfo ismapped .find.fr.q.clearx]
 } -result {1 {} 0}
-test recentvs-b.1 {the Maintain List scrollbar appears only when the list overflows} -setup {ui_reset} -body {
+test recentvs-b.1 {the Manage List scrollbar appears only when the list overflows} -setup {ui_reset} -body {
     # the dialog is withdrawn for test hygiene, so a child's `winfo ismapped` is
     # always 0 — assert on grid membership (manager "grid" vs removed "") instead
     set ::els::recent [list [els_tmpfile rvs1.txt "x\n"]]
@@ -2468,7 +2468,7 @@ test ui-4.16 {the find count label fits a large match count without clipping} -s
 
 # ---- bug-hunt wave 5: recent dialog, tooltips, menu undo -------------------
 
-test recent-5.1 {Maintain List stays path-correct after recent_add reorders it} -setup {ui_reset} -body {
+test recent-5.1 {Manage List stays path-correct after recent_add reorders it} -setup {ui_reset} -body {
     set pa [file normalize [els_tmpfile r5a.txt "A\n"]]
     set pb [file normalize [els_tmpfile r5b.txt "B\n"]]
     set ::els::recent [list $pa $pb]
@@ -2483,7 +2483,7 @@ test recent-5.1 {Maintain List stays path-correct after recent_add reorders it} 
     list $agree [expr {$rows == [llength $::els::recent]}]
 } -result {1 1}
 
-test recent-5.2 {a failed Open keeps the Maintain List dialog up} -setup {ui_reset} -body {
+test recent-5.2 {a failed Open keeps the Manage List dialog up} -setup {ui_reset} -body {
     set dir [file join $::ELS_TMP r5dir] ; file mkdir $dir
     set ::els::recent [list $dir]               ;# exists, but cannot be opened
     els::recent_manage ; catch {wm withdraw .recent}
@@ -2515,7 +2515,7 @@ test recent-5.3 {hovering the empty area below the rows schedules no tip} -setup
     list $inRow $inGap
 } -result {1 0}
 
-test recent-5.4 {destroying the Maintain List dialog cancels a pending row tip} -setup {ui_reset} -body {
+test recent-5.4 {destroying the Manage List dialog cancels a pending row tip} -setup {ui_reset} -body {
     set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5d.txt]
     set ::els::recent [list $long]
     # realize the listbox width before withdrawing (see recent-5.3): a headless
