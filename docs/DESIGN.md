@@ -171,8 +171,12 @@ An interactive open or reload asks before reading more than 25 MiB. Quiet paths
 (startup arguments and session restore) may not make that
 memory decision or display a timer-driven prompt. They persist the path in
 `els.deferred`; **File > Deferred Opens...** is the explicit foreground consent
-surface. Obvious UNC/network paths follow the same route during quiet work so an
-offline share cannot block Tk's only event thread before the UI is usable.
+surface. Network paths follow the same route during quiet work so an offline
+share cannot block Tk's only event thread before the UI is usable — both a UNC
+path (recognised lexically) and a **mapped network drive** (`Z:`, recognised via
+`GetDriveType`, which reads the local mount table without contacting the server).
+Removable and optical drives stay locally observable: they fail fast when absent,
+so they carry no SMB-style reconnect stall to guard against.
 
 Undo is bounded by an action *count* (`-maxundo 2000`), not by bytes: Tk 9 offers no
 byte-bounded undo, so a single huge action can retain a correspondingly large record. A
@@ -184,7 +188,10 @@ The active-document status item has six user-facing states: **Not on disk**,
 **On disk**, **Changed on disk**, **Missing**, **Unavailable**, and **Read-only**.
 It is deliberately an early-warning observer. It may update one quiet label, but
 never reloads or writes, never changes auto-save policy, and never asks a question.
-Automatic observation performs no I/O on obvious UNC/network paths. Every manual
+Automatic observation performs no I/O on a network path — a UNC path or a mapped
+network drive — so a disconnected share never stalls the event thread; such a
+document reads as **Unavailable** until an explicit open, save, or reload checks
+it. Every manual
 or automatic save independently performs the authoritative full conflict check
 before replacing a target, so the label is never treated as permission to write.
 

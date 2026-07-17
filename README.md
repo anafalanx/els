@@ -7,8 +7,8 @@ A tiny text editor for Windows: calm, opinionated, no-frills.
 els is a clean editor for everyday text files: multi-file tabs, find & replace
 with real regex, word wrap, recent files, session restore, and charset
 auto-detection. It is built never to lose text you have saved:
-saves are atomic and durable, every overwrite keeps the file's previous version
-as a backup, and optional auto-save can write for you (see
+saves are atomic and durable, overwrites keep the file's previous version
+as a backup (very large files aside), and optional auto-save can write for you (see
 [Data safety](#data-safety)). It does not try to recover text you never saved — on
 a crash that unsaved text is gone, by design, exactly as in a plain editor. The
 look is deliberately quiet:
@@ -46,7 +46,8 @@ in **Settings > Default apps**.
 ## Features
 
 - **Data safety, built in**: atomic, durable saves (an interrupted save leaves
-  the original intact), previous-version backups on every overwrite, and a guard
+  the original intact), previous-version backups on overwrite (very large files
+  excepted, with a one-time note when one is skipped), and a guard
   against saves that would silently lose characters. Recovering text you never
   saved is a deliberate non-goal — a crash loses unsaved work, as in a plain
   editor. Explained in [Data safety](#data-safety).

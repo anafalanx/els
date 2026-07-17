@@ -1196,6 +1196,59 @@ test diskstate-1.11 {remote detector distinguishes ordinary and extended UNC fro
          [els::remote_path {\\.\pipe\name}]
 } -result {1 1 1 1 0 0 0 0}
 
+test diskstate-1.12 {a mapped network drive (DRIVE_REMOTE) is a network path; fixed/removable drives stay local} \
+        -setup {
+            els_reset
+            rename ::els::drive_type ::els::drive_type_real
+            # classify by drive letter so the result is independent of this machine's
+            # real drive map: Z: acts as a mapped share, E: as a USB stick, else fixed.
+            proc ::els::drive_type {path} {
+                switch -glob -nocase -- $path {
+                    z:* { return remote }
+                    e:* { return removable }
+                    default { return fixed }
+                }
+            }
+        } -cleanup {
+            catch {rename ::els::drive_type {}}
+            if {[llength [info commands ::els::drive_type_real]]} {
+                rename ::els::drive_type_real ::els::drive_type
+            }
+        } -body {
+    list [els::remote_path {Z:/share/file.txt}] \
+         [els::remote_path {Z:\share\file.txt}] \
+         [els::remote_path {C:/local/file.txt}] \
+         [els::remote_path {E:/usb/file.txt}] \
+         [els::remote_path {//server/share/file.txt}]
+} -result {1 1 0 0 1}
+
+test diskstate-1.13 {a mapped-drive document is polled like a UNC path: no synchronous stat or hash on the event thread} \
+        -setup {
+            els_reset
+            rename ::els::drive_type ::els::drive_type_real
+            proc ::els::drive_type {path} { return remote }
+            rename ::els::disk_stat_probe ::els::disk_stat_probe_real
+            set ::disk_stat_calls 0
+            proc ::els::disk_stat_probe {path} { incr ::disk_stat_calls ; error "must not poll a mapped drive" }
+            rename ::els::file_sig_probe ::els::file_sig_probe_real
+            set ::disk_hash_calls 0
+            proc ::els::file_sig_probe {path} { incr ::disk_hash_calls ; error "must not hash a mapped drive" }
+        } -cleanup {
+            catch {rename ::els::drive_type {}}
+            if {[llength [info commands ::els::drive_type_real]]} { rename ::els::drive_type_real ::els::drive_type }
+            catch {rename ::els::disk_stat_probe {}}
+            if {[llength [info commands ::els::disk_stat_probe_real]]} { rename ::els::disk_stat_probe_real ::els::disk_stat_probe }
+            catch {rename ::els::file_sig_probe {}}
+            if {[llength [info commands ::els::file_sig_probe_real]]} { rename ::els::file_sig_probe_real ::els::file_sig_probe }
+            unset -nocomplain ::disk_stat_calls ::disk_hash_calls
+        } -body {
+    set id $::els::active
+    set ::els::docPath($id) {Z:/share/file.txt}
+    set forced [els::disk_probe $id forced]
+    set timer [els::disk_probe $id timer]
+    list $forced $timer $::disk_stat_calls $::disk_hash_calls
+} -result {unavailable unavailable 0 0}
+
 test diskstate-1.5 {tab switches probe immediately; the timer runs only while the app is active} \
         -setup {
             els_reset
@@ -1863,6 +1916,23 @@ test session-r05-1 {a deferred (network) session file stays in session_pending i
     set ::els::session_active ""
     els::session_restore
     list [llength $::els::session_pending] [string match {*remote-doc.txt} [lindex $::els::session_pending 0]]
+} -result {1 1}
+
+test session-r05-2 {a saved session file on a mapped network drive is deferred, never synchronously probed at startup} -setup {
+            els_reset
+            rename ::els::drive_type ::els::drive_type_real
+            proc ::els::drive_type {path} { return remote }
+        } -cleanup {
+            catch {rename ::els::drive_type {}}
+            if {[llength [info commands ::els::drive_type_real]]} { rename ::els::drive_type_real ::els::drive_type }
+            set ::els::session_files {} ; set ::els::session_pending {} ; set ::els::session_active ""
+            catch {file delete -force [els::deferred_path]}
+        } -body {
+    set ::els::restore_session 1
+    set ::els::session_files [list {Z:/share/mapped-doc.txt}]
+    set ::els::session_active ""
+    els::session_restore
+    list [llength $::els::session_pending] [string match {*mapped-doc.txt} [lindex $::els::session_pending 0]]
 } -result {1 1}
 
 test launchfail-1.1 {a failed launch-file open is collected and reported after the UI is up (R12)} -setup {els_reset} -cleanup {

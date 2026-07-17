@@ -709,6 +709,51 @@ static int Fsync_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     return TCL_OK;
 }
 
+/* ---- drive classification -------------------------------------------------
+ * els::win_drive_type <path> -> "fixed" | "remote" | "removable" | "cdrom" |
+ *   "ramdisk" | "noroot" | "unknown".  els::remote_path uses this to recognise a
+ *   MAPPED network drive (Z: -> \\server\share) as a network path, so an automatic
+ *   observer never stats it synchronously and hangs Tk's only event thread on the
+ *   SMB/reconnect timeout the way it would for a dead UNC path.
+ *
+ * GetDriveTypeW reads the LOCAL mount table only -- it never contacts the remote
+ * server -- so it is safe to call on the event thread even for a disconnected
+ * mapping.  The root ("X:\") is derived PURELY LEXICALLY (no GetVolumePathNameW,
+ * which could itself block on a dead share); a non-drive-letter or unconvertible
+ * path reports "unknown", leaving the caller's lexical UNC handling in charge. */
+static int DriveType_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                         int objc, Tcl_Obj *const objv[]) {
+    if (objc != 2) { Tcl_WrongNumArgs(ip, 1, objv, "path"); return TCL_ERROR; }
+    Tcl_Size n;
+    const char *p = Tcl_GetStringFromObj(objv[1], &n);
+    WCHAR *w = utf8_to_wide(p, n);
+    if (w == nullptr) {
+        Tcl_SetObjResult(ip, Tcl_NewStringObj("unknown", -1));
+        return TCL_OK;
+    }
+    /* Skip a \\?\ prefix, then require a bare "X:" drive letter.  UNC (\\?\UNC\…
+     * or \\server\…) is handled lexically by the caller and is not a drive. */
+    const WCHAR *s = w;
+    if (s[0] == L'\\' && s[1] == L'\\' && s[2] == L'?' && s[3] == L'\\') s += 4;
+    const char *type = "unknown";
+    if (((s[0] >= L'A' && s[0] <= L'Z') || (s[0] >= L'a' && s[0] <= L'z')) &&
+        s[1] == L':') {
+        WCHAR root[4] = { s[0], L':', L'\\', L'\0' };
+        switch (GetDriveTypeW(root)) {
+            case DRIVE_REMOVABLE:   type = "removable"; break;
+            case DRIVE_FIXED:       type = "fixed";     break;
+            case DRIVE_REMOTE:      type = "remote";    break;
+            case DRIVE_CDROM:       type = "cdrom";     break;
+            case DRIVE_RAMDISK:     type = "ramdisk";   break;
+            case DRIVE_NO_ROOT_DIR: type = "noroot";    break;
+            default:                type = "unknown";   break;
+        }
+    }
+    Tcl_Free((char *)w);
+    Tcl_SetObjResult(ip, Tcl_NewStringObj(type, -1));
+    return TCL_OK;
+}
+
 int Winfs_Init(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, "9.0", 0) == nullptr) return TCL_ERROR;
     WorkerState *workers = (WorkerState *)Tcl_GetAssocData(ip,
@@ -723,6 +768,7 @@ int Winfs_Init(Tcl_Interp *ip) {
     Tcl_CreateObjCommand(ip, "::els::win_replace_file",   ReplaceFile_Cmd,   nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_open_folder",    OpenFolder_Cmd,    nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_fsync",          Fsync_Cmd,         nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_drive_type",     DriveType_Cmd,     nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_virtual_screen", VirtualScreen_Cmd, nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_worker_spawn_watch", WorkerSpawnWatch_Cmd, workers, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_worker_watch",   WorkerWatch_Cmd,   workers, nullptr);

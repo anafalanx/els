@@ -176,6 +176,18 @@ test winfs-6.5 {single-path / zero-arg native commands reject wrong arity} -cons
          $fsyncRc [string match {wrong # args:*path*} $fsyncErr]
 } -result {1 1 1 1}
 
+test winfs-6.6 {win_drive_type reports a real local path's fixed disk and treats non-drive paths as unknown} -constraints winfsBuilt -setup {load_winfs} -body {
+    # ELS_TMP is a real, present, local volume, so it must classify as some local
+    # disk type -- never remote/unknown/noroot.  UNC and non-drive strings carry no
+    # drive letter and report "unknown", leaving els::remote_path's lexical UNC
+    # handling in charge.  GetDriveTypeW reads the mount table, so this never blocks.
+    set local [::els::win_drive_type [file nativename $::ELS_TMP]]
+    list [expr {$local ni {remote unknown noroot}}] \
+         [::els::win_drive_type //server/share/x] \
+         [::els::win_drive_type relative/path] \
+         [::els::win_drive_type ""]
+} -result {1 unknown unknown unknown}
+
 # ---- shell integration ---------------------------------------------------
 
 test winfs-7.1 {win_open_folder is a native command with a strict one-path API} -constraints winfsBuilt -setup {load_winfs} -body {

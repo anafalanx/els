@@ -1166,11 +1166,33 @@ proc els::save_geometry {} {
     set ::els::geom_save_warned 0
 }
 
+# The Windows drive type behind a path ("fixed"/"remote"/"removable"/... or
+# "unknown").  A thin, mockable wrapper over the native winfs helper: a bare
+# interpreter with no winfs.dll (or any error) degrades to "unknown" so callers
+# fall back to purely-lexical reasoning and nothing regresses.
+proc els::drive_type {path} {
+    if {[catch {els::win_drive_type $path} dt]} { return unknown }
+    return $dt
+}
 proc els::remote_path {path} {
     set slash [string map {\\ /} $path]
     if {[string match -nocase {//?/UNC/*} $slash]} { return 1 }
     if {[string range $slash 0 3] in {//?/ //./}} { return 0 }
-    return [expr {[string range $slash 0 1] eq "//"}]
+    if {[string range $slash 0 1] eq "//"} { return 1 }
+    # A MAPPED network drive (Z: -> \\server\share) is a network path too: an
+    # automatic observer that stats it synchronously can hang Tk's only event
+    # thread on the SMB/reconnect timeout exactly as a dead UNC path would, and
+    # a saved-session file on one would otherwise block launch.  els::drive_type
+    # (GetDriveType) reads the LOCAL mount table without contacting the server,
+    # so it is safe to ask here.  Only DRIVE_REMOTE counts: removable/optical
+    # volumes fail fast when absent and stay locally observable when present, so
+    # treating them as "network" would needlessly drop their live disk-state
+    # tracking.  This mirrors the existing UNC treatment (checked only on
+    # explicit open/save/reload), it does not add a new blocking call.
+    if {[string index $slash 1] eq ":"} {
+        return [expr {[els::drive_type $path] eq "remote"}]
+    }
+    return 0
 }
 proc els::session_path {p} {
     if {$p eq ""} { return "" }
