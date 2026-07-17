@@ -162,16 +162,20 @@ proc with_probe_environment {app pairs body} {
     }
 }
 
-proc launch_probe {app {args {}}} {
+# NOTE: the last parameter must NOT be named `args` -- Tcl would treat it as the
+# variadic collector, so `launch_probe $app $fileArgs` with an empty list would
+# collect [""] (one empty string) and pass a spurious empty argument to els.exe,
+# which makes els::open "" pop a modal file picker at startup and hang the probe.
+proc launch_probe {app {fileArgs {}}} {
     set report [file join $app report.txt]
     set pairs [list ELS_STARTUP_PROBE $report]
     set exe [file join $app els.exe]
-    set pid [with_probe_environment $app $pairs [list exec $exe {*}$args &]]
+    set pid [with_probe_environment $app $pairs [list exec $exe {*}$fileArgs &]]
 
     return [wait_report $report $pid]
 }
 
-proc run_probe {name src {conf ""} {files {}} {args {}}} {
+proc run_probe {name src {conf ""} {files {}} {fileArgs {}}} {
     set app [file join $::BASE $name]
     if {[file exists $app]} { error "unique exe probe directory already exists: $app" }
     file mkdir $app
@@ -180,7 +184,7 @@ proc run_probe {name src {conf ""} {files {}} {args {}}} {
     foreach {tail bytes} $files {
         write_file [file join $app $tail] $bytes
     }
-    return [launch_probe $app $args]
+    return [launch_probe $app $fileArgs]
 }
 
 # The fused executable must recognize its private worker entry point before any
