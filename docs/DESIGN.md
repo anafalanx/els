@@ -142,7 +142,9 @@ Tabs are identifiers, not merely filenames:
   Full paths and warnings remain available in the tab tooltip.
 - The layout always keeps the active tab and its close button visible. It packs a
   contiguous neighbourhood into the remaining width; the right-hand overflow
-  button and **Tabs** menu expose every document.
+  button (▾, also `Ctrl+T`) pops a switcher listing every document. There is no
+  menu-bar Tabs entry: the switcher lives on the strip where overflow happens,
+  and `Ctrl+T` / `Ctrl+Tab` cover the keyboard.
 
 ## Large files and disk state
 

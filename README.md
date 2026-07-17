@@ -60,8 +60,8 @@ in **Settings > Default apps**.
   state under a flat tab strip; drag a tab to reorder. Same-named files gain the
   shortest distinguishing parent path, untitled documents are numbered, and
   compact marks show dirty (`•`) and decode-lossy (`�`) state.
-  The active tab always remains visible; the **Tabs** menu and right-hand
-  overflow button expose every open document.
+  The active tab always remains visible; the right-hand overflow button (▾) and
+  **Ctrl+T** open a switcher listing every open document, and Ctrl+Tab cycles.
 - **Drag and drop**: drop files from Explorer onto the text area to open each in
   its own tab.
 - **Find & replace** (Ctrl+F / Ctrl+H): Tcl ARE regex with live match

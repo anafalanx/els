@@ -504,13 +504,13 @@ test ui-7.1 {the scrollbar hides for a short doc, shows for a long one} -setup {
 } -result {0 1}
 
 # ---- menus --------------------------------------------------------------
-test ui-8.1 {the menu bar has File / Edit / Buffer / Tabs / View / Help cascades} -setup {ui_reset} -body {
+test ui-8.1 {the menu bar has File / Edit / Buffer / View / Help cascades (no Tabs: the ▾ button + Ctrl+T switch tabs)} -setup {ui_reset} -body {
     set labels {}
     for {set i 0} {$i <= [.menu index end]} {incr i} {
         if {[.menu type $i] eq "cascade"} { lappend labels [.menu entrycget $i -label] }
     }
     set labels
-} -result {File Edit Buffer Tabs View Help}
+} -result {File Edit Buffer View Help}
 
 test ui-8.1a {every top-level menu has a unique keyboard mnemonic underline} -setup {ui_reset} -body {
     set got {}
@@ -520,7 +520,7 @@ test ui-8.1a {every top-level menu has a unique keyboard mnemonic underline} -se
         }
     }
     set got
-} -result {{File 0} {Edit 0} {Buffer 0} {Tabs 0} {View 0} {Help 0}}
+} -result {{File 0} {Edit 0} {Buffer 0} {View 0} {Help 0}}
 
 test ui-8.1b {Encoding and Line Endings are keyboard-traversable File cascades wired to document state} -setup {ui_reset} -body {
     set labels {}
@@ -662,8 +662,8 @@ test ui-9.2 {Keyboard Shortcuts opens a window listing real accelerators} -setup
     list $isWin [string match *Ctrl+N* $blob] [string match *New?tab* $blob] \
          [string match *Zoom?in* $blob] [string match *Replace* $blob] \
          [string match *Duplicate?line* $blob] [string match {*Ctrl+Shift+K*} $blob] \
-         [string match *Move?line?up* $blob]
-} -result {1 1 1 1 1 1 1 1}
+         [string match *Move?line?up* $blob] [string match *All?open?tabs* $blob]
+} -result {1 1 1 1 1 1 1 1 1}
 
 test ui-9.2a {Shortcuts lists navigation/selection keys with a zoom-independent font} -setup {ui_reset} -body {
     els::set_font_size 28 0                ;# zoom the editor up (no persist)
@@ -1006,6 +1006,22 @@ test tabs-1.7 {all state marks and wide glyphs remain inside character/pixel cap
          [expr {[font measure elsUI $menu] <= $::els::TAB_MENU_PX}] \
          [expr {[winfo reqwidth [els::tabW $id]] <= $avail}]
 } -result {1 1 1 1 1 1 1}
+
+test tabs-1.10 {Ctrl+T pops the all-documents switcher from the editor and the toplevel (replaces the removed Tabs menu)} -setup {ui_reset} -cleanup {
+    if {[llength [info commands ::els::_ctt_real]]} { catch {rename ::els::tabs_popup {}} ; rename ::els::_ctt_real ::els::tabs_popup }
+    unset -nocomplain ::_ctt
+} -body {
+    rename ::els::tabs_popup ::els::_ctt_real
+    set ::_ctt 0
+    proc ::els::tabs_popup {} { incr ::_ctt }
+    focus -force [els::T]
+    event generate [els::T] <Control-t> ; update    ;# elsText binding (break stops here)
+    set fromText $::_ctt
+    event generate . <Control-t> ; update            ;# toplevel binding
+    set fromTop $::_ctt
+    rename ::els::tabs_popup {} ; rename ::els::_ctt_real ::els::tabs_popup
+    list $fromText $fromTop [winfo exists .menu.tabs]
+} -result {1 2 1}
 
 test deferred-ui-1.1 {File exposes a bounded, scrollable, keyboard-operable deferred list} \
         -setup {ui_reset} -body {

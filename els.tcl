@@ -2100,8 +2100,9 @@ proc els::build {} {
     .menu.buffer add command -label "UPPERCASE"                -command {els::xform::case upper}
     .menu.buffer add command -label "lowercase"                -command {els::xform::case lower}
     .menu.buffer add command -label "Trim Trailing Whitespace" -command els::xform::trim_trailing
+    # The all-documents switcher menu is no longer a menu-bar cascade: it is popped
+    # by the ▾ tab-strip button and by Ctrl+T, which cover both mouse and keyboard.
     menu .menu.tabs -postcommand els::tabs_menu_rebuild
-    .menu add cascade -label Tabs -underline 0 -menu .menu.tabs
     menu .menu.view
     .menu add cascade -label View -underline 0 -menu .menu.view
     .menu.view add checkbutton -label "Word Wrap" -variable ::els::word_wrap \
@@ -2139,7 +2140,7 @@ proc els::build {} {
     bind .tabs.more <KeyPress-KP_Enter> {els::tabs_popup; break}
     bind .tabs.more <KeyPress-space> {els::tabs_popup; break}
     bind .tabs <Configure> {els::tabs_schedule}
-    els::tooltip .tabs.more "All open documents"
+    els::tooltip .tabs.more "All open documents  (Ctrl+T)"
 
     # the shared line-number gutter — a Canvas that draws only the numbers for
     # the display rows currently on screen (see els::draw_gutter), so it is
@@ -2275,10 +2276,12 @@ proc els::build {} {
     # right-click context menu (Windows convention).  Text has no default
     # Button-3 action, so the caret is deliberately left where it is.
     bind elsText <Button-3>           { els::popup_text_menu %W %X %Y; break }
-    # neutralize Tk's emacs-style Text defaults that surprise on a Windows editor
-    # (Ctrl+K kill-to-end, Ctrl+T transpose); break pre-empts the default binding
+    # neutralize Tk's emacs-style Text default Ctrl+K (kill-to-end); break pre-empts it
     bind elsText <Control-k> break
-    bind elsText <Control-t> break
+    # Ctrl+T opens the all-documents list (the same switcher the ▾ tab-strip button
+    # pops) -- the keyboard path to jump straight to a tab by name.  break also
+    # pre-empts Tk's default Ctrl+T transpose.
+    bind elsText <Control-t> { els::tabs_popup; break }
 
     # text-transform shortcuts (the Buffer-menu commands).  Ctrl+D used to be a
     # neutralized Text default (delete-next-char); it is now Duplicate Line.
@@ -2304,6 +2307,7 @@ proc els::build {} {
     bind . <Control-Tab>          { els::cycle 1;  break }
     bind . <Control-Shift-Tab>    { els::cycle -1; break }
     bind . <Control-ISO_Left_Tab> { els::cycle -1; break }
+    bind . <Control-t>            { els::tabs_popup; break }
     bind . <Control-f> { els::find_show find;    break }
     bind . <Control-h> { els::find_show replace; break }
     bind . <Control-g> { els::goto_line;         break }
@@ -5588,6 +5592,7 @@ proc els::shortcuts {} {
                 {Ctrl+Shift+Home/End} {Select to file edge}
             }
             Tabs {
+                Ctrl+T          {All open tabs}
                 Ctrl+Tab        {Next tab}
                 Ctrl+Shift+Tab  {Previous tab}
             }
