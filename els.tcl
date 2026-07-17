@@ -2244,8 +2244,8 @@ proc els::build {} {
     bind .sb.update <Leave> {.sb.update configure -background $::els::CHROME}
     els::tooltip_for .sb.name els::name_tip
     els::tooltip_for .sb.disk els::disk_tip
-    els::tooltip .sb.pos "Caret line : column"
-    els::tooltip .sb.plen "Path length — nearing the 260-character Windows path limit"
+    els::tooltip .sb.pos "The caret's line and column."
+    els::tooltip .sb.plen "The path is nearing the 260-character Windows path limit."
     els::tooltip_for .sb.noas els::noas_tip
     # the enc/eol pills look clickable (hand cursor + hover recolor) but carried no
     # hint of what a click does, unlike the disk pill; give them the same disclosure.
@@ -3033,7 +3033,7 @@ proc els::disk_tip {} {
         remote      { set tip "Network path — its disk state is checked only on an explicit open, save, or reload." }
         unavailable { set tip "The file exists but els could not read it just now." }
         readonly    { set tip "The file can be read but is not currently writable." }
-        default     { set tip "This document has not been saved to disk." }
+        default     { set tip "This buffer has not been saved to a file." }
     }
     if {$detail ne ""} { append tip "\n$detail" }
     return $tip
@@ -4223,7 +4223,7 @@ proc els::reopen_with {enc bom} {
     set id $::els::active
     if {$::els::docPath($id) eq ""} {
         els::message_box -parent . -icon info -title els \
-            -message "Nothing to reopen — this document was never loaded from a file."
+            -message "Nothing to reopen — this buffer was never loaded from a file."
         return
     }
     if {[els::doc_dirty $id]} {
@@ -4464,7 +4464,7 @@ proc els::reload {} {
     set id $::els::active
     if {$id eq "" || ![info exists ::els::docPath($id)] || $::els::docPath($id) eq ""} {
         els::message_box -parent . -icon info -title els \
-            -message "Nothing to reload — this document was never loaded from a file."
+            -message "Nothing to reload — this buffer was never loaded from a file."
         return
     }
     if {[els::doc_dirty $id]} {
@@ -5076,7 +5076,7 @@ proc els::lossy_ask {id enc line col uhex count} {
         set choice "Save anyway to replace the unsupported [expr {$count == 1 ? {character} : {characters}}] with a\nsubstitute, or cancel."
     }
     ttk::label $top.msg -justify left -text \
-"This document contains $countTxt $noun that cannot be written
+"This buffer contains $countTxt $noun that cannot be written
 as [els::enc_label $enc 0] (first at line $line, column $col: U+$uhex).
 
 $choice"
@@ -5747,16 +5747,16 @@ proc els::shortcuts {} {
                 Ctrl+F          {Find}
                 Ctrl+H          {Replace}
                 Ctrl+G          {Go to line}
-                {F3/Shift+F3}   {Next / prev match}
+                {F3/Shift+F3}   {Next / previous match}
                 Enter           {Next match}
                 Shift+Enter     {Previous match}
                 {↑/↓}           {Search history}
                 Esc             {Close find bar}
             }
             View {
-                {Ctrl  +}    {Zoom in}
-                {Ctrl  −}    {Zoom out}
-                {Ctrl  0}    {Reset zoom}
+                {Ctrl +}     {Zoom in}
+                {Ctrl -}     {Zoom out}
+                {Ctrl 0}     {Reset zoom}
                 {Ctrl Wheel} {Zoom}
             }
         }
@@ -7616,7 +7616,7 @@ proc els::goto_line {} {
         wm resizable $top 0 0
         wm transient $top .
         ttk::frame $top.f -padding 12
-        ttk::label $top.f.l -text "Line (1 - $max):" -font elsUI
+        ttk::label $top.f.l -text "Line (1–$max):" -font elsUI
         # digits only at the KEYBOARD: rejecting non-numeric input beats silently
         # ignoring it at Go time
         ttk::entry $top.f.e -width 10 -font elsMono \
