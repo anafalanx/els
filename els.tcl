@@ -422,7 +422,7 @@ unset ::elsworker::_dispatch
 package require Tk
 
 namespace eval els {
-    variable version "0.93"      ;# 0.93: production hardening — adjacent state, isolated find/replace, resilient Windows lifecycle
+    variable version "0.95"      ;# 0.95: no crash recovery by design — atomic save + backup ring + opt-in autosave; every launch its own window; UX/tooling/backup hardening
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter

@@ -383,7 +383,7 @@ worker, and **`src/windrop.c`**, the Explorer drag-and-drop handler. Tests live 
 
 els = Dutch for *awl*, a small, sharp tool. It's a single-file Windows editor;
 the source and the build recipe are both in this repo, so you can read it, fork
-it, or build it yourself. Currently **v0.93**: a complete editor, polishing toward 1.0.
+it, or build it yourself. Currently **v0.95**: a complete editor, polishing toward 1.0.
 
 Built on **Tcl/Tk 9.0.3**. The About dialog acknowledges Tcl/Tk 9, MinGW-w64,
 GCC, zlib and LibTomMath, with thanks to their maintainers and communities.
