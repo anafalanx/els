@@ -422,7 +422,7 @@ unset ::elsworker::_dispatch
 package require Tk
 
 namespace eval els {
-    variable version "0.95"      ;# 0.95: no crash recovery by design — atomic save + backup ring + opt-in autosave; every launch its own window; UX/tooling/backup hardening
+    variable version "0.96"      ;# 0.96: post-0.95 robustness/honesty pass — mapped network drives treated as network paths (no event-thread freeze on a dead share), DPI-scaled caret/inset, OS-session persistence, backup/doc honesty
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
