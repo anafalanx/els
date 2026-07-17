@@ -2244,21 +2244,12 @@ proc els::build {} {
     bind .sb.update <Leave> {.sb.update configure -background $::els::CHROME}
     els::tooltip_for .sb.name els::name_tip
     els::tooltip_for .sb.disk els::disk_tip
-    els::tooltip .sb.pos "The caret's line and column."
     els::tooltip .sb.plen "The path is nearing the 260-character Windows path limit."
     els::tooltip_for .sb.noas els::noas_tip
-    # the enc/eol pills look clickable (hand cursor + hover recolor) but carried no
-    # hint of what a click does, unlike the disk pill; give them the same disclosure.
-    # APPEND with + so the tip composes with the existing status_link hover recolor
-    # rather than replacing it (els::tooltip would clobber the <Enter> binding).
-    set encTip "Character encoding. Click to reopen with a different charset, or to set the encoding used by the next save."
-    set eolTip "Line endings. Click to switch between LF and CRLF for saving."
-    bind .sb.enc <Enter>       "+[list els::tip_schedule .sb.enc $encTip]"
-    bind .sb.enc <Leave>       {+els::tip_cancel}
-    bind .sb.enc <ButtonPress-1> {+els::tip_cancel}
-    bind .sb.eol <Enter>       "+[list els::tip_schedule .sb.eol $eolTip]"
-    bind .sb.eol <Leave>       {+els::tip_cancel}
-    bind .sb.eol <ButtonPress-1> {+els::tip_cancel}
+    # No tooltip on the enc/eol/pos items: the encoding and line-ending pills already
+    # signal "clickable" via the hand cursor + hover recolor (and the click-menu shows
+    # what they do), and "l:c" is self-evidently line:column — a tip there just states
+    # the obvious to an engineer.  The manual carries the detail instead.
 
     # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter+vscroll ·
     # 3 hscroll (shown on demand) · 4 status.  The gutter spans rows 2-3 so its
