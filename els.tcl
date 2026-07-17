@@ -422,7 +422,7 @@ unset ::elsworker::_dispatch
 package require Tk
 
 namespace eval els {
-    variable version "0.96"      ;# 0.96: post-0.95 robustness/honesty pass — mapped network drives treated as network paths (no event-thread freeze on a dead share), DPI-scaled caret/inset, OS-session persistence, backup/doc honesty
+    variable version "0.97"      ;# 0.97: status-bar + external-change overhaul — reliable external-change detection (continuous disk observer), terse exception-only status bar, persistent "no auto-save" flag, trimmed/consistent messaging
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
