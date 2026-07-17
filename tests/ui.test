@@ -188,6 +188,39 @@ test extmodsync-1.2 {a cancelled metadata-identical conflict stays 'changed' acr
     list $afterSave $::els::docDiskState($id) [.sb.disk cget -text]
 } -result {changed changed changed}
 
+test noas-1.1 {the 'no auto-save' flag shows only while auto-save is on AND the active doc is paused} \
+        -setup {ui_reset} -cleanup {set ::els::autosave 0 ; els::noas_render} -body {
+    set id $::els::active
+    set hidden0 [expr {[lsearch -exact [pack slaves .sb] .sb.noas] < 0}]
+    set ::els::docExtModPause($id) "the file changed on disk"   ;# paused, but auto-save OFF
+    els::noas_render
+    set offHidden [expr {[lsearch -exact [pack slaves .sb] .sb.noas] < 0}]
+    set ::els::autosave 1                                       ;# auto-save ON + paused -> shown
+    els::noas_render
+    set shown [expr {[lsearch -exact [pack slaves .sb] .sb.noas] >= 0}]
+    set label [.sb.noas cget -text]
+    set tip [els::noas_tip]
+    unset ::els::docExtModPause($id)                            ;# a manual save clears the pause
+    els::noas_render
+    set clearedHidden [expr {[lsearch -exact [pack slaves .sb] .sb.noas] < 0}]
+    list $hidden0 $offHidden $shown $label [string match "*changed on disk*" $tip] $clearedHidden
+} -result {1 1 1 {no auto-save} 1 1}
+
+test noas-1.2 {a background auto-save blocked by a disk change shows the persistent flag, not a fading note} \
+        -setup {ui_reset} -cleanup {set ::els::autosave 0 ; els::noas_render} -body {
+    set p [els_tmpfile noas2.txt "original\n"]
+    set id [els::open $p]
+    set ::els::autosave 1
+    [els::W $id] insert end "my edit"            ;# dirty so auto-save attempts a write
+    raw_write noas2.txt "external change\n"      ;# the disk copy diverged
+    file mtime $p [expr {[file mtime $p] + 5}]
+    els::autosave_flush_doc $id                  ;# background auto-save -> paused
+    set paused [info exists ::els::docExtModPause($id)]
+    set flagShown [expr {[lsearch -exact [pack slaves .sb] .sb.noas] >= 0}]
+    # the name slot must NOT carry a verbose "auto-save paused" note (that was the old way)
+    list $paused $flagShown [string match "*auto-save*" [.sb.name cget -text]]
+} -result {1 1 0}
+
 test disk-ui-1.2 {normal-state tooltip is observational and promises only the authoritative save guard} \
         -setup {ui_reset} -body {
     set id $::els::active

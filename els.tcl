@@ -2214,6 +2214,9 @@ proc els::build {} {
     # a normally-empty red "[N]" badge left of the name; shows the path length only
     # when it nears the 260-char Windows limit (packed on demand by els::name_len_flag)
     ttk::label .sb.plen -font elsUI -anchor w -text "" -foreground $::els::CARET
+    # a normally-empty flag: "no auto-save" while auto-save is on but paused for the active
+    # doc (packed on demand by els::noas_render; the reason lives in its tooltip)
+    ttk::label .sb.noas -font elsUI -anchor w -text "" -foreground $::els::MUTED
     pack .sb.hair -side top -fill x
     # name on the left (takes the slack, elided keeping the filename); the
     # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
@@ -2243,6 +2246,7 @@ proc els::build {} {
     els::tooltip_for .sb.disk els::disk_tip
     els::tooltip .sb.pos "Caret line : column"
     els::tooltip .sb.plen "Path length — nearing the 260-character Windows path limit"
+    els::tooltip_for .sb.noas els::noas_tip
     # the enc/eol pills look clickable (hand cursor + hover recolor) but carried no
     # hint of what a click does, unlike the disk pill; give them the same disclosure.
     # APPEND with + so the tip composes with the existing status_link hover recolor
@@ -3160,6 +3164,7 @@ proc els::settitle {} {
     # the title bar shows only the app name + version; the filename and dirty
     # state live on the tab and in the status bar instead
     wm title . "els $::els::version"
+    els::noas_render      ;# reflect the active doc's auto-save-paused state (handles active eq "")
     if {$active eq ""} { return }
     els::update_namelabel
     .sb.eol  configure -text [els::eol_label $::els::docEol($active)]
@@ -3194,6 +3199,31 @@ proc els::name_len_flag {n} {
     if {[lsearch -exact [pack slaves .sb] .sb.plen] < 0} {
         pack .sb.plen -side left -before .sb.name -padx {12 0} -pady 4
     }
+}
+# Show or hide the persistent "no auto-save" flag for the ACTIVE doc.  Auto-save being
+# paused (docExtModPause / docLossyPause: a background save could not proceed) is a
+# PERSISTENT per-doc state, cleared only by a manual save/reload — so it shows persistently
+# and compactly here rather than as a transient note that fades and leaves false assurance.
+# The specific reason (stored as the flag's value) lives in the tooltip (els::noas_tip).
+proc els::noas_render {} {
+    if {![winfo exists .sb.noas]} { return }
+    set paused [expr {$::els::autosave && $::els::active ne "" \
+        && ([info exists ::els::docExtModPause($::els::active)] \
+            || [info exists ::els::docLossyPause($::els::active)])}]
+    if {!$paused} { .sb.noas configure -text "" ; pack forget .sb.noas ; return }
+    .sb.noas configure -text "no auto-save"
+    if {[lsearch -exact [pack slaves .sb] .sb.noas] < 0} {
+        pack .sb.noas -side right -before .sb.update -padx {8 2} -pady 4
+    }
+}
+proc els::noas_tip {} {
+    set id $::els::active
+    if {$id eq ""} { return "" }
+    set why ""
+    if {[info exists ::els::docExtModPause($id)]} { set why $::els::docExtModPause($id) }
+    if {$why eq "" && [info exists ::els::docLossyPause($id)]} { set why $::els::docLossyPause($id) }
+    if {$why eq "" || $why eq "1"} { set why "it can't be saved automatically right now" }
+    return "Auto-save is on but paused for this file — $why. Save it manually to resume."
 }
 # Strip a Windows extended-length prefix (\\?\ or //?/, incl. the UNC form) from
 # a path.  Tcl's `file normalize` adds it for paths over MAX_PATH (260), and it
@@ -5264,6 +5294,7 @@ proc els::set_backups {{persist 1}} {
 # lossy guard above).
 proc els::set_autosave {{persist 1}} {
     if {$::els::autosave} { els::autosave_all }   ;# turning it on saves NOW
+    els::noas_render                              ;# hide the flag when auto-save is turned off
     if {$persist} { els::save_geometry }
 }
 proc els::autosave_soon {id} {
@@ -5348,11 +5379,12 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
             set ::els::docDiskContent($id) changed
             els::disk_state_set $id changed
             if {$quiet} {
-                # autosave: NEVER prompt from a background timer.  Pause quiet
-                # saves for this doc until a manual save settles it (mirrors the
-                # lossy-encoding pause), and say so once.
-                set ::els::docExtModPause($id) 1
-                els::status_note "auto-save paused: [file tail $docPath($id)] changed on disk (save manually)"
+                # autosave: NEVER prompt from a background timer.  Pause quiet saves for
+                # this doc until a manual save settles it (mirrors the lossy pause).  The
+                # persistent "no auto-save" flag (reason stored as the value) shows it; no
+                # fading note, so the paused state stays visible until the user saves.
+                set ::els::docExtModPause($id) "the file changed on disk"
+                els::noas_render
                 return 0
             }
             # overwrite: empty body, fall through to write (clobber the disk copy)
@@ -5364,8 +5396,8 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
         } elseif {$state ne "ok"} {
             els::disk_probe $id     ;# render the real missing/unreadable state on the pill
             if {$quiet} {
-                set ::els::docExtModPause($id) 1
-                els::status_note "auto-save paused: [file tail $docPath($id)] is $state (save manually)"
+                set ::els::docExtModPause($id) "the file is $state"
+                els::noas_render
                 return 0
             }
             set detail ""
@@ -5376,8 +5408,8 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
     unset -nocomplain ::els::docExtModPause($id)
     if {[info exists ::els::docDecodeLossy($id)]} {
         if {$quiet} {
-            set ::els::docLossyPause($id) 1
-            els::status_note "auto-save paused: decoded bytes were replaced in [file tail $docPath($id)] (save manually)"
+            set ::els::docLossyPause($id) "some bytes were replaced when the file was decoded"
+            els::noas_render
             return 0
         }
         if {![els::decode_lossy_ask $id]} { return 0 }
@@ -5406,8 +5438,8 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
         if {[info exists ::els::docLossyOk($id)]} {
             set bytes [encoding convertto -profile replace $enc $text]
         } elseif {$quiet} {
-            set ::els::docLossyPause($id) 1
-            els::status_note "auto-save paused: characters not in [els::enc_label $enc 0] (save manually once)"
+            set ::els::docLossyPause($id) "some characters aren't in [els::enc_label $enc 0]"
+            els::noas_render
             return 0
         } else {
             lassign [els::lossy_describe $enc $text] line col uhex count
