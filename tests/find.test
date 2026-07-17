@@ -1187,3 +1187,23 @@ test replaceux-11.3 {a passively-cancelled in-flight replace leaves a durable st
     catch {after cancel $::els::status_note_after} ; set ::els::status_note_after ""
     string match "*Replace cancelled*" $note
 } -result 1
+
+test worker-life-8.10 {find_prune_stale reclaims stale FOREIGN-session job dirs + snapshots, keeps own and fresh} -setup {find_reset} -cleanup {
+    catch {file delete -force [els::find_root 0]}
+} -body {
+    set root [els::find_root 1]
+    set old [expr {[clock seconds] - 200000}]       ;# well past the 86400s cutoff
+    set jt 0123456789abcdef0123456789abcdef          ;# a valid 32-hex job token
+    set fst foreignhost-999-1234567890abcdef         ;# a foreign session id (host-pid-16hex)
+    set foreignJob [file join $root "find-$fst-1-$jt"]
+    file mkdir $foreignJob ; file mtime $foreignJob $old
+    set foreignSnap [file join $root "snapshot-$fst-$jt.utf8"]
+    set fh [open $foreignSnap w] ; close $fh ; file mtime $foreignSnap $old
+    set ownJob [file join $root "find-[els::session_id]-1-fedcba9876543210fedcba9876543210"]
+    file mkdir $ownJob ; file mtime $ownJob $old      ;# own session -> skipped by prefix
+    set freshForeign [file join $root "find-$fst-2-$jt"]
+    file mkdir $freshForeign ; file mtime $freshForeign [clock seconds]   ;# fresh -> skipped by mtime
+    els::find_prune_stale
+    list [file exists $foreignJob] [file exists $foreignSnap] \
+         [file exists $ownJob] [file exists $freshForeign]
+} -result {0 0 1 1}

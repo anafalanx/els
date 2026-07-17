@@ -1880,3 +1880,46 @@ test launchfail-1.1 {a failed launch-file open is collected and reported after t
     rename ::els::message_box {} ; rename ::_lf_real_mb ::els::message_box
     list $outcome [string match {*Could not open*} $::_lf_msg] [string match "*[file tail $bad]*" $::_lf_msg]
 } -result {failed 1 1}
+
+test session-end-1.1 {WM_SAVE_YOURSELF (OS logout/shutdown) persists session + autosaves, with no modal or exit} -setup {els_reset} -cleanup {
+    if {[llength [info commands ::_se_sg_real]]} { catch {rename ::els::save_geometry {}} ; rename ::_se_sg_real ::els::save_geometry }
+    if {[llength [info commands ::_se_aa_real]]} { catch {rename ::els::autosave_all {}} ; rename ::_se_aa_real ::els::autosave_all }
+    unset -nocomplain ::_se_sg ::_se_aa
+} -body {
+    set registered [wm protocol . WM_SAVE_YOURSELF]
+    rename ::els::save_geometry ::_se_sg_real ; set ::_se_sg 0
+    proc ::els::save_geometry {} { incr ::_se_sg }
+    rename ::els::autosave_all ::_se_aa_real ; set ::_se_aa 0
+    proc ::els::autosave_all {} { incr ::_se_aa }
+    els::session_end                                    ;# must not prompt or exit
+    rename ::els::save_geometry {} ; rename ::_se_sg_real ::els::save_geometry
+    rename ::els::autosave_all {} ; rename ::_se_aa_real ::els::autosave_all
+    list $registered $::_se_sg $::_se_aa
+} -result {els::session_end 1 1}
+
+test bk-1.17 {a file over BK_MAXSIZE is not backed up and the user is told once, not on every save} -setup {els_reset} -cleanup {set ::els::BK_MAXSIZE 20971520 ; set ::els::backup_size_noted {}} -body {
+    set ::els::backups 1 ; set ::els::BK_MAXSIZE 4 ; set ::els::backup_size_noted {}
+    file mkdir [bk_dir]
+    set p [els_tmpfile bkbig.txt "0123456789"]          ;# 10 bytes > the 4-byte cap
+    .sb.name configure -text ""
+    els::backup_keep $p
+    set noBackup [expr {[llength [bk_ring $p]] == 0}]
+    set noted [string match "*too large*" [.sb.name cget -text]]
+    catch {after cancel $::els::status_note_after} ; set ::els::status_note_after ""
+    .sb.name configure -text "quiet"
+    els::backup_keep $p                                 ;# same file again: no re-nag
+    set silent2 [expr {[.sb.name cget -text] eq "quiet"}]
+    list $noBackup $noted $silent2
+} -result {1 1 1}
+
+test deferred-state-1.6 {oversized deferred-open state is quarantined like other corruption} -setup {els_reset} -cleanup {
+    catch {file delete -force [els::deferred_path]}
+    foreach c [glob -nocomplain "[els::deferred_path].corrupt-*"] { catch {file delete -force $c} }
+} -body {
+    set p [els::deferred_path]
+    set fh [open $p wb] ; puts -nonewline $fh [string repeat a [expr {$::els::DEFERRED_MAX_BYTES + 1}]] ; close $fh
+    els::deferred_load
+    list $::els::deferred_blocked [file exists $p] \
+         [expr {[llength [glob -nocomplain "$p.corrupt-*"]] > 0}] \
+         [llength $::els::deferred_files] [expr {$::els::deferred_notice ne ""}]
+} -result {0 0 1 0 1}

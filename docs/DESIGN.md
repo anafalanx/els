@@ -56,12 +56,14 @@ what Tk 9 can actually render well.
 - **Leading ≈ 1.34×** is the single biggest "calm" lever. Applied via the Text
   widget's `-spacing1`/`-spacing3`, computed as `int(linespace × 0.17)` so it
   tracks DPI. The gutter mirrors it so line numbers stay aligned.
-- **Text inset:** `-padx 14` so glyphs never touch the frame.
+- **Text inset:** `-padx 10.5p` (14px at 100% DPI) so glyphs never touch the frame; in
+  points so it scales with the display like the font.
 - **Spacing grid:** chrome paddings follow a ~4px quantum.
 
 ### The caret
 
-A **steady** 4px red bar (`-insertwidth 4 -insertofftime 0`). A blinking cursor
+A **steady** red bar (`-insertwidth 3p -insertofftime 0` — 4px at 100% DPI, scaling
+with the display so it keeps its weight on HiDPI screens). A blinking cursor
 pulls the eye; a solid red caret is calmer *and* more distinctive.
 It is els's signature.
 
@@ -71,6 +73,23 @@ Tk draws its own text surface and exposes no UI Automation provider, so Windows
 screen readers (Narrator, NVDA, JAWS) cannot read or navigate document text.
 els does not add an assistive-technology layer; the user-facing limitation is
 stated plainly in the README's *Requirements & limitations*.
+
+### Right-to-left text
+
+The same Tk Text engine performs no Unicode bidirectional reordering, so right-to-left
+and mixed-direction runs (Arabic, Hebrew) display in logical rather than visual order,
+and caret motion through them is confusing. Real bidi would mean reimplementing the
+Unicode BiDi algorithm on top of Tk — out of scope — so this is disclosed as an
+inherited limitation, like the screen-reader one, rather than fixed.
+
+### Fixed palette; no OS theme following
+
+els renders one hand-tuned light identity and does **not** track the Windows dark-mode
+setting or a High-Contrast theme. This is a decided non-goal, following from "no
+configurable colour" and the single-visual-identity principle, not an oversight. The
+default palette is near-black on light grey (~15.8:1 contrast, past WCAG AAA), so most
+low-vision needs are met by default; users who require a specific high-contrast scheme
+are not served, and a permanently light editor amid dark-mode apps is an accepted cost.
 
 ### Platform floor
 
@@ -154,6 +173,12 @@ memory decision or display a timer-driven prompt. They persist the path in
 `els.deferred`; **File > Deferred Opens...** is the explicit foreground consent
 surface. Obvious UNC/network paths follow the same route during quiet work so an
 offline share cannot block Tk's only event thread before the UI is usable.
+
+Undo is bounded by an action *count* (`-maxundo 2000`), not by bytes: Tk 9 offers no
+byte-bounded undo, so a single huge action can retain a correspondingly large record. A
+Replace All is bounded to a 256 MiB snapshot (`FIND_OUTPUT_MAX`); a large paste is
+bounded only by the clipboard's own size, not by a fixed els cap. Typical keystroke
+editing is bounded by the count; one giant edit is bounded only by that action's size.
 
 The active-document status item has six user-facing states: **Not on disk**,
 **On disk**, **Changed on disk**, **Missing**, **Unavailable**, and **Read-only**.

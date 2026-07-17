@@ -451,6 +451,7 @@ namespace eval els {
     variable BK_MININT 60           ;# s: skip a backup if the newest is this fresh
     variable BK_MAXAGE 2592000      ;# s: prune backups older than 30 days
     variable BK_MAXSIZE 20971520    ;# bytes: don't back up files larger than 20 MB
+    variable backup_size_noted {}   ;# paths already told "too large to back up" (one-shot)
     variable OPEN_WARN_SIZE 26214400 ;# bytes: confirm before opening a file larger than 25 MB
     variable IO_CHUNK 1048576        ;# bounded physical read size for streaming I/O
     variable DEFERRED_MAX_BYTES 1048576 ;# poison guard for the adjacent deferred queue
@@ -2036,6 +2037,7 @@ proc els::build {} {
     els::deferred_load
     wm minsize . 360 240
     wm protocol . WM_DELETE_WINDOW els::quit
+    wm protocol . WM_SAVE_YOURSELF els::session_end   ;# OS logout/restart/shutdown
 
     menu .menu
     . configure -menu .menu
@@ -2212,6 +2214,18 @@ proc els::build {} {
     bind .sb.update <Leave> {.sb.update configure -background $::els::CHROME}
     els::tooltip_for .sb.name els::name_tip
     els::tooltip_for .sb.disk els::disk_tip
+    # the enc/eol pills look clickable (hand cursor + hover recolor) but carried no
+    # hint of what a click does, unlike the disk pill; give them the same disclosure.
+    # APPEND with + so the tip composes with the existing status_link hover recolor
+    # rather than replacing it (els::tooltip would clobber the <Enter> binding).
+    set encTip "Character encoding. Click to reopen with a different charset, or to set the encoding used by the next save."
+    set eolTip "Line endings. Click to switch between LF and CRLF for saving."
+    bind .sb.enc <Enter>       "+[list els::tip_schedule .sb.enc $encTip]"
+    bind .sb.enc <Leave>       {+els::tip_cancel}
+    bind .sb.enc <ButtonPress-1> {+els::tip_cancel}
+    bind .sb.eol <Enter>       "+[list els::tip_schedule .sb.eol $eolTip]"
+    bind .sb.eol <Leave>       {+els::tip_cancel}
+    bind .sb.eol <ButtonPress-1> {+els::tip_cancel}
 
     # rows: 0 tabs · 1 find bar (shown on demand) · 2 text+gutter+vscroll ·
     # 3 hscroll (shown on demand) · 4 status.  The gutter spans rows 2-3 so its
@@ -2394,12 +2408,15 @@ proc els::new_doc {{path ""}} {
     set id "d$seq"
     incr seq
     set w [els::W $id]
+    # Caret width and text inset are given in POINTS (3p == 4px at 100% DPI), so they
+    # scale with tk scaling like the font, leading, gutter, and scrollbar -- a bare
+    # pixel literal is NOT scaled (same lesson as -arrowsize 12p above).
     text $w -undo 1 -maxundo $::els::MAXUNDO -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
-        -insertbackground $::els::CARET -insertwidth 4 -insertofftime 0 \
+        -insertbackground $::els::CARET -insertwidth 3p -insertofftime 0 \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
         -inactiveselectbackground $::els::SELOFF \
-        -borderwidth 0 -highlightthickness 0 -padx 14 -pady 6 \
+        -borderwidth 0 -highlightthickness 0 -padx 10.5p -pady 4.5p \
         -spacing1 $::els::LEAD -spacing3 $::els::LEAD \
         -tabstyle wordprocessor \
         -yscrollcommand [list els::yscroll $id] \
@@ -5084,7 +5101,17 @@ proc els::backup_keep {path} {
     if {!$::els::backups} { return }
     set dir [els::backup_dir]
     if {$dir eq ""} { return }
-    if {[catch {file size $path} sz] || $sz > $::els::BK_MAXSIZE} { return }
+    if {[catch {file size $path} sz]} { return }   ;# can't stat: nothing to preserve
+    if {$sz > $::els::BK_MAXSIZE} {
+        # Too large to back up (a deliberate resource guard).  Say so ONCE per file --
+        # not on every save -- so the user knows the previous-version net is off here
+        # rather than silently assuming their edits to a big log are recoverable.
+        if {![dict exists $::els::backup_size_noted $path]} {
+            dict set ::els::backup_size_noted $path 1
+            catch {els::status_note "file too large to keep a backup: [file tail $path]"}
+        }
+        return
+    }
     # NO `return` inside this catch body: catch traps TCL_RETURN too, which
     # would route the skip path into the "backup failed" note
     if {[catch {
@@ -5675,6 +5702,19 @@ proc els::quit {} {
     els::save_geometry
     els::disk_watch_deactivate
     exit
+}
+# Windows delivers WM_SAVE_YOURSELF on logout / restart / shutdown (Tk 9 wm(n)),
+# synthesized from WM_QUERYENDSESSION while Tcl is still alive.  Unlike WM_DELETE_WINDOW
+# this is a COOPERATIVE end-of-session, distinct from the abrupt crash/power-loss that
+# 0.95 deliberately does not recover -- so persist what we safely can, WITHOUT a modal
+# (which could stall or be force-killed mid-shutdown) and WITHOUT force-writing buffers
+# when auto-save is off (autosave_all already no-ops then, respecting the opt-out).
+# Geometry + the session's open-file list always persist so tabs return on next launch;
+# with auto-save on, pathed docs are flushed.  Unsaved text in untitled or opt-out docs
+# is still lost -- the same contract as a crash, just triggered cooperatively.
+proc els::session_end {} {
+    catch {els::autosave_all}
+    catch {els::save_geometry}
 }
 
 # ---- find / replace -----------------------------------------------------

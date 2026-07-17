@@ -283,9 +283,13 @@ Stated plainly so you know before you rely on it:
   and JAWS cannot read or navigate a document's text. If you rely on a screen
   reader, els is not a usable editor for you today, and that is an honest gap
   rather than a setting to find. els does not add an assistive-technology layer.
+- **No right-to-left text shaping.** The same Tk text engine does no Unicode
+  bidirectional reordering, so Arabic, Hebrew and mixed-direction text displays in
+  logical rather than visual order. Another inherited Tk limitation, disclosed here.
 - **Single, fixed appearance.** No settings UI: colours, fonts and the caret are
   not configurable by design (see [docs/DESIGN.md](docs/DESIGN.md)). No syntax
-  highlighting and no minimap.
+  highlighting and no minimap. els ships one hand-tuned light palette (already past
+  WCAG AAA contrast) and does not follow the Windows dark-mode or High-Contrast theme.
 
 ## Toolchain & tasks
 
