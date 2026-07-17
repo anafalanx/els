@@ -2341,7 +2341,12 @@ test recent-5.2 {a failed Open keeps the Maintain List dialog up} -setup {ui_res
 test recent-5.3 {hovering the empty area below the rows schedules no tip} -setup {ui_reset} -body {
     set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5long.txt]
     set ::els::recent [list $long]              ;# elided row -> tip applies
-    els::recent_manage ; catch {wm withdraw .recent}
+    # A full `update` (not just update idletasks) realizes the listbox width the
+    # elision and bbox depend on -- a headless release-suite child never maps a
+    # withdrawn dialog, so update idletasks alone leaves winfo width 1 (avail 100000,
+    # no elision, no tip).  Realize, re-elide, then withdraw.
+    els::recent_manage ; update ; els::recent_manage_refresh
+    catch {wm withdraw .recent}
     update idletasks
     els::tip_cancel ; set ::els::recent_row_tip -1
     els::recent_row_motion 5 5 100 100          ;# inside row 0
@@ -2357,7 +2362,11 @@ test recent-5.3 {hovering the empty area below the rows schedules no tip} -setup
 test recent-5.4 {destroying the Maintain List dialog cancels a pending row tip} -setup {ui_reset} -body {
     set long [file join $::ELS_TMP [string repeat verylongdirname 8] r5d.txt]
     set ::els::recent [list $long]
-    els::recent_manage ; catch {wm withdraw .recent}
+    # realize the listbox width before withdrawing (see recent-5.3): a headless
+    # release-suite child leaves a withdrawn dialog's winfo width 1 under
+    # update idletasks alone, so the row never elides and no tip is scheduled.
+    els::recent_manage ; update ; els::recent_manage_refresh
+    catch {wm withdraw .recent}
     update idletasks
     els::tip_cancel ; set ::els::recent_row_tip -1
     els::recent_row_motion 5 5 100 100          ;# schedules the after-550 tip
