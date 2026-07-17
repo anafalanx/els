@@ -1182,7 +1182,7 @@ test diskstate-1.10 {all automatic observer modes skip obvious UNC paths without
     set forced [els::disk_probe $id forced]
     set timer [els::disk_probe $id timer]
     list $forced $timer $::disk_stat_calls $::disk_hash_calls
-} -result {unavailable unavailable 0 0}
+} -result {remote remote 0 0}
 
 test diskstate-1.11 {remote detector distinguishes ordinary and extended UNC from local device paths} \
         -setup {els_reset} -body {
@@ -1247,7 +1247,7 @@ test diskstate-1.13 {a mapped-drive document is polled like a UNC path: no synch
     set forced [els::disk_probe $id forced]
     set timer [els::disk_probe $id timer]
     list $forced $timer $::disk_stat_calls $::disk_hash_calls
-} -result {unavailable unavailable 0 0}
+} -result {remote remote 0 0}
 
 test diskstate-1.5 {tab switches probe immediately; the timer runs only while the app is active} \
         -setup {
@@ -1321,7 +1321,7 @@ test diskstate-1.7 {Save As moves an untitled document to the normal on-disk sta
     list $before $saved $::els::docDiskState($id) \
          [els::same_path $::els::docPath($id) $::els_test_savefile] \
          [.sb.disk cget -text]
-} -result {untitled 1 normal 1 {On disk}}
+} -result {untitled 1 normal 1 {}}
 
 # ---- P2-c: large-file open guard + bounded undo (Wave 2) -------------------
 # The threshold is lowered per-test (a real 25 MB fixture would be slow + litter);

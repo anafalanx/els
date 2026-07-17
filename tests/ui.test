@@ -56,9 +56,9 @@ test ui-1.2 {the flat theme and the red accent caret are in effect} -setup {ui_r
 
 test ui-1.3 {status bar tracks the caret position} -setup {ui_reset} -body {
     [els::T] insert end "hello\nworld"
-    [els::T] mark set insert 2.3 ; els::refresh_view   ;# char index 3 -> Col 4 (1-based)
+    [els::T] mark set insert 2.3 ; els::refresh_view   ;# char index 3 -> col 4 (1-based)
     .sb.pos cget -text
-} -result {Ln 2 Col 4}
+} -result {2:4}
 
 test ui-1.4 {status-bar pickers have separators and hover affordance} -setup {ui_reset} -body {
     event generate .sb.eol <Enter> ; update
@@ -69,23 +69,66 @@ test ui-1.4 {status-bar pickers have separators and hover affordance} -setup {ui
          $hover [.sb.eol cget -foreground]
 } -result [list 1 1 hand2 hand2 [list $::els::INK $::els::TABBG] $::els::MUTED]
 
-test disk-ui-1.1 {status bar explicitly renders every active-document disk state} -setup {ui_reset} -body {
+test disk-ui-1.1 {the disk pill is silent when clean and shows a terse word per exception} -setup {ui_reset} -body {
     set id $::els::active
     set labels {}
-    foreach state {untitled normal changed missing unavailable readonly} {
+    foreach state {untitled normal changed missing remote unavailable readonly} {
         els::disk_state_set $id $state
         lappend labels [.sb.disk cget -text]
     }
+    # colour logic: red = at risk (changed/missing); muted = FYI (remote/unreadable/read-only)
+    els::disk_state_set $id changed    ; set changedFg [.sb.disk cget -foreground]
+    els::disk_state_set $id remote     ; set remoteFg  [.sb.disk cget -foreground]
+    # a clean state COLLAPSES the pill (no gap); an exception packs it back
     els::disk_state_set $id normal
-    set normalFg [.sb.disk cget -foreground]
+    set cleanHidden [expr {[lsearch -exact [pack slaves .sb] .sb.disk] < 0}]
     els::disk_state_set $id changed
-    set changedFg [.sb.disk cget -foreground]
-    set tip [els::disk_tip]
-    list [winfo exists .sb.sep_disk] [.sb.disk cget -width] $labels \
-         $normalFg $changedFg [string match "*Save will ask*" $tip]
-} -result [list 1 15 \
-    [list {Not on disk} {On disk} {Changed on disk} Missing Unavailable Read-only] \
-    $::els::MUTED $::els::CARET 1]
+    set exceptionShown [expr {[lsearch -exact [pack slaves .sb] .sb.disk] >= 0}]
+    set tip [els::disk_tip]                                   ;# state is 'changed'
+    list [winfo exists .sb.sep_disk] $labels $changedFg $remoteFg \
+         $cleanHidden $exceptionShown [string match "*Save will ask*" $tip]
+} -result [list 0 \
+    [list {} {} changed missing remote unreadable read-only] \
+    $::els::CARET $::els::MUTED 1 1 1]
+
+test disk-ui-1.6 {a path nearing the Windows limit flags its length as a red badge left of the name; a short path shows none} \
+        -setup {ui_reset} -cleanup {els::name_len_flag 0} -body {
+    set id $::els::active
+    set ::els::status_note_after ""
+    set ::els::docPath($id) [string repeat a 20]      ;# short: no badge
+    els::update_namelabel
+    set shortHidden [expr {[lsearch -exact [pack slaves .sb] .sb.plen] < 0}]
+    set nameFg [.sb.name cget -foreground]            ;# the NAME itself must stay muted
+    set ::els::docPath($id) "C:/[string repeat x 240]/f.txt"   ;# >= PATH_WARN_LEN (200)
+    els::update_namelabel
+    set plenIdx [lsearch -exact [pack slaves .sb] .sb.plen]
+    list $shortHidden [expr {$nameFg eq $::els::MUTED}] \
+         [expr {$plenIdx >= 0}] [string match {\[*\]} [.sb.plen cget -text]] \
+         [expr {[.sb.plen cget -foreground] eq $::els::CARET}] \
+         [expr {[.sb.name cget -foreground] eq $::els::MUTED}] \
+         [expr {[lsearch -exact [pack slaves .sb] .sb.name] > $plenIdx}]
+} -result {1 1 1 1 1 1 1}
+
+test disk-ui-1.7 {elide_text clips a too-wide message with a trailing ellipsis; a short one is untouched} \
+        -setup {ui_reset} -body {
+    set long "abcdefghijklmnopqrstuvwxyz0123456789 the quick brown fox"
+    set e [els::elide_text $long [font measure elsUI "123456789012"]]
+    list [expr {[els::elide_text "abc" 100000] eq "abc"}] \
+         [expr {[font measure elsUI $e] <= [font measure elsUI "123456789012"]}] \
+         [string match {*…} $e] [expr {[string length $e] < [string length $long]}]
+} -result {1 1 1 1}
+
+test disk-ui-1.8 {while a note holds the name slot, its tooltip carries the full un-elided text} \
+        -setup {ui_reset} -cleanup {catch {after cancel $::els::status_note_after} ; els::status_note_clear} -body {
+    set ::els::status_note_after ""
+    set msg "backup failed: a long explanation that would not fit the slot on a narrow window"
+    els::status_note $msg
+    set tipDuringNote [els::name_tip]
+    set fullStored [expr {$::els::status_note_full eq $msg}]
+    els::status_note_clear
+    set tipAfter [els::name_tip]
+    list [expr {$tipDuringNote eq $msg}] $fullStored [expr {$tipAfter ne $msg}]
+} -result {1 1 1}
 
 test disk-ui-1.2 {normal-state tooltip is observational and promises only the authoritative save guard} \
         -setup {ui_reset} -body {
@@ -177,7 +220,7 @@ test ui-3.3 {arrow keys move the caret and update the status bar} -setup {ui_res
     event generate $w <Down> ; event generate $w <Right> ; update
     els::refresh_view
     .sb.pos cget -text
-} -result {Ln 2 Col 2}
+} -result {2:2}
 
 # ---- find / replace (the hard part) -------------------------------------
 test ui-4.1 {Ctrl+F shows the find bar and focuses the field} -setup {ui_reset} -body {
@@ -2007,14 +2050,20 @@ test issue-a.4 {goto entry rejects non-numeric input at the keyboard} -setup {ui
     list $bad $good $def
 } -result {{} 42 active}
 
-test issue-a.5 {statusbar shows the path length in its normal depiction} -setup {ui_reset} -body {
+test issue-a.5 {a short path's length is tooltip-only — NOT in the name label, and no red badge} -setup {ui_reset} -body {
     els::open [els_tmpfile ia5.txt "x\n"]
     update idletasks
     els::update_namelabel
     set t [.sb.name cget -text]
     set want [string length [els::display_path $::els::docPath($::els::active)]]
-    list [string match "*\\\[$want\\\]" $t] [string match "*ia5.txt*" $t]
-} -result {1 1}
+    # the filename shows, the "[N]" count does NOT ride in the label, and no length
+    # badge is packed (the path is well under PATH_WARN_LEN) — but the count is still
+    # preserved in the path tooltip helper.
+    list [string match "*ia5.txt*" $t] \
+         [expr {![string match "*\\\[$want\\\]*" $t]}] \
+         [expr {[lsearch -exact [pack slaves .sb] .sb.plen] < 0}] \
+         [string match "*\\\[$want\\\]" [els::path_tip $::els::docPath($::els::active)]]
+} -result {1 1 1 1}
 
 test issue-a.6 {the update indicator has a hover state} -setup {ui_reset} -body {
     list [expr {[bind .sb.update <Enter>] ne ""}] [expr {[bind .sb.update <Leave>] ne ""}]
@@ -2417,7 +2466,7 @@ test undo-5.1 {menu Undo refreshes Ln/Col and the current-line wash} -setup {ui_
     $w mark set insert 2.3 ; els::refresh_view
     els::menu_undo ; ui_settle
     lassign [split [$w index insert] .] L C
-    set fresh [string equal [.sb.pos cget -text] "Ln $L Col [expr {$C + 1}]"]
+    set fresh [string equal [.sb.pos cget -text] "$L:[expr {$C + 1}]"]
     list $fresh [expr {[llength [$w tag ranges currentLine]] > 0}]
 } -result {1 1}
 

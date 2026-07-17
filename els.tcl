@@ -443,6 +443,8 @@ namespace eval els {
     variable docLossyPause; array set docLossyPause {} ;# id -> auto-save paused (unencodable chars)
     variable docExtModPause; array set docExtModPause {} ;# id -> auto-save paused (file changed on disk)
     variable status_note_after ""   ;# transient statusbar note timer
+    variable status_note_full ""    ;# the un-elided text of the note currently shown (for its tooltip)
+    variable PATH_WARN_LEN 200      ;# path chars at/after which the name slot flags length in red (Windows MAX_PATH is 260)
     variable autosave 0             ;# File ▸ Auto-save (opt-in, persisted)
     variable autosave_after ""      ;# debounced auto-save flush timer
     variable autosave_pending {}    ;# doc ids awaiting the debounced flush
@@ -477,7 +479,7 @@ namespace eval els {
     variable geom_save_warned 0     ;# one-shot: settings-persist failure already surfaced this streak
     variable savedSig   ; array set savedSig   {}  ;# id -> on-disk file sig "size:mtime:crc" ("" untitled)
     variable savedSigPath; array set savedSigPath {} ;# id -> path savedSig was cached for (pins the R3 baseline)
-    variable docDiskState; array set docDiskState {} ;# id -> untitled|normal|changed|missing|unavailable|readonly
+    variable docDiskState; array set docDiskState {} ;# id -> untitled|normal|changed|missing|remote|unavailable|readonly
     variable docDiskMeta; array set docDiskMeta {}   ;# id -> last cheap {path size mtime} observation
     variable docDiskContent; array set docDiskContent {} ;# id -> normal|changed result cached for docDiskMeta
     variable docDiskDetail; array set docDiskDetail {} ;# id -> short tooltip detail
@@ -2193,12 +2195,13 @@ proc els::build {} {
     # back... a visible flicker loop.  Actual width comes from -fill x/-expand.
     ttk::label .sb.name -font elsUI -anchor w -text "untitled" -width 8 \
         -foreground $::els::MUTED
-    ttk::label .sb.pos  -font elsUI -anchor e -text "Ln 1 Col 1" -foreground $::els::MUTED
-    # -anchor w (not e): when a narrow window squeezes this slot the label clips
-    # from the far edge, so west-anchoring keeps the DISTINGUISHING leading word
-    # ("Changed"/"Not"/"On") visible instead of the shared "...on disk" tail, which
-    # would read like the healthy state even when the file changed on disk (R19).
-    ttk::label .sb.disk -font elsUI -anchor w -width 15 -text "Not on disk" \
+    ttk::label .sb.pos  -font elsUI -anchor e -text "1:1" -foreground $::els::MUTED
+    # No news is good news: the disk slot is BLANK for a saved/unchanged file and for
+    # an untitled buffer, and only shows a terse word for an exception (it is packed
+    # on demand by els::disk_render, so an empty slot collapses rather than gaps).
+    # -anchor w so that if a narrow window squeezes a shown word ("unreadable") it
+    # clips from the tail, keeping the distinguishing leading characters visible.
+    ttk::label .sb.disk -font elsUI -anchor w -text "" \
         -foreground $::els::MUTED
     ttk::label .sb.eol  -font elsUI -anchor e -text "LF"    -foreground $::els::MUTED \
         -cursor hand2 -padding {4 1}
@@ -2206,9 +2209,11 @@ proc els::build {} {
         -cursor hand2 -padding {4 1}
     frame .sb.sep_eol -width 1 -bg $::els::HAIR
     frame .sb.sep_enc -width 1 -bg $::els::HAIR
-    frame .sb.sep_disk -width 1 -bg $::els::HAIR
     # a normally-empty notice; lights up red when a newer release is detected
     ttk::label .sb.update -font elsUI -anchor e -text "" -foreground $::els::CARET -cursor hand2
+    # a normally-empty red "[N]" badge left of the name; shows the path length only
+    # when it nears the 260-char Windows limit (packed on demand by els::name_len_flag)
+    ttk::label .sb.plen -font elsUI -anchor w -text "" -foreground $::els::CARET
     pack .sb.hair -side top -fill x
     # name on the left (takes the slack, elided keeping the filename); the
     # position / EOL / encoding cluster on the right, reading Ln·Col | EOL | enc
@@ -2218,8 +2223,8 @@ proc els::build {} {
     pack .sb.eol     -side right -padx {8 2}   -pady 4
     pack .sb.sep_eol -side right -padx {8 2}   -pady {7 6} -fill y
     pack .sb.pos  -side right -padx {12 0}  -pady 4
-    pack .sb.sep_disk -side right -padx {8 2} -pady {7 6} -fill y
-    pack .sb.disk -side right -padx {8 2} -pady 4
+    # .sb.disk is packed on demand by els::disk_render (between .sb.update and .sb.pos)
+    # and pack-forgotten when the file needs no attention, so a clean slot leaves no gap.
     pack .sb.update -side right -padx {12 0} -pady 4
     # the EOL and encoding indicators are clickable pickers
     bind .sb.eol  <Button-1>  els::popup_eol_menu
@@ -2236,6 +2241,8 @@ proc els::build {} {
     bind .sb.update <Leave> {.sb.update configure -background $::els::CHROME}
     els::tooltip_for .sb.name els::name_tip
     els::tooltip_for .sb.disk els::disk_tip
+    els::tooltip .sb.pos "Caret line : column"
+    els::tooltip .sb.plen "Path length — nearing the 260-character Windows path limit"
     # the enc/eol pills look clickable (hand cursor + hover recolor) but carried no
     # hint of what a click does, unlike the disk pill; give them the same disclosure.
     # APPEND with + so the tip composes with the existing status_link hover recolor
@@ -2974,16 +2981,29 @@ proc els::disk_render {} {
     if {$::els::active ne "" && [info exists ::els::docDiskState($::els::active)]} {
         set state $::els::docDiskState($::els::active)
     }
+    # Terse, exception-only vocabulary.  A saved/unchanged file and an untitled
+    # buffer say NOTHING (the slot collapses).  Red = your file or your save is at
+    # risk (changed/missing); muted = for-your-information (unavailable/read-only).
+    # The full sentence lives in the hover tooltip (els::disk_tip).
     switch $state {
-        normal      { set label "On disk" }
-        changed     { set label "Changed on disk" }
-        missing     { set label "Missing" }
-        unavailable { set label "Unavailable" }
-        readonly    { set label "Read-only" }
-        default     { set label "Not on disk" ; set state untitled }
+        changed     { set label "changed"    ; set fg $::els::CARET }
+        missing     { set label "missing"    ; set fg $::els::CARET }
+        remote      { set label "remote"     ; set fg $::els::MUTED }
+        unavailable { set label "unreadable" ; set fg $::els::MUTED }
+        readonly    { set label "read-only"  ; set fg $::els::MUTED }
+        default     { set label ""           ; set fg $::els::MUTED }
     }
-    set fg [expr {$state in {changed missing unavailable readonly} ? $::els::CARET : $::els::MUTED}]
+    if {$label eq ""} {
+        .sb.disk configure -text "" -foreground $::els::MUTED
+        pack forget .sb.disk
+        return
+    }
     .sb.disk configure -text $label -foreground $fg
+    # pack (idempotently) into its slot: just left of the Ln:Col / EOL / enc group,
+    # right of the update notice.  -before .sb.update fixes it there under -side right.
+    if {[lsearch -exact [pack slaves .sb] .sb.disk] < 0} {
+        pack .sb.disk -side right -before .sb.update -padx {8 2} -pady 4
+    }
 }
 proc els::disk_tip {} {
     set state untitled
@@ -2998,7 +3018,8 @@ proc els::disk_tip {} {
         normal      { set tip "No external change has been detected since els opened or saved this file. Save always performs a full conflict check." }
         changed     { set tip "The file appears to have changed outside els. Save will ask before overwriting it." }
         missing     { set tip "The file no longer exists at its saved path." }
-        unavailable { set tip "The file cannot currently be inspected." }
+        remote      { set tip "Network path — its disk state is checked only on an explicit open, save, or reload." }
+        unavailable { set tip "The file exists but els could not read it just now." }
         readonly    { set tip "The file can be read but is not currently writable." }
         default     { set tip "This document has not been saved to disk." }
     }
@@ -3020,7 +3041,7 @@ proc els::disk_probe {{id ""} {mode forced}} {
         if {[info exists ::els::docDiskState($id)] && $::els::docDiskState($id) ne "untitled"} {
             return $::els::docDiskState($id)
         }
-        return [els::disk_state_set $id unavailable "Network paths are checked only by explicit open, save, or reload actions."]
+        return [els::disk_state_set $id remote "Network paths are checked only by explicit open, save, or reload actions."]
     }
     set observed [els::disk_stat_probe $path]
     set observedState [dict get $observed state]
@@ -3144,16 +3165,28 @@ proc els::update_namelabel {} {
     if {![winfo exists .sb.name]} { return }
     if {$::els::status_note_after ne ""} { return }   ;# a transient note holds the slot
     if {$active eq "" || ![info exists ::els::docPath($active)]} {
-        .sb.name configure -text "" ; return
+        els::name_len_flag 0 ; .sb.name configure -text "" ; return
     }
     set p $::els::docPath($active)
-    if {$p eq ""} { .sb.name configure -text "untitled" ; return }
-    # the path's length rides along in the normal depiction (same [N] the hover
-    # tip shows), not only in the tooltip once the path elides
-    set suffix "  \[[string length [els::display_path $p]]\]"
-    set avail [expr {[winfo width .sb.name] - 4 - [font measure elsUI $suffix]}]
-    if {$avail < 24} { .sb.name configure -text [file tail $p]$suffix ; return }  ;# unrealized
-    .sb.name configure -text [els::elide_path $p $avail]$suffix
+    if {$p eq ""} { els::name_len_flag 0 ; .sb.name configure -text "untitled" ; return }
+    # The path-length count is normally tooltip-only — noise below the limit.  Only once
+    # the path nears the Windows MAX_PATH ceiling (260) does it also surface as a small
+    # red "[N]" badge just left of the name (a soft standing warning that a longer edit
+    # to this path may fail): ONLY the count is coloured, the filename stays muted.
+    set n [string length [els::display_path $p]]
+    els::name_len_flag [expr {$n >= $::els::PATH_WARN_LEN ? $n : 0}]
+    set avail [expr {[winfo width .sb.name] - 4}]
+    if {$avail < 24} { .sb.name configure -text [file tail $p] ; return }  ;# unrealized
+    .sb.name configure -text [els::elide_path $p $avail]
+}
+# Show ("[n]", red) or hide the path-length warning badge just left of the name slot.
+proc els::name_len_flag {n} {
+    if {![winfo exists .sb.plen]} { return }
+    if {$n <= 0} { .sb.plen configure -text "" ; pack forget .sb.plen ; return }
+    .sb.plen configure -text "\[$n\]"
+    if {[lsearch -exact [pack slaves .sb] .sb.plen] < 0} {
+        pack .sb.plen -side left -before .sb.name -padx {12 0} -pady 4
+    }
 }
 # Strip a Windows extended-length prefix (\\?\ or //?/, incl. the UNC form) from
 # a path.  Tcl's `file normalize` adds it for paths over MAX_PATH (260), and it
@@ -3198,15 +3231,15 @@ proc els::elide_path {p avail} {
 # Tooltip text for the status-bar name: the full path, but only while the label
 # is actually eliding it (when the whole path fits, the tip would be redundant).
 proc els::name_tip {} {
+    # while a transient note holds the slot, the tip carries its full (un-elided) text
+    if {$::els::status_note_after ne ""} { return $::els::status_note_full }
     variable active
     if {$active eq "" || ![info exists ::els::docPath($active)]} { return "" }
     set p $::els::docPath($active)
     if {$p eq ""} { return "" }
-    # suppress the tip while the label shows the WHOLE path: the displayed text
-    # is "<path>  [N]" since the length suffix rode along, so compare against
-    # that full non-elided rendering, not against the bare path
-    set suffix "  \[[string length [els::display_path $p]]\]"
-    if {[.sb.name cget -text] eq "[els::strip_ext_prefix $p]$suffix"} { return "" }
+    # suppress the tip while the WHOLE path is already visible: an elided label begins
+    # with "…", a full one begins with the path itself (with or without the [N] suffix)
+    if {[string first [els::strip_ext_prefix $p] [.sb.name cget -text]] == 0} { return "" }
     return [els::path_tip $p]
 }
 proc els::status_link_enter {w} {
@@ -3475,7 +3508,7 @@ proc els::update_pos {} {
     set w [els::T]
     if {$w eq ""} { return }
     lassign [split [$w index insert] .] line col
-    .sb.pos configure -text "Ln $line Col [expr {$col + 1}]"
+    .sb.pos configure -text "$line:[expr {$col + 1}]"   ;# line:col — the compiler-error convention
 }
 proc els::line_count {} {
     set w [els::T]
@@ -5054,18 +5087,31 @@ $choice"
     return $ans
 }
 
+# Elide a plain message to fit avail px with a trailing "…" (unlike elide_path,
+# which preserves the filename tail).  Used for transient status notes.
+proc els::elide_text {s avail} {
+    if {[font measure elsUI $s] <= $avail} { return $s }
+    while {[string length $s] > 1 && [font measure elsUI "$s…"] > $avail} {
+        set s [string range $s 0 end-1]
+    }
+    return "$s…"
+}
 # A transient, quiet status message in the name slot (never a dialog) -- used
 # by auto-save for failures.  The next update_namelabel restores the path.
 proc els::status_note {msg} {
     if {![winfo exists .sb.name]} { return }
     catch {after cancel $::els::status_note_after}
-    .sb.name configure -text $msg
+    set ::els::status_note_full $msg   ;# the un-elided text, surfaced in the hover tooltip
+    # elide a long note to the slot width so it never just clips off the edge
+    set avail [expr {[winfo width .sb.name] - 4}]
+    .sb.name configure -text [expr {$avail < 24 ? $msg : [els::elide_text $msg $avail]}]
     # while the timer is pending, update_namelabel leaves the note alone (a
     # successful save calls settitle right after, which must not clobber it)
     set ::els::status_note_after [after 4000 els::status_note_clear]
 }
 proc els::status_note_clear {} {
     set ::els::status_note_after ""
+    set ::els::status_note_full ""
     catch {els::update_namelabel}
 }
 
