@@ -43,6 +43,9 @@ seizing a default. Then right-click a file, pick **Open with > els**, and tick
 **Always** to make it the default for that type. Manage or reset defaults anytime
 in **Settings > Default apps**.
 
+A full manual ships inside els — open it any time from **Help > Manual** (it opens
+in your browser). Its source is [`resources/els-manual.html`](resources/els-manual.html).
+
 ## Features
 
 - **Data safety, built in**: atomic, durable saves (an interrupted save leaves

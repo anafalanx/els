@@ -2147,6 +2147,7 @@ proc els::build {} {
     .menu.view add command -label "Reset Zoom" -accelerator Ctrl+0 -command els::zoom_reset
     menu .menu.help
     .menu add cascade -label Help -underline 0 -menu .menu.help
+    .menu.help add command -label "Manual" -command els::open_manual
     .menu.help add command -label "Keyboard Shortcuts" -command els::shortcuts
     .menu.help add command -label "File Associations..." -command els::file_associations
     .menu.help add command -label "els on GitHub" \
@@ -7847,6 +7848,27 @@ proc els::open_url {url} {
     if {$rundll ne "" && ![catch {exec $rundll url.dll,FileProtocolHandler $url &}]} { return }
     set cmd [els::system32 cmd.exe]
     if {$cmd ne ""} { catch {exec $cmd /c start "" $url &} }
+}
+# Open the bundled manual (resources/els-manual.html) in the default browser.  A
+# source run opens the file directly; a packaged run finds it inside the read-only
+# zipfs, which a browser cannot read, so extract a real copy to the temp dir first.
+# Falls back to the project page if the resource is somehow missing.
+proc els::open_manual {} {
+    set src [els::find_resource resources els-manual.html]
+    if {$src eq ""} { els::open_url "https://github.com/anafalanx/els" ; return }
+    if {[string match "//zipfs:*" $src]} {
+        set tmp ""
+        foreach v {TEMP TMP LOCALAPPDATA} {
+            if {[info exists ::env($v)] && $::env($v) ne "" && [file isdirectory $::env($v)]} {
+                set tmp $::env($v) ; break
+            }
+        }
+        if {$tmp ne ""} {
+            set dst [file join $tmp els-manual.html]
+            if {![catch {file copy -force $src $dst}]} { set src $dst }
+        }
+    }
+    els::open_url $src
 }
 
 proc els::startup_probe {report} {

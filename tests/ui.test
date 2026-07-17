@@ -825,9 +825,20 @@ test ui-9.3 {Help exposes Keyboard Shortcuts; Save As is bound to Ctrl+Shift+S} 
             lappend labels [.menu.help entrycget $i -label]
         }
     }
-    list [lindex $labels 0] [expr {"File Associations..." in $labels}] \
-         [expr {[bind . <Control-Shift-S>] ne ""}]
-} -result {{Keyboard Shortcuts} 1 1}
+    list [expr {"Manual" in $labels}] [expr {"Keyboard Shortcuts" in $labels}] \
+         [expr {"File Associations..." in $labels}] [expr {[bind . <Control-Shift-S>] ne ""}]
+} -result {1 1 1 1}
+
+test help-manual-1.1 {Help > Manual is wired to els::open_manual and the manual resource is present} -setup {ui_reset} -body {
+    set wired 0
+    for {set i 0} {$i <= [.menu.help index end]} {incr i} {
+        if {[.menu.help type $i] ne "separator" && [.menu.help entrycget $i -label] eq "Manual"} {
+            set wired [expr {[.menu.help entrycget $i -command] eq "els::open_manual"}]
+        }
+    }
+    set res [els::find_resource resources els-manual.html]
+    list $wired [expr {$res ne "" && [file exists $res]}]
+} -result {1 1}
 
 test ui-9.4 {app registration is per-user, declares text types, never takes a default or touches UserChoice} -setup {ui_reset} -body {
     set cmds [els::assoc_commands [file join $::ELS_TMP els.exe]]
