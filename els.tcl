@@ -817,7 +817,7 @@ proc els::deferred_load {} {
         } ioerr]} {
             if {$fh ne ""} { catch {close $fh} }
             set ::els::deferred_blocked 1
-            set ::els::deferred_notice "deferred-open state could not be read; it was left untouched"
+            set ::els::deferred_notice "deferred-opens state unreadable — left as-is"
             catch {els::log warn "deferred-open state at $p could not be read ($ioerr); preserved for retry"}
             return
         }
@@ -844,10 +844,10 @@ proc els::deferred_load {} {
             # The evidence could not be moved aside.  Leave the original bytes
             # untouched and prohibit every queue write for this run.
             set ::els::deferred_blocked 1
-            set ::els::deferred_notice "deferred-open state is corrupt and could not be quarantined"
+            set ::els::deferred_notice "deferred-opens state corrupt — couldn't quarantine"
             catch {els::log error "invalid deferred-open state at $p ($problem); quarantine failed: $qerr"}
         } else {
-            set ::els::deferred_notice "corrupt deferred-open state was quarantined"
+            set ::els::deferred_notice "quarantined corrupt deferred-opens state"
             catch {els::log warn "invalid deferred-open state at $p ($problem); preserved as $quarantined"}
         }
     }
@@ -855,7 +855,7 @@ proc els::deferred_load {} {
 proc els::deferred_save {} {
     if {$::els::deferred_blocked} {
         catch {els::log error "refusing to overwrite corrupt deferred-open state"}
-        catch {els::status_note "deferred file list is blocked; corrupt state was preserved"}
+        catch {els::status_note "deferred-opens blocked — corrupt state kept"}
         return 0
     }
     set p [els::deferred_path]
@@ -865,13 +865,13 @@ proc els::deferred_save {} {
         encoding convertto -profile strict utf-8 $payload
     } bytes]} {
         catch {els::log warn "could not encode deferred-open state without loss: $bytes"}
-        catch {els::status_note "deferred file list contains an invalid path and was not saved"}
+        catch {els::status_note "deferred-opens list has a bad path — not saved"}
         return 0
     }
     set err [els::write_atomic $p $bytes ".els-deferred-[pid]-[clock clicks].tmp"]
     if {$err ne ""} {
         catch {els::log warn "could not persist deferred opens to $p: $err"}
-        catch {els::status_note "deferred file list could not be saved"}
+        catch {els::status_note "couldn't save deferred-opens list"}
         return 0
     }
     return 1
@@ -1161,7 +1161,7 @@ proc els::save_geometry {} {
         catch {els::log warn "could not persist settings to $f: $e"}
         if {!$::els::geom_save_warned} {
             set ::els::geom_save_warned 1
-            catch {els::status_note "settings could not be saved"}
+            catch {els::status_note "couldn't save settings"}
         }
         return
     }
@@ -4408,7 +4408,7 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
         els::disk_probe $id
         if {$quiet} {
             catch {els::log error "quiet reload failed for $p: $err"}
-            catch {els::status_note "file was not reloaded: [file tail $p]"}
+            catch {els::status_note "couldn't reload [file tail $p]"}
         } else {
             els::message_box -parent . -icon error -title els -message "Cannot reload file:\n$err"
         }
@@ -4419,11 +4419,11 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
         if {$readState eq "failed"} {
             set err [dict get $readResult error]
             catch {els::log error "quiet reload failed for $p: $err"}
-            catch {els::status_note "file was not reloaded: [file tail $p]"}
+            catch {els::status_note "couldn't reload [file tail $p]"}
         } elseif {$readState eq "deferred" && [dict get $readResult new]} {
             set what [expr {([dict exists $readResult reason] && [dict get $readResult reason] eq "remote") \
                 ? "network reload deferred" : "large reload deferred"}]
-            catch {els::status_note "$what - use File > Deferred Opens..."}
+            catch {els::status_note "$what — File > Deferred Opens"}
         }
         return 0
     }
@@ -4528,7 +4528,7 @@ proc els::new {} {
 }
 proc els::open_quiet_failure {path err} {
     catch {els::log error "quiet open failed for $path: $err"}
-    catch {els::status_note "file not opened: [file tail $path]"}
+    catch {els::status_note "couldn't open [file tail $path]"}
 }
 # A launch-file argument that failed to open is the user's own deliberate action
 # (a double-click / "Open with els"), not a background timer, so it earns a real
@@ -4597,7 +4597,7 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
                 if {[dict get $readResult new]} {
                     set what [expr {([dict exists $readResult reason] && [dict get $readResult reason] eq "remote") \
                         ? "network file deferred" : "large file deferred"}]
-                    catch {els::status_note "$what - use File > Deferred Opens..."}
+                    catch {els::status_note "$what — File > Deferred Opens"}
                 }
             }
             failed {
@@ -4672,7 +4672,7 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     if {$declossy} {
         set ::els::docDecodeLossy($id) 1
         if {!$quiet} {
-            els::status_note "decoded with replacement characters — try Reopen with Encoding"
+            els::status_note "lossy decode — try Reopen with Encoding"
         }
     } else {
         unset -nocomplain ::els::docDecodeLossy($id)
@@ -5213,7 +5213,7 @@ proc els::backup_keep {path} {
         # rather than silently assuming their edits to a big log are recoverable.
         if {![dict exists $::els::backup_size_noted $path]} {
             dict set ::els::backup_size_noted $path 1
-            catch {els::status_note "file too large to keep a backup: [file tail $path]"}
+            catch {els::status_note "too large to back up: [file tail $path]"}
         }
         return
     }
@@ -7939,7 +7939,7 @@ proc els::bgerror {msg args} {
     set trace $msg
     if {[llength $args]} { catch {set trace [dict get [lindex $args 0] -errorinfo]} }
     catch {els::log error $trace}
-    catch {els::status_note "internal error (logged to els.log)"}
+    catch {els::status_note "internal error — see els.log"}
 }
 
 proc els::main {} {

@@ -1437,7 +1437,7 @@ test bigfile-1.10 {a deferred-add write failure rolls memory back and reports fa
          [els::deferred_contains $p1] [els::deferred_contains $p2] \
          [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
          [expr {[llength $::els::docs] == $beforeDocs}] \
-         [string match "*not opened*" [.sb.name cget -text]]
+         [string match "*couldn't open*" [.sb.name cget -text]]
 } -result {0 {} 2 1 1 0 1 1 1}
 
 test bigfile-1.11 {a deferred-remove write failure retains the durable entry even after a successful open} -setup {
@@ -1563,7 +1563,7 @@ test quiet-open-1.1 {quiet startup-style open failure is logged, nonmodal, and n
     set ::els_test_mbcount 0
     set rc [els::open $missing 1]
     list $rc $::els::last_open_outcome $::els_test_mbcount \
-         [string match "*not opened*" [.sb.name cget -text]] \
+         [string match "*couldn't open*" [.sb.name cget -text]] \
          [expr {[file exists $log] && [string match "*quiet open failed*" [raw_read $log]]}]
 } -result {{} failed 0 1 1}
 

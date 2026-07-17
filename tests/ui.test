@@ -1946,7 +1946,7 @@ test cfg-dir-1.1 {save_geometry surfaces a failure (not silent success) when the
     els::save_geometry
     # nothing moved INTO the dir, the failure was logged + noted once
     list [file isdirectory $f] [llength [glob -nocomplain -directory $f *]] \
-         $::els::geom_save_warned [expr {[lsearch -glob $::__f55 "*could not be saved*"] >= 0}]
+         $::els::geom_save_warned [expr {[lsearch -glob $::__f55 "*couldn't save settings*"] >= 0}]
 } -result {1 0 1 1}
 
 test cfg-unknown-1.1 {save_geometry preserves an unknown key written by a newer els (F57)} -setup {ui_reset} -body {
