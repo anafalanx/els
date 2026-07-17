@@ -601,8 +601,8 @@ namespace eval els {
     variable TAB_LABEL_PX 190      ;# hard text-pixel cap (wide glyphs cannot balloon a tab)
     variable TAB_MENU_MAX 64       ;# hard character cap for the overflow menu
     variable TAB_MENU_PX 420       ;# hard text-pixel cap for the overflow menu
-    variable disk_watch_active 0   ;# true only while the application is foreground-active
-    variable disk_watch_after ""   ;# modest active-window metadata poll
+    variable disk_watch_active 0   ;# the disk observer runs for the window's lifetime (started in els::main, stopped only at quit); NOT gated on foreground
+    variable disk_watch_after ""   ;# the metadata-poll timer token
     variable DISK_WATCH_MS 5000    ;# stat interval; deep checks are separately cached
     variable DISK_DEEP_BACKOFF_MS 1500 ;# forced activations cannot repeatedly stream a file
     variable boot_script ""      ;# path of this file at source time (see below)
@@ -2268,8 +2268,15 @@ proc els::build {} {
     if {!$::els::show_linenos} { grid remove .ln }
     # The disk observer polls only while the application is foreground-active.
     # Deactivation also retains the existing auto-save-on-focus-loss behavior.
+    # The disk observer runs continuously (started in els::main): a file rewritten by
+    # ANOTHER program — a build tool, git, a formatter, a second els — must be noticed
+    # even while els stays in the foreground the whole time (no focus change to hook)
+    # and even while it is in the background.  <Activate> only adds an IMMEDIATE forced
+    # re-check on return; it is no longer what starts or gates the poll (that was fragile
+    # — the app-activation event is not reliably delivered).  Losing the foreground does
+    # NOT stop the poll; only quitting does.
     bind . <Activate> {if {"%W" eq "."} { els::disk_watch_activate }}
-    bind . <Deactivate> {if {"%W" eq "."} { els::disk_watch_deactivate ; els::autosave_all }}
+    bind . <Deactivate> {if {"%W" eq "."} { els::autosave_all }}
     # remember the last NORMAL-state geometry: while maximized, `wm geometry .`
     # returns the maximized rect, so save_geometry would otherwise persist that as
     # a normal window.  Guard %W eq "." — `.` is in every child's bindtags, so an
@@ -5331,6 +5338,15 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
         set probe [els::file_sig_probe $docPath($id)]
         set state [dict get $probe state]
         if {$state eq "ok" && [els::sig_content [dict get $probe sig]] ne [els::sig_content $saved]} {
+            # Sync the observer/pill to what we just proved (with a full CONTENT hash):
+            # the disk copy diverged.  Without this, cancelling the dialog (or an autosave
+            # pause) would leave the pill reading "normal" even though els knows there is a
+            # conflict.  Pin docDiskContent too, not just the label: a metadata-only poll
+            # tick would otherwise revert the pill for a same-size/same-mtime rewrite (the
+            # exact case the content hash catches and the metadata poll cannot).  A later
+            # overwrite/reload clears this via disk_probe_reset; a cancel stays changed.
+            set ::els::docDiskContent($id) changed
+            els::disk_state_set $id changed
             if {$quiet} {
                 # autosave: NEVER prompt from a background timer.  Pause quiet
                 # saves for this doc until a manual save settles it (mirrors the
@@ -5346,6 +5362,7 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
                 cancel    { return 0 }
             }
         } elseif {$state ne "ok"} {
+            els::disk_probe $id     ;# render the real missing/unreadable state on the pill
             if {$quiet} {
                 set ::els::docExtModPause($id) 1
                 els::status_note "auto-save paused: [file tail $docPath($id)] is $state (save manually)"
@@ -7916,6 +7933,11 @@ proc els::main {} {
             set fileArgs $::argv
         }
         els::build
+        # Start the disk observer now and keep it running for the whole session, so an
+        # external rewrite is noticed within one interval no matter what — foreground or
+        # background, focus change or none, window-activation event delivered or not.
+        set ::els::disk_watch_active 1
+        els::disk_watch_schedule
         if {$startupProbe} {
             # Headless probe: keep the window off the user's screen (alpha 0 still
             # counts as mapped, so the probe's assertions hold) and route any

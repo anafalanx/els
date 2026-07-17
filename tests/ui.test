@@ -130,6 +130,64 @@ test disk-ui-1.8 {while a note holds the name slot, its tooltip carries the full
     list [expr {$tipDuringNote eq $msg}] $fullStored [expr {$tipAfter ne $msg}]
 } -result {1 1 1}
 
+test diskwatch-1.1 {returning to the app (Activate) does an immediate forced catch-up probe} -setup {ui_reset} \
+        -cleanup {els::disk_watch_deactivate} -body {
+    set p [els_tmpfile dw1.txt "original\n"]
+    set id [els::open $p]
+    set s0 $::els::docDiskState($id)
+    raw_write dw1.txt "changed by another program\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    els::disk_watch_deactivate
+    event generate . <Activate> ; update                  ;# came back to els
+    list $s0 $::els::docDiskState($id) [.sb.disk cget -text]
+} -result {normal changed changed}
+
+test diskwatch-1.2 {the poll keeps running after the window deactivates, catching a background / programmatic external edit} \
+        -setup {ui_reset} -cleanup {els::disk_watch_deactivate ; set ::els::DISK_WATCH_MS 5000} -body {
+    set ::els::DISK_WATCH_MS 15
+    set p [els_tmpfile dw_bg.txt "original\n"]
+    set id [els::open $p]
+    els::disk_watch_activate                              ;# els::main starts the poll in production
+    event generate . <Deactivate> ; update                ;# leave for another app: poll must NOT stop
+    set stillRunning $::els::disk_watch_active
+    raw_write dw_bg.txt "rewritten by a build tool while els is in the background\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    # let the poll tick until it catches the change (bounded loop, robust on a loaded box)
+    for {set i 0} {$i < 40 && $::els::docDiskState($id) ne "changed"} {incr i} {
+        set ::disk_wait 0 ; after 15 {set ::disk_wait 1} ; vwait ::disk_wait
+    }
+    list $stillRunning $::els::docDiskState($id) [.sb.disk cget -text]
+} -result {1 changed changed}
+
+test extmodsync-1.1 {a save that detects a conflict and is cancelled leaves the pill showing changed} -setup {ui_reset} -body {
+    set p [els_tmpfile dw2.txt "original\n"]
+    set id [els::open $p]
+    [els::W $id] insert end "my edit"                      ;# dirty so save proceeds
+    raw_write dw2.txt "external change\n"
+    file mtime $p [expr {[file mtime $p] + 5}]
+    set ::els_test_mbanswer cancel
+    set r [els::save $id]
+    list $r $::els::docDiskState($id) [.sb.disk cget -text]
+} -result {0 changed changed}
+
+test extmodsync-1.2 {a cancelled metadata-identical conflict stays 'changed' across poll ticks (docDiskContent pinned)} \
+        -setup {ui_reset} -cleanup {els::disk_watch_deactivate ; set ::els::DISK_WATCH_MS 5000} -body {
+    set ::els::DISK_WATCH_MS 15
+    set p [els_tmpfile dw_meta.txt "aaaa\n"]
+    set id [els::open $p]
+    set m0 [file mtime $p]
+    [els::W $id] insert end "x"                    ;# dirty so save proceeds
+    raw_write dw_meta.txt "bbbb\n"                 ;# SAME 5 bytes, different content
+    file mtime $p $m0                             ;# restore mtime: metadata identical to the baseline
+    set ::els_test_mbanswer cancel
+    els::save $id                                 ;# a full content hash detects the conflict; cancel
+    set afterSave $::els::docDiskState($id)
+    els::disk_watch_activate                      ;# run the continuous poll
+    # several metadata-only timer ticks must NOT revert the pill (docDiskContent is pinned)
+    for {set i 0} {$i < 8} {incr i} { set ::disk_wait 0 ; after 15 {set ::disk_wait 1} ; vwait ::disk_wait }
+    list $afterSave $::els::docDiskState($id) [.sb.disk cget -text]
+} -result {changed changed changed}
+
 test disk-ui-1.2 {normal-state tooltip is observational and promises only the authoritative save guard} \
         -setup {ui_reset} -body {
     set id $::els::active
