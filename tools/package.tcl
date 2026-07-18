@@ -12,7 +12,7 @@ proc script_root {} {
     if {[file pathtype $s] ne "absolute"} { set s [file join [pwd] $s] }
     return [file dirname [file dirname $s]]
 }
-# els uses z's SHARED Tcl/Tk payload (<z>/.z/r/tcltk/9.0.3); tasks.tcl exports
+# els uses z's SHARED Tcl/Tk payload (<z>/.z/r/tcltk/9.0.4); tasks.tcl exports
 # Z_TCLTK/Z_HOME into our environment, and we fall back to the hosted layout.
 proc zmal_paths {root args} {
     set out {}
@@ -27,12 +27,12 @@ proc zmal_paths {root args} {
 proc discover_tcltk {root} {
     set cands {}
     if {[info exists ::env(Z_TCLTK)] && $::env(Z_TCLTK) ne ""} { lappend cands $::env(Z_TCLTK) }
-    lappend cands {*}[zmal_paths $root r tcltk 9.0.3]
+    lappend cands {*}[zmal_paths $root r tcltk 9.0.4]
     foreach p $cands {
         set p [file normalize $p]
         if {[file exists [file join $p tcl9 bin tclsh90.exe]]} { return $p }
     }
-    error "z Tcl/Tk payload not found (r/tcltk/9.0.3) - restore z's runtime payloads"
+    error "z Tcl/Tk payload not found (r/tcltk/9.0.4) - restore z's runtime payloads"
 }
 proc discover_msys2 {root} {
     set cands {}

@@ -11,7 +11,7 @@ resolved payload roots.
 
 Most important: this repo uses the full Tcl 9 and Tk 9 manual that ships in
 z's Tcl/Tk payload, at `<TCLTK>/manual/INDEX.md` — where `<TCLTK>` is the
-path `z tasks env` reports (currently `C:\dev\.z\r\tcltk\9.0.3`). It is the
+path `z tasks env` reports (currently `C:\dev\.z\r\tcltk\9.0.4`). It is the
 authoritative Tcl/Tk reference for this codebase. Before writing or changing
 Tcl/Tk code, open the manual pages relevant to your change. Prefer it over
 training-data recall, which may be stale or describe Tcl 8.x.

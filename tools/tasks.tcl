@@ -39,8 +39,8 @@ proc discover_payload {root envs rel marker missingPath} {
 }
 
 set ROOT [script_root]
-set TC    [discover_payload $ROOT Z_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
-              [file join [file dirname $ROOT] .z r tcltk 9.0.3]]
+set TC    [discover_payload $ROOT Z_TCLTK {r tcltk 9.0.4} {tcl9 bin tclsh90.exe} \
+              [file join [file dirname $ROOT] .z r tcltk 9.0.4]]
 set MSYS2 [discover_payload $ROOT Z_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
               [file join [file dirname $ROOT] .z r msys2]]
 set TWAPI [discover_payload $ROOT Z_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
@@ -710,7 +710,7 @@ proc assert_trusted_release_payloads {} {
     set zhome [expr {[info exists ::env(Z_HOME)] && $::env(Z_HOME) ne "" \
         ? [file normalize $::env(Z_HOME)] : [file normalize [file join [file dirname $::ROOT] .z]]}]
     foreach {label actual relative} [list \
-            Tcl/Tk $::TC {r tcltk 9.0.3} \
+            Tcl/Tk $::TC {r tcltk 9.0.4} \
             MSYS2 $::MSYS2 {r msys2} \
             TWAPI $::TWAPI {r twapi 5.2.0}] {
         set expected [file normalize [file join $zhome {*}$relative]]
@@ -2067,7 +2067,7 @@ proc native_link_input_sha256 {stage} {
 proc build_native_product {out} {
     need gcc tclsh windres strip
     if {![file isfile [tclshs]]} {
-        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.3/tcl9s/bin)"
+        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.4/tcl9s/bin)"
     }
     assert_product_source_inventory
     ensure_real_directory [P build] "native build root"
@@ -2135,7 +2135,7 @@ proc build_native_product {out} {
 proc run_native_startup_check {{prepared {}}} {
     need gcc tclsh windres strip
     if {![file isfile [tclshs]]} {
-        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.3/tcl9s/bin)"
+        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.4/tcl9s/bin)"
     }
     set ownPrepared 0
     if {$prepared eq ""} {
@@ -2197,7 +2197,7 @@ proc task_build {args} {
     need gcc tclsh windres strip
     if {[llength $args] > 1} { error "usage: z build ?build/output.exe?" }
     if {![file exists [tclshs]]} {
-        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.3/tcl9s/bin)"
+        error "static tclsh missing in z's Tcl/Tk payload (r/tcltk/9.0.4/tcl9s/bin)"
     }
     set out [lindex $args 0] ; if {$out eq ""} { set out [P build els-dev.exe] }
     if {[string match -* $out]} { error "z build takes no flags (got '$out'); usage: z build ?outfile?" }

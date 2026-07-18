@@ -37,7 +37,7 @@ resolved paths:
 
 | Variable | Root | What | Version / note |
 |---|---|---|---|
-| `Z_TCLTK` | `r/tcltk/9.0.3` | Tcl/Tk 9 shared build (`tcl9/`), static build + link libs (`tcl9s/`), staged script libraries (`tcllib/`), source snippets (`tclsrc/`), and the Markdown manual (`manual/INDEX.md`) | 9.0.3 |
+| `Z_TCLTK` | `r/tcltk/9.0.4` | Tcl/Tk 9 shared build (`tcl9/`), static build + link libs (`tcl9s/`), staged script libraries (`tcllib/`), source snippets (`tclsrc/`), and the Markdown manual (`manual/INDEX.md`) | 9.0.4 |
 | `Z_MSYS2` | `r/msys2` | gcc, binutils, windres, strip (`ucrt64/bin`) | gcc 16.1.0 |
 | `Z_TWAPI` | `r/twapi/5.2.0` | Windows API extension (twapi); a z-shared payload `z check` verifies -- els's private-desktop screenshots no longer use it | 5.2.0 |
 
@@ -51,7 +51,7 @@ MSYS2's `ucrt64` may contain Tcl/Tk 8.6 for its own packages. els never uses it.
 The rule is:
 
 - Tooling invokes interpreters through explicit payload paths:
-  `r/tcltk/9.0.3/tcl9/bin/tclsh90.exe`, `.../tcl9/bin/wish90.exe`, and
+  `r/tcltk/9.0.4/tcl9/bin/tclsh90.exe`, `.../tcl9/bin/wish90.exe`, and
   `.../tcl9s/bin/tclsh90s.exe`.
 - PATH puts the Tcl/Tk 9 `tcl9/bin` ahead of `r/msys2/ucrt64/bin`.
 - C builds pass `-I<TCLTK>/tcl9/include`, so `tcl.h` is the 9.x header.
@@ -64,7 +64,7 @@ The rule is:
 
 1. lets z discover the project root;
 2. runs each command as `tclsh90 tools/tasks.tcl <task>` (z resolves
-   `tclsh90` to `r/tcltk/9.0.3/tcl9/bin/tclsh90.exe`);
+   `tclsh90` to `r/tcltk/9.0.4/tcl9/bin/tclsh90.exe`);
 3. keeps project commands visible as `z test`, `z build`, `z check`, etc.
 
 No project-local ignition script is tracked. Durable docs, scripts, and agent
@@ -107,7 +107,7 @@ ordinary commands. The product build compiles `icudet`, `winfs`, and `windrop`
 as ordinary static objects and registers them from `src/els_main.c`.
 During development and tests, `z build-ext` instead builds the five loadable
 modules (`cap`, `elsx`, `icudet`, `winfs`, and `windrop`) as Tcl stubs DLLs under
-`build/` (`<TCLTK>` is the resolved `r/tcltk/9.0.3` payload):
+`build/` (`<TCLTK>` is the resolved `r/tcltk/9.0.4` payload):
 
 ```
 gcc -std=c23 -O2 -Wall -shared -DUSE_TCL_STUBS ^

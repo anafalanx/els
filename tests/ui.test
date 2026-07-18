@@ -2398,6 +2398,11 @@ test ui-4.15 {F3 / Shift+F3 step to the next / previous match} -setup {ui_reset}
     set w [els::T] ; $w insert end "x x x x"
     set ::els::find_q x ; set ::els::find_mode find ; els::find_update
     set c0 $::els::find_current
+    # focus the text widget before synthesizing the keys: a bare `event generate
+    # <Key-F3>` occasionally does not reach the binding (an event-delivery race,
+    # ~1/120, more visible under Tk 9.0.4 timing), which stranded find_current.
+    # Same convention as ui_type_find; the product's real F3 handling is fine.
+    focus -force $w ; update
     event generate $w <Key-F3>       ; update ; set c1 $::els::find_current
     event generate $w <Shift-Key-F3> ; update ; set c2 $::els::find_current
     list $c0 $c1 $c2

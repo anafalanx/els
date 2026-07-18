@@ -31,8 +31,8 @@ proc discover_payload {root envs rel marker missingPath} {
     return [file normalize $missingPath]
 }
 set ROOT [script_root]
-set TC    [discover_payload $ROOT Z_TCLTK {r tcltk 9.0.3} {tcl9 bin tclsh90.exe} \
-              [file join [file dirname $ROOT] .z r tcltk 9.0.3]]
+set TC    [discover_payload $ROOT Z_TCLTK {r tcltk 9.0.4} {tcl9 bin tclsh90.exe} \
+              [file join [file dirname $ROOT] .z r tcltk 9.0.4]]
 set MSYS2 [discover_payload $ROOT Z_MSYS2 {r msys2} {ucrt64 bin gcc.exe} \
               [file join [file dirname $ROOT] .z r msys2]]
 set TWAPI [discover_payload $ROOT Z_TWAPI {r twapi 5.2.0} {pkgIndex.tcl} \
@@ -60,14 +60,14 @@ if {[llength $pkgpaths]} {
 }
 
 set ::COMPONENTS {
-    {key tcl      name "Tcl/Tk 9 (shared)"      loc tc     probe {tcl9 bin tclsh90.exe}          kind core want 9.0.3}
+    {key tcl      name "Tcl/Tk 9 (shared)"      loc tc     probe {tcl9 bin tclsh90.exe}          kind core want 9.0.4}
     {key wish     name "Tk 9 wish"              loc tc     probe {tcl9 bin wish90.exe}           kind core want {}}
     {key gcc      name "gcc / C23 (UCRT64)"     loc msys2  probe {ucrt64 bin gcc.exe}            kind core want 16.1.0}
     {key windres  name "windres"                loc msys2  probe {ucrt64 bin windres.exe}        kind core want {}}
     {key strip    name "strip"                  loc msys2  probe {ucrt64 bin strip.exe}           kind core want {}}
     {key sha256   name "SHA-256 tool"            loc msys2  probe {usr bin sha256sum.exe}           kind core want {}}
     {key git      name "Git release enumerator"  loc msys2  probe {usr bin git.exe}                 kind core want {}}
-    {key tcls     name "Tcl/Tk 9 (static)"      loc tc     probe {tcl9s bin tclsh90s.exe}        kind core want 9.0.3}
+    {key tcls     name "Tcl/Tk 9 (static)"      loc tc     probe {tcl9s bin tclsh90s.exe}        kind core want 9.0.4}
     {key wishs    name "Tk 9 static wrapper"    loc tc     probe {tcl9s bin wish90s.exe}         kind core want {}}
     {key libtcl   name "static Tcl library"     loc tc     probe {tcl9s lib libtcl90.a}          kind core want {}}
     {key libtk    name "static Tk library"      loc tc     probe {tcl9s lib libtcl9tk90.a}       kind core want {}}
@@ -77,9 +77,9 @@ set ::COMPONENTS {
     {key tklib    name "Tk script library"      loc tc     probe {tcllib tk_library tk.tcl}      kind core want {}}
     {key twapi    name "twapi"                  loc twapi  probe {pkgIndex.tcl}                  kind core want 5.2.0}
     {key manual   name "Tcl/Tk + C-API manual"  loc tc     probe {manual INDEX.md}               kind opt  want {}}
-    {key tclsrc   name "Tcl/Tk 9 source"        loc tc     probe {tclsrc tcl9.0.3 generic tcl.h} kind core want {}}
-    {key zliblic  name "bundled zlib notice"     loc tc     probe {tclsrc tcl9.0.3 compat zlib LICENSE} kind core want {}}
-    {key tomlic   name "LibTomMath notice"        loc tc     probe {tclsrc tcl9.0.3 libtommath LICENSE} kind core want {}}
+    {key tclsrc   name "Tcl/Tk 9 source"        loc tc     probe {tclsrc tcl9.0.4 generic tcl.h} kind core want {}}
+    {key zliblic  name "bundled zlib notice"     loc tc     probe {tclsrc tcl9.0.4 compat zlib LICENSE} kind core want {}}
+    {key tomlic   name "LibTomMath notice"        loc tc     probe {tclsrc tcl9.0.4 libtommath LICENSE} kind core want {}}
     {key mingwlic name "MinGW runtime notices"    loc msys2  probe {ucrt64 share licenses crt COPYING.MinGW-w64-runtime.txt} kind core want {}}
     {key gccgpl   name "GCC runtime GPLv3 terms"   loc msys2  probe {ucrt64 share licenses gcc-libs COPYING3} kind core want {}}
     {key gccex    name "GCC runtime exception"    loc msys2  probe {ucrt64 share licenses gcc-libs COPYING.RUNTIME} kind core want {}}

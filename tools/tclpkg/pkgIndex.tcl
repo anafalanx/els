@@ -7,5 +7,5 @@ if {![info exists ::env(Z_TCLTK)] || $::env(Z_TCLTK) eq ""} return
 set dll [file join $::env(Z_TCLTK) tcl9 bin tcl9tk90.dll]
 if {![file exists $dll]} return
 
-package ifneeded tk 9.0.3 [list load $dll]
-package ifneeded Tk 9.0.3 [list package require -exact tk 9.0.3]
+package ifneeded tk 9.0.4 [list load $dll]
+package ifneeded Tk 9.0.4 [list package require -exact tk 9.0.4]

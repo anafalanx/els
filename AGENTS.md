@@ -17,7 +17,7 @@ project commands in [`z.json`](z.json).
 
 This repo uses the complete Tcl 9 and Tk 9 manual that ships in z's Tcl/Tk
 payload (`<TCLTK>/manual/`, where `<TCLTK>` is the path `z tasks env` reports,
-currently `C:\dev\.z\r\tcltk\9.0.3`).
+currently `C:\dev\.z\r\tcltk\9.0.4`).
 It includes Tcl commands, Tk commands, the C API, and `tclsh`/`wish`. It is the
 authoritative reference for this codebase; prefer it over training-data recall,
 which may be stale or describe Tcl 8.x behavior.
@@ -46,7 +46,7 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   to `dist/els.exe`). `dist/` is release-only; the repo root holds no binaries.
   The build compiles `src/els_main.c`, `src/icudet.c`, `src/winfs.c`, and `src/windrop.c`;
   generates the PE icon/manifest/version resources from Tcl into `build/`;
-  runs `windres`; links z's static `r/tcltk/9.0.3/tcl9s` libraries; and appends the
+  runs `windres`; links z's static `r/tcltk/9.0.4/tcl9s` libraries; and appends the
   zipfs payload. Development replacement is staged and restores the previous
   build on failure; release promotion verifies and moves the complete artifact
   set together.

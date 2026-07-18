@@ -19,9 +19,9 @@ proc ::elsrelease::read_binary {path} {
 
 proc ::elsrelease::notice_sources {tcltk msys2} {
     return [list \
-        {Tcl 9.0.3} \
+        {Tcl 9.0.4} \
             [file join $tcltk tcllib tcl_library license.terms] \
-        {Tk 9.0.3} \
+        {Tk 9.0.4} \
             [file join $tcltk tcllib tk_library license.terms] \
         {MinGW-w64 runtime} \
             [file join $msys2 ucrt64 share licenses crt COPYING.MinGW-w64-runtime.txt] \
@@ -30,9 +30,9 @@ proc ::elsrelease::notice_sources {tcltk msys2} {
         {GCC Runtime Library Exception 3.1} \
             [file join $msys2 ucrt64 share licenses gcc-libs COPYING.RUNTIME] \
         {zlib (bundled in Tcl)} \
-            [file join $tcltk tclsrc tcl9.0.3 compat zlib LICENSE] \
+            [file join $tcltk tclsrc tcl9.0.4 compat zlib LICENSE] \
         {LibTomMath (bundled in Tcl)} \
-            [file join $tcltk tclsrc tcl9.0.3 libtommath LICENSE]]
+            [file join $tcltk tclsrc tcl9.0.4 libtommath LICENSE]]
 }
 
 proc ::elsrelease::third_party_notices {tcltk msys2} {
