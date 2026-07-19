@@ -422,7 +422,7 @@ unset ::elsworker::_dispatch
 package require Tk
 
 namespace eval els {
-    variable version "0.97"      ;# 0.97: status-bar + external-change overhaul — reliable external-change detection (continuous disk observer), terse exception-only status bar, persistent "no auto-save" flag, trimmed/consistent messaging
+    variable version "0.98"      ;# 0.98: large-file + long-line handling — 40 MB open warning, RAM-aware OOM refuse with a 1 GiB hard cap, lazy placeholder tabs replacing the Deferred Opens queue, refusal of files with pathologically long lines, horizontal-scrollbar flicker fix; bundled manual; built on Tcl/Tk 9.0.4
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
