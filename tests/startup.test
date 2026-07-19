@@ -50,7 +50,7 @@ proc startup_read {path} {
     set f [open $path r]
     try { return [read $f] } finally { close $f }
 }
-# Create a large fixture without manufacturing a 25 MiB Tcl string.  The hole is
+# Create a large fixture without manufacturing a 40 MiB Tcl string.  The hole is
 # never read when startup correctly defers the file.
 proc startup_sparse {path size} {
     set f [open $path w]
@@ -156,19 +156,21 @@ test startup-1.4 {explicit launch file takes precedence over saved session} -con
     catch {file delete -force $app}
 } -result {0 1 explicit.txt explicit.txt}
 
-test startup-1.5 {a large explicit startup file is persisted for later consent, never silently loaded} \
+test startup-1.5 {a large explicit startup file becomes a lazy placeholder tab, never silently loaded} \
         -constraints startup -setup {
     set app [startup_appdir deferred]
 } -body {
-    set p [startup_sparse [file join $app huge.txt] 26214401]
+    set p [startup_sparse [file join $app huge.txt] 41943041]
     set r [startup_probe $app $p]
+    # the large file is a real (lazy) tab now: docs=1, its path IS the tab's path,
+    # it is listed under the probe's `lazy` key, and no els.deferred file exists.
     list [dict get $r cfgask] [dict get $r docs] \
          [lmap q [dict get $r paths] {file tail $q}] \
-         [lmap q [dict get $r deferred] {file tail $q}] \
+         [lmap q [dict get $r lazy] {file tail $q}] \
          [file exists [file join $app els.deferred]]
 } -cleanup {
     catch {file delete -force $app}
-} -result {0 1 {{}} huge.txt 1}
+} -result {0 1 huge.txt huge.txt 0}
 
 test startup-1.6 {failed explicit path is logged and does not suppress a usable saved session} \
         -constraints startup -setup {

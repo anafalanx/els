@@ -454,13 +454,12 @@ namespace eval els {
     variable BK_MAXAGE 2592000      ;# s: prune backups older than 30 days
     variable BK_MAXSIZE 20971520    ;# bytes: don't back up files larger than 20 MB
     variable backup_size_noted {}   ;# paths already told "too large to back up" (one-shot)
-    variable OPEN_WARN_SIZE 26214400 ;# bytes: confirm before opening a file larger than 25 MB
+    variable OPEN_WARN_SIZE 41943040 ;# bytes: confirm before opening a file larger than 40 MB (~5 s worst-case load; measured)
     variable IO_CHUNK 1048576        ;# bounded physical read size for streaming I/O
-    variable DEFERRED_MAX_BYTES 1048576 ;# poison guard for the adjacent deferred queue
-    variable deferred_files {}       ;# large files held for a deliberate foreground open
-    variable deferred_blocked 0      ;# corrupt queue could not be quarantined: never overwrite it
-    variable deferred_notice ""      ;# startup diagnostic surfaced after the status bar exists
-    variable last_open_outcome ""    ;# opened|already|deferred|cancelled|failed (quiet callers inspect it)
+    variable OPEN_OOM_MULT 8            ;# projected peak resident bytes per file byte (worst-case ~10x measured: raw+decoded+B-tree)
+    variable OPEN_OOM_RESERVE_FRAC 0.80 ;# REFUSE an open whose projection exceeds this fraction of AVAILABLE physical RAM (crash net)
+    variable OPEN_HARD_CAP 1073741824  ;# 1 GiB: an ABSOLUTE refuse ceiling. No text file this big loads safely into a Tk text widget on ANY machine (a single huge line alone crashes it), and it fires with no RAM query -- so the refuse works even before win_meminfo is available.
+    variable last_open_outcome ""    ;# opened|already|placeholder|cancelled|failed (quiet callers inspect it)
     variable MAXUNDO 2000           ;# cap the per-doc undo stack (compound actions) so a long session can't grow it without bound
     # Re-entrancy guard: background work (an autosave flush, the async find/replace
     # worker's buffer commit) is deferred while a modal message pump is up, so it can
@@ -485,6 +484,10 @@ namespace eval els {
     variable docDiskDetail; array set docDiskDetail {} ;# id -> short tooltip detail
     variable docDiskDeepAt; array set docDiskDeepAt {} ;# id -> last forced full-content observation (ms)
     variable loading    ; array set loading    {}  ;# id -> 1 while open mutates identity
+    variable docLazy    ; array set docLazy    {}  ;# id -> 1 : a placeholder tab (docPath set, content NOT loaded; buffer disabled)
+    variable tab_press_id ""   ;# tab id pressed with Button-1 (for the press-show / release-load split)
+    variable tab_press_x  0    ;# root-X of the press (a drag past a few px suppresses materialize-on-release)
+    variable tab_dragged  0    ;# 1 once a press turned into a reorder drag
     variable DISK_DEEP_PROBE_CAP 16777216  ;# forced UI checks hash only reasonably small files
     # charset detection (chardet quality via the system ICU; 0 until loaded)
     variable have_detect 0
@@ -565,6 +568,7 @@ namespace eval els {
     variable show_linenos 1      ;# View ▸ Line Numbers (persisted)
     variable recent_vs_after ""  ;# deferred recent-list scrollbar show/hide
     variable word_wrap 0         ;# View ▸ Word Wrap (soft-wrap long lines)
+    variable LONGLINE_CHARS 50000 ;# refuse to open a file with ANY line this long: one horizontal scroll of such a line freezes Tk's layout (measured ~2.3 s at 50 k, quadratic — ~9 s at 100 k, ~37 s at 200 k)
     variable always_on_top 0     ;# View ▸ Always on Top (wm -topmost)
     variable geom_normal ""      ;# last NORMAL-state `wm geometry .` (tracked so a
                                  ;# maximized quit still persists a real window rect)
@@ -573,6 +577,7 @@ namespace eval els {
     variable vs_after ""         ;# pending (idle) vertical scrollbar-visibility update
     variable hs_shown -1         ;# horizontal scrollbar visibility (only when wrap off + long lines)
     variable hs_after ""         ;# pending (idle) horizontal scrollbar-visibility update
+    variable hs_gate_sig ""      ;# anti-flicker: the {xview yview width epoch} at which the h-bar was last shown/hidden — a HIDE is suppressed until one of those genuinely changes (see update_hscroll)
     variable find_after ""       ;# pending (debounced) incremental search
     variable ws_after ""         ;# pending (debounced) whitespace return-marker update
     variable tab_tip_delay 1000  ;# tabs are crossed often; let their tips breathe
@@ -761,165 +766,6 @@ proc els::config_legacy_candidates {} {
 }
 proc els::config_file {} { return $::els::config_path }
 
-# Large files discovered by non-interactive startup/session paths are
-# never read silently and never trigger a timer-driven modal.  Keep them in their
-# own tiny adjacent state file: writing els.conf here would also rewrite session
-# ownership while startup is still deciding whether to adopt the previous one.
-proc els::deferred_path {} {
-    if {$::els::config_path eq ""} { return "" }
-    return [file join [file dirname $::els::config_path] els.deferred]
-}
-proc els::deferred_sanitize {paths} {
-    set out {}
-    foreach p $paths {
-        set n [els::session_path $p]
-        if {$n eq ""} { continue }
-        set duplicate 0
-        foreach old $out {
-            if {[els::same_path $old $n]} { set duplicate 1 ; break }
-        }
-        if {!$duplicate} { lappend out $n }
-    }
-    return $out
-}
-# Preserve a corrupt queue before allowing any new writer to replace it.  Kept
-# as a seam so fault tests can prove that a failed quarantine blocks overwrite.
-proc els::deferred_quarantine {path} {
-    set stamp "[clock seconds]-[pid]-[clock clicks]"
-    set target "$path.corrupt-$stamp"
-    file rename $path $target
-    return $target
-}
-proc els::deferred_load {} {
-    set ::els::deferred_files {}
-    set ::els::deferred_blocked 0
-    set ::els::deferred_notice ""
-    set p [els::deferred_path]
-    if {$p eq "" || ![file exists $p]} { return }
-    # Distinguish a TRANSIENT read fault (a sharing violation or I/O error while AV
-    # or a backup tool briefly holds a perfectly valid file) from real content
-    # corruption.  Only corruption should quarantine; a transient fault must leave
-    # the intact queue in place and block writes this run so a later deferred_add
-    # cannot clobber the good file with an empty list (R10).  So read the bytes here,
-    # BEFORE the quarantine catch -- and the return on failure sits at proc scope,
-    # never inside a catch (catch would trap TCL_RETURN into the quarantine path).
-    # A directory at the path is NOT read (it is corruption); it falls through to the
-    # quarantine catch below, preserving the directory-quarantine contract.
-    set raw ""
-    if {![file isdirectory $p]} {
-        set fh ""
-        if {[catch {
-            set fh [::open $p r]
-            fconfigure $fh -translation binary
-            set raw [read $fh [expr {$::els::DEFERRED_MAX_BYTES + 1}]]
-            close $fh
-            set fh ""
-        } ioerr]} {
-            if {$fh ne ""} { catch {close $fh} }
-            set ::els::deferred_blocked 1
-            set ::els::deferred_notice "deferred-opens state unreadable — left as-is"
-            catch {els::log warn "deferred-open state at $p could not be read ($ioerr); preserved for retry"}
-            return
-        }
-    }
-    set problem ""
-    if {[catch {
-        if {[file isdirectory $p]} { error "state path is a directory" }
-        if {[string length $raw] > $::els::DEFERRED_MAX_BYTES} { error "state file exceeds size limit" }
-        set data [encoding convertfrom -profile strict utf-8 $raw]
-        # Force one exact dict parse and accept only the schema we actually
-        # understand.  Unknown/trailing keys are not silently rewritten away.
-        dict size $data
-        if {[llength $data] != 4} { error "duplicate or incomplete fields" }
-        if {[lsort [dict keys $data]] ne {files schema}} { error "unexpected fields" }
-        if {![string is integer -strict [dict get $data schema]] || [dict get $data schema] != 1} {
-            error "unsupported schema"
-        }
-        set files [dict get $data files]
-        llength $files
-        set ::els::deferred_files [els::deferred_sanitize $files]
-    } problem]} {
-        set ::els::deferred_files {}
-        if {[catch {set quarantined [els::deferred_quarantine $p]} qerr]} {
-            # The evidence could not be moved aside.  Leave the original bytes
-            # untouched and prohibit every queue write for this run.
-            set ::els::deferred_blocked 1
-            set ::els::deferred_notice "deferred-opens state corrupt — couldn't quarantine"
-            catch {els::log error "invalid deferred-open state at $p ($problem); quarantine failed: $qerr"}
-        } else {
-            set ::els::deferred_notice "quarantined corrupt deferred-opens state"
-            catch {els::log warn "invalid deferred-open state at $p ($problem); preserved as $quarantined"}
-        }
-    }
-}
-proc els::deferred_save {} {
-    if {$::els::deferred_blocked} {
-        catch {els::log error "refusing to overwrite corrupt deferred-open state"}
-        catch {els::status_note "deferred-opens blocked — corrupt state kept"}
-        return 0
-    }
-    set p [els::deferred_path]
-    if {$p eq ""} { return 0 }
-    if {[catch {
-        set payload [dict create schema 1 files [els::deferred_sanitize $::els::deferred_files]]
-        encoding convertto -profile strict utf-8 $payload
-    } bytes]} {
-        catch {els::log warn "could not encode deferred-open state without loss: $bytes"}
-        catch {els::status_note "deferred-opens list has a bad path — not saved"}
-        return 0
-    }
-    set err [els::write_atomic $p $bytes ".els-deferred-[pid]-[clock clicks].tmp"]
-    if {$err ne ""} {
-        catch {els::log warn "could not persist deferred opens to $p: $err"}
-        catch {els::status_note "couldn't save deferred-opens list"}
-        return 0
-    }
-    return 1
-}
-proc els::deferred_contains {p} {
-    foreach old $::els::deferred_files {
-        if {[els::same_path $old $p]} { return 1 }
-    }
-    return 0
-}
-proc els::deferred_add {p} {
-    set n [els::session_path $p]
-    if {$n eq "" || [els::deferred_contains $n]} { return 0 }
-    set old $::els::deferred_files
-    lappend ::els::deferred_files $n
-    if {![els::deferred_save]} {
-        # The queue is a durability promise.  Never claim success for a path
-        # that exists only in RAM and would vanish at the next process exit.
-        set ::els::deferred_files $old
-        if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
-        return 0
-    }
-    if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
-    return 1
-}
-proc els::deferred_remove_many {paths} {
-    set before $::els::deferred_files
-    set kept {}
-    set changed 0
-    foreach queued $::els::deferred_files {
-        set remove 0
-        foreach p $paths {
-            if {[els::same_path $queued $p]} { set remove 1 ; break }
-        }
-        if {$remove} { set changed 1 } else { lappend kept $queued }
-    }
-    if {!$changed} { return 0 }
-    set ::els::deferred_files $kept
-    if {![els::deferred_save]} {
-        # Retaining an already-open duplicate is harmless; forgetting an entry
-        # without durably publishing that removal is not.  Roll memory back too.
-        set ::els::deferred_files $before
-        if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
-        return 0
-    }
-    if {[winfo exists .deferred]} { els::deferred_dialog_refresh }
-    return 1
-}
 # Single choke point for resolving the config location: the instant the dir is
 # known, pin it and make sure it exists -- so settings, the backup ring, and (if
 # enabled) autosave all have a home before the first save or a session restore.
@@ -1176,6 +1022,27 @@ proc els::drive_type {path} {
     if {[catch {els::win_drive_type $path} dt]} { return unknown }
     return $dt
 }
+# {totalPhys availPhys} in bytes, or {0 0} when the native helper is absent (a dev
+# interp without winfs.dll) or errors.  {0 0} means "unknown" -> callers must NOT
+# refuse, so a missing helper never blocks an open (mirrors drive_type's "unknown").
+proc els::meminfo {} {
+    if {[catch {els::win_meminfo} m] || [llength $m] != 2} { return {0 0} }
+    return $m
+}
+# Would loading a $size-byte file project past a safe fraction of AVAILABLE RAM?
+# Fires only on genuinely fatal sizes (size*8 > avail*0.8 -> wouldn't fit even at
+# the worst-case ~10x expansion); merely-slow files are left to the warn prompt.
+proc els::open_would_oom {size} {
+    # (1) absolute ceiling: unconditionally refuse a file this big -- Tk can't hold
+    # it regardless of free RAM, and this needs no native helper, so the refuse is
+    # never silently disabled by a missing win_meminfo.
+    if {$size >= $::els::OPEN_HARD_CAP} { return 1 }
+    # (2) RAM-relative: on a smaller/low-RAM machine, refuse a file whose projected
+    # peak wouldn't fit in available physical memory.  Unknown RAM -> defer to (1).
+    lassign [els::meminfo] total avail
+    if {$avail <= 0} { return 0 }
+    return [expr {double($size) * $::els::OPEN_OOM_MULT > double($avail) * $::els::OPEN_OOM_RESERVE_FRAC}]
+}
 proc els::remote_path {path} {
     set slash [string map {\\ /} $path]
     if {[string match -nocase {//?/UNC/*} $slash]} { return 1 }
@@ -1240,139 +1107,6 @@ proc els::session_current_active {} {
 }
 proc els::session_set_restore {} {
     els::save_geometry
-}
-
-# ---- deferred large-file opens ------------------------------------------
-# The queue is intentionally modeless: it is the one foreground place where a
-# user can inspect paths gathered by startup/session code and explicitly
-# consent to the memory cost of opening them.
-proc els::deferred_dialog_selected {} {
-    set lb .deferred.f.list.lb
-    if {![winfo exists $lb]} { return {} }
-    set out {}
-    foreach i [$lb curselection] {
-        if {$i >= 0 && $i < [llength $::els::deferred_files]} {
-            lappend out [lindex $::els::deferred_files $i]
-        }
-    }
-    return $out
-}
-proc els::deferred_dialog_refresh {} {
-    set lb .deferred.f.list.lb
-    if {![winfo exists $lb]} { return }
-    set selected [els::deferred_dialog_selected]
-    $lb delete 0 end
-    foreach p $::els::deferred_files { $lb insert end [els::display_path $p] }
-    foreach p $selected {
-        set i 0
-        foreach q $::els::deferred_files {
-            if {[els::same_path $p $q]} { $lb selection set $i ; break }
-            incr i
-        }
-    }
-    if {![llength [$lb curselection]] && [llength $::els::deferred_files]} {
-        $lb selection set 0
-        $lb activate 0
-        $lb see 0
-    }
-    set state [expr {[llength $::els::deferred_files] ? "normal" : "disabled"}]
-    .deferred.f.buttons.open configure -state $state
-    .deferred.f.buttons.forget configure -state $state
-}
-proc els::deferred_dialog_select_all {} {
-    set lb .deferred.f.list.lb
-    if {[winfo exists $lb] && [$lb size]} { $lb selection set 0 end }
-}
-proc els::deferred_dialog_open {} {
-    set paths [els::deferred_dialog_selected]
-    foreach p $paths {
-        # This button is deliberate foreground consent.  Bypass the threshold,
-        # but retain the normal open error dialog; a failed open stays queued.
-        els::open $p 0 0 1
-    }
-    if {[winfo exists .deferred.f.list.lb]} { focus .deferred.f.list.lb }
-}
-proc els::deferred_dialog_forget {} {
-    set paths [els::deferred_dialog_selected]
-    if {[llength $paths]} { els::deferred_remove_many $paths }
-    if {[winfo exists .deferred.f.list.lb]} { focus .deferred.f.list.lb }
-}
-proc els::deferred_dialog {} {
-    set top .deferred
-    if {[winfo exists $top]} {
-        wm deiconify $top
-        raise $top
-        focus $top.f.list.lb
-        return
-    }
-    toplevel $top -bg $::els::PAGE
-    wm withdraw $top
-    if {$::els::probe_quiet || (![catch {wm attributes . -alpha} rootAlpha] && $rootAlpha == 0.0)} {
-        catch {wm attributes $top -alpha 0.0}
-    }
-    wm title $top "Deferred Opens"
-    wm transient $top .
-    ttk::frame $top.f -padding 16
-    pack $top.f -fill both -expand 1
-    ttk::label $top.f.h -text "Files waiting for a deliberate open" -font elsUIb \
-        -foreground $::els::INK
-    ttk::label $top.f.s -font elsUI -foreground $::els::MUTED -justify left \
-        -text "Large files received during startup or session restore are held here."
-    grid $top.f.h -row 0 -column 0 -sticky w -pady {0 3}
-    grid $top.f.s -row 1 -column 0 -sticky w -pady {0 12}
-    ttk::frame $top.f.list
-    set lb $top.f.list.lb
-    listbox $lb -height 10 -width 72 -selectmode extended -exportselection 0 \
-        -font elsUI -bg $::els::PAGE -fg $::els::INK \
-        -selectbackground $::els::SEL -selectforeground $::els::INK \
-        -highlightcolor $::els::CARET -highlightbackground $::els::HAIR \
-        -yscrollcommand [list $top.f.list.vs set] \
-        -xscrollcommand [list $top.f.list.hs set]
-    ttk::scrollbar $top.f.list.vs -orient vertical -command [list $lb yview]
-    ttk::scrollbar $top.f.list.hs -orient horizontal -command [list $lb xview]
-    grid $lb -row 0 -column 0 -sticky nsew
-    grid $top.f.list.vs -row 0 -column 1 -sticky ns
-    grid $top.f.list.hs -row 1 -column 0 -sticky ew
-    grid columnconfigure $top.f.list 0 -weight 1
-    grid rowconfigure $top.f.list 0 -weight 1
-    grid $top.f.list -row 2 -column 0 -sticky nsew -pady {0 12}
-    ttk::frame $top.f.buttons
-    ttk::button $top.f.buttons.open -text "Open selected" -style Dialog.TButton \
-        -default active -command els::deferred_dialog_open
-    ttk::button $top.f.buttons.forget -text "Forget selected" -style Dialog.TButton \
-        -command els::deferred_dialog_forget
-    ttk::button $top.f.buttons.close -text Close -style Dialog.TButton \
-        -command [list destroy $top]
-    grid $top.f.buttons.open -row 0 -column 0 -padx {0 6}
-    grid $top.f.buttons.forget -row 0 -column 1 -padx {0 6}
-    grid $top.f.buttons.close -row 0 -column 2
-    grid $top.f.buttons -row 3 -column 0 -sticky e
-    grid columnconfigure $top.f 0 -weight 1
-    grid rowconfigure $top.f 2 -weight 1
-    bind $lb <Control-KeyPress-a> {els::deferred_dialog_select_all; break}
-    bind $lb <Control-KeyPress-A> {els::deferred_dialog_select_all; break}
-    bind $lb <KeyPress-Return> {els::deferred_dialog_open; break}
-    bind $lb <KeyPress-KP_Enter> {els::deferred_dialog_open; break}
-    bind $lb <KeyPress-Delete> {els::deferred_dialog_forget; break}
-    bind $lb <Double-Button-1> {els::deferred_dialog_open; break}
-    bind $top <Escape> [list destroy $top]
-    # Enter also accepts from the -default active "Open selected" button after Tab
-    # (Tk 9's TButton ignores Return); the listbox's own Return binding breaks, so
-    # this toplevel binding never double-fires when the list has focus (R21).
-    bind $top <Return>   els::deferred_dialog_open
-    bind $top <KP_Enter> els::deferred_dialog_open
-    wm protocol $top WM_DELETE_WINDOW [list destroy $top]
-    els::deferred_dialog_refresh
-    update idletasks
-    set width [winfo reqwidth $top]
-    set height [winfo reqheight $top]
-    wm minsize $top 520 $height
-    wm resizable $top 1 0
-    set x [expr {[winfo rootx .] + ([winfo width .] - $width) / 2}]
-    set y [expr {[winfo rooty .] + ([winfo height .] - $height) / 2}]
-    wm geometry $top +$x+$y
-    wm deiconify $top
-    focus $lb
 }
 
 # ---- recent files -------------------------------------------------------
@@ -2058,7 +1792,6 @@ proc els::build {} {
     if {$::els::config_path eq ""} { els::config_resolve_existing }
     after idle els::find_prune_stale
     catch {els::load_geometry}   ;# backstop: NO config content may abort build
-    els::deferred_load
     wm minsize . 360 240
     wm protocol . WM_DELETE_WINDOW els::quit
     wm protocol . WM_SAVE_YOURSELF els::session_end   ;# OS logout/restart/shutdown
@@ -2072,7 +1805,6 @@ proc els::build {} {
     menu .menu.file.recent
     .menu.file add cascade -label "Open Recent" -menu .menu.file.recent
     els::recent_rebuild
-    .menu.file add command -label "Deferred Opens..." -command els::deferred_dialog
     .menu.file add command -label "Reload from Disk" -command els::reload
     .menu.file add checkbutton -label "Restore Previous Session" \
         -variable ::els::restore_session -command els::session_set_restore
@@ -2394,9 +2126,6 @@ proc els::build {} {
 
     # start with one empty document
     els::new_doc
-    if {$::els::deferred_notice ne ""} {
-        after idle [list els::status_note $::els::deferred_notice]
-    }
 }
 
 # ---- documents ----------------------------------------------------------
@@ -2433,7 +2162,7 @@ proc els::text_proxy_destroy {id public native} {
     catch {rename $native {}}
 }
 
-proc els::new_doc {{path ""}} {
+proc els::new_doc {{path ""} {lazy 0}} {
     variable docs
     variable seq
     variable docPath
@@ -2486,6 +2215,7 @@ proc els::new_doc {{path ""}} {
     set ::els::docBom($id) 0
     set ::els::docEol($id) [els::default_eol]   ;# platform-native for NEW docs
     set ::els::docRaw($id) ""
+    if {$lazy} { els::become_lazy $id }   ;# placeholder: mark lazy + disable the buffer (glyph renders in make_tab)
     lappend docs $id
     els::make_tab $id
     els::switch_to $id
@@ -2546,6 +2276,117 @@ proc els::switch_to {id} {
     after idle els::update_vscroll
     after idle els::update_hscroll
 }
+# ---- lazy placeholder tabs --------------------------------------------------
+# A placeholder is a real tab (in ::els::docs, saved in the session, drawn in the
+# strip) whose docPath is set but whose content is NOT loaded: docRaw is "", the
+# buffer is empty and -state disabled, and docLazy($id) is set.  Startup / session
+# restore uses one for a large or network file so launch never freezes or blocks
+# on a share; it materializes (loads, interactively) on the user's first activation.
+#
+# Freeze doc $id into a placeholder: mark it lazy, make the buffer read-only, arm a
+# keypress to load it.  Used by new_doc (lazy=1) and make_placeholder's reuse path.
+proc els::become_lazy {id} {
+    set ::els::docLazy($id) 1
+    set w [els::W $id]
+    catch {$w configure -state disabled}
+    bind $w <KeyPress> [list els::lazy_key $id]
+}
+# A key pressed on a not-yet-loaded placeholder loads it (and is swallowed so it
+# doesn't type into the freshly-loaded buffer); once loaded this is a cheap no-op.
+proc els::lazy_key {id} {
+    if {[info exists ::els::docLazy($id)]} {
+        els::materialize_tab $id
+        return -code break
+    }
+}
+# Create (or reuse the pristine active) tab as a placeholder for $path, without
+# reading it.  Returns the id (non-empty, so session_restore records it as restored).
+proc els::make_placeholder {path reason} {
+    variable active
+    variable docPath
+    if {[els::pristine $active]} {
+        set id $active
+        set docPath($id) $path
+        els::become_lazy $id
+        els::update_tab $id
+        els::switch_to $id
+    } else {
+        set id [els::new_doc $path 1]   ;# lazy=1
+    }
+    set ::els::last_open_outcome placeholder
+    return $id
+}
+# User activated a tab (release-click or keypress): load it now if it's a
+# placeholder, else just show it.
+proc els::activate_tab {id} {
+    if {[info exists ::els::docLazy($id)]} { els::materialize_tab $id } else { els::switch_to $id }
+}
+# Load a placeholder's file into its OWN id -- NEVER via els::open, whose
+# duplicate-path guard would just re-focus it.  Interactive: the 40 MB warn, the
+# OOM refuse, and a dead-share block all apply (the user asked for it).  On ANY
+# non-success the tab stays a placeholder; nothing is ever lost.
+proc els::materialize_tab {id} {
+    if {$id ni $::els::docs || ![info exists ::els::docLazy($id)]} { return }
+    els::switch_to $id
+    set p $::els::docPath($id)
+    set w [els::W $id]
+    catch {. configure -cursor watch} ; update idletasks
+    set rc [catch {els::read_binary_guarded $p 0 0} readResult]
+    catch {. configure -cursor ""}
+    if {$rc} {
+        els::message_box -parent . -icon error -title els -message "Cannot open file:\n$readResult"
+        return
+    }
+    set st [dict get $readResult state]
+    if {$st ne "ok"} {
+        switch -- $st {
+            refused {
+                if {[dict exists $readResult reason] && [dict get $readResult reason] eq "longline"} {
+                    set kc [expr {$::els::LONGLINE_CHARS / 1000}]
+                    els::message_box -parent . -icon error -title els \
+                        -message "\"[file tail $p]\" has a line longer than ${kc}k characters.\nels won't open it — a line that long freezes the editor when you scroll."
+                } else {
+                    set gb [format %.1f [expr {[dict get $readResult size] / 1073741824.0}]]
+                    els::message_box -parent . -icon error -title els \
+                        -message "\"[file tail $p]\" is about $gb GB — too large to open without running out of memory.\nels won't open it, to avoid crashing and losing your other tabs."
+                }
+            }
+            failed { els::open_quiet_failure $p [dict get $readResult error] }
+        }
+        return   ;# cancelled / refused / failed -> stays a placeholder
+    }
+    # decode+insert is the part that can OOM; keep it in one catch, re-freeze on failure
+    catch {. configure -cursor watch} ; update idletasks
+    set rc2 [catch {
+        $w configure -state normal
+        els::install_content $id [dict get $readResult bytes]
+    } err]
+    catch {. configure -cursor ""}
+    if {$rc2} {
+        catch {$w delete 1.0 end ; $w edit reset ; $w edit modified 0 ; $w configure -state disabled}
+        els::message_box -parent . -icon error -title els -message "Cannot open file:\n$err"
+        return   ;# stays a placeholder
+    }
+    unset -nocomplain ::els::docLazy($id)
+    $w mark set insert 1.0 ; $w see insert
+    if {[info exists ::els::docDecodeLossy($id)]} {
+        els::status_note "lossy decode — try Reopen with Encoding"
+    }
+    els::update_tab $id ; els::settitle ; els::refresh_view
+    els::recent_add $p
+    set ::els::last_open_outcome opened
+}
+# A tab press shows the tab immediately (cheap); the actual load waits for RELEASE
+# so dragging a placeholder to reorder never kicks off a multi-second foreground load.
+proc els::tab_press {id rootX} {
+    set ::els::tab_press_id $id
+    set ::els::tab_press_x  $rootX
+    set ::els::tab_dragged  0
+    els::switch_to $id
+}
+proc els::tab_release {id} {
+    if {$::els::tab_press_id eq $id && !$::els::tab_dragged} { els::activate_tab $id }
+}
 proc els::cycle {dir} {
     variable docs
     variable active
@@ -2588,7 +2429,7 @@ proc els::close_doc {id} {
         ::els::savedSig($id) ::els::savedSigPath($id) \
         ::els::docDiskState($id) ::els::docDiskMeta($id) \
         ::els::docDiskContent($id) ::els::docDiskDetail($id) ::els::docDiskDeepAt($id) \
-        ::els::docExtModPause($id) ::els::loading($id) \
+        ::els::docExtModPause($id) ::els::loading($id) ::els::docLazy($id) \
         ::els::docEpoch($id)
     if {$active eq $id} { set active "" }
     if {[llength $docs] == 0} {
@@ -2672,6 +2513,7 @@ proc els::tab_elide_identity {s max} {
 # a dirty bullet and a decoding-replacement warning.
 proc els::tab_markers {id} {
     set marks ""
+    if {[info exists ::els::docLazy($id)]} { append marks "○" }   ;# not loaded yet
     if {[els::doc_dirty $id]} { append marks "•" }
     if {[info exists ::els::docDecodeLossy($id)]} { append marks "�" }
     if {$marks ne ""} { append marks " " }
@@ -2749,6 +2591,7 @@ proc els::tab_tip {id} {
     if {![info exists ::els::docPath($id)]} { return "" }
     set p $::els::docPath($id)
     if {$p eq ""} { return "" } else { set tip [els::path_tip $p] }
+    if {[info exists ::els::docLazy($id)]} { append tip "\nNot loaded — click to open" }
     if {[info exists ::els::docDecodeLossy($id)]} { append tip "\nContains decoding replacement characters" }
     return $tip
 }
@@ -2762,8 +2605,12 @@ proc els::make_tab {id} {
     pack $tf.name  -side left
     pack $tf.close -side right
     pack $tf -side left -padx {0 1} -pady {2 0} -fill y
-    bind $tf       <Button-1> [list els::switch_to $id]
-    bind $tf.name  <Button-1> [list els::switch_to $id]
+    bind $tf       <Button-1> [list els::tab_press $id %X]
+    bind $tf.name  <Button-1> [list els::tab_press $id %X]
+    # load-on-RELEASE (not press) so a placeholder tab can be dragged to reorder
+    # without kicking off its foreground load; a plain click still activates it
+    bind $tf       <ButtonRelease-1> [list els::tab_release $id]
+    bind $tf.name  <ButtonRelease-1> [list els::tab_release $id]
     # drag a tab left/right to reorder it (crossing a neighbour's midpoint
     # swaps places; the docs list and the saved session follow the new order)
     bind $tf       <B1-Motion> [list els::tab_drag $id %X]
@@ -2782,6 +2629,9 @@ proc els::make_tab {id} {
 # event re-evaluates), so a plain click never reorders anything.
 proc els::tab_drag {id rootX} {
     variable docs
+    # any motion past a few px is a real drag, not a click: suppress the
+    # load-on-release so reordering a placeholder never triggers its load
+    if {abs($rootX - $::els::tab_press_x) > 4} { set ::els::tab_dragged 1 }
     set idx [lsearch -exact $docs $id]
     if {$idx < 0} { return }
     foreach other $docs {
@@ -3761,17 +3611,38 @@ proc els::update_hscroll {} {
     variable active
     variable hs_shown
     if {$active eq "" || ![winfo exists [els::W $active]]} { return }
+    set w [els::W $active]
     if {$::els::word_wrap} {
         set need 0
     } else {
-        lassign [[els::W $active] xview] first last
+        lassign [$w xview] first last
         .hs set $first $last   ;# re-feed after a tab switch (same as update_vscroll)
         set need [expr {$first > 0.0001 || $last < 0.9999}]
     }
-    if {$need != $hs_shown} {
-        set hs_shown $need
-        if {$need} { grid .hs } else { grid remove .hs }
-    }
+    if {$need == $hs_shown} { return }
+    # Anti-flicker: SHOWING the h-bar steals a row of height, which can push the
+    # widest line below the fold -> the overflow vanishes -> we'd HIDE it -> the row
+    # returns -> it overflows again -> show ... a real limit cycle (worst with line
+    # numbers off at the top of a tall file, where a wide line sits right at the
+    # fold).  So suppress a HIDE that is merely the bar's own vertical reflow: only
+    # hide once something the decision actually depends on has changed since we last
+    # toggled -- a horizontal or vertical scroll, a width change, or an edit (the sig
+    # deliberately excludes viewport HEIGHT, which is the only thing the bar's toggle
+    # moves).  Showing stays immediate.
+    set sig [els::hscroll_sig $w]
+    if {!$need && $sig eq $::els::hs_gate_sig} { return }
+    set hs_shown $need
+    if {$need} { grid .hs } else { grid remove .hs }
+    set ::els::hs_gate_sig $sig
+}
+# The state the h-bar's show/hide genuinely depends on: horizontal + vertical scroll
+# position, text width, and the edit epoch.  A pure vertical reflow (the bar
+# stealing/returning height at the same spot) leaves ALL of these unchanged, so it
+# can't flip the decision; a real scroll/resize/edit changes one and re-enables it.
+proc els::hscroll_sig {w} {
+    set ep [expr {[info exists ::els::docEpoch($::els::active)] ? $::els::docEpoch($::els::active) : 0}]
+    return [list [format %.4f [lindex [$w xview] 0]] \
+                 [format %.4f [lindex [$w yview] 0]] [winfo width $w] $ep]
 }
 proc els::hscroll {args} {
     set w [els::T]
@@ -4001,6 +3872,58 @@ proc els::detect_eol {text} {
     if {$cr > 0} { return cr }
     return lf
 }
+# ---- the single decode -> normalise -> insert applier -----------------------
+# Shared by open / reload_from_disk / reopen_with (and, later, placeholder
+# materialize) — the ONE UI-thread seam a future async loader feeds already-read
+# bytes into.  Replaces the whole buffer of doc $id, sets its enc/BOM/EOL/raw +
+# saved-signature baseline + lossy marker, and returns 1 iff the decode was
+# lossy.  The caller owns caret placement, docPath, and any status note.
+# docPath($id) MUST already be set — cache_saved_sig pins the R3 change-detection
+# baseline to it.
+# True if $text has a line (run with no line break) at least $thresh long.  Works on
+# RAW, undecoded bytes with any EOL convention (LF, CRLF, or classic-Mac CR-only):
+# the open path scans bytes with it before decoding, to refuse a file whose lines
+# would freeze Tk's layout.  We map CR->LF up front (one O(n) pass) so a single
+# forward \n-search stays O(n) — searching for an absent \r per line would rescan to
+# end-of-string every time, i.e. O(n^2) on a big LF-only file.  string first is a
+# fast C-level search and we early-exit on the first long line; this also avoids a
+# `[^\n]{N,}` regex, which Tcl compiles by replicating the atom N times — for N in
+# the tens of thousands that hangs on its own.
+proc els::has_long_line {text thresh} {
+    set text [string map [list \r \n] $text]
+    set len [string length $text]
+    set i 0
+    while {$i < $len} {
+        set nl [string first "\n" $text $i]
+        if {$nl < 0} { return [expr {$len - $i >= $thresh}] }
+        if {$nl - $i >= $thresh} { return 1 }
+        set i [expr {$nl + 1}]
+    }
+    return 0
+}
+proc els::apply_decoded {id raw enc bom} {
+    set w [els::W $id]
+    set text [els::decode $raw $enc $bom declossy]
+    set eol  [els::detect_eol $text]
+    set text [string map [list \r\n \n \r \n] $text]
+    $w delete 1.0 end
+    $w insert end $text
+    set ::els::docEnc($id) $enc
+    set ::els::docBom($id) $bom
+    set ::els::docEol($id) $eol
+    set ::els::docRaw($id) $raw
+    els::cache_saved_sig $id
+    if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
+    $w edit reset
+    $w edit modified 0
+    return $declossy
+}
+# Detect encoding + BOM from the raw bytes, then apply.  For callers that read
+# from disk (open / reload / placeholder materialize).
+proc els::install_content {id raw} {
+    lassign [els::detect_encoding $raw] enc bom
+    return [els::apply_decoded $id $raw $enc $bom]
+}
 proc els::enc_label {enc bom} {
     set m {utf-8 "UTF-8" utf-16le "UTF-16 LE" utf-16be "UTF-16 BE" \
            utf-32le "UTF-32 LE" utf-32be "UTF-32 BE"}
@@ -4224,26 +4147,14 @@ proc els::reopen_with {enc bom} {
                       \nUnsaved changes will be lost."]
         if {$ans ne "yes"} return
     }
-    set raw $::els::docRaw($id)
-    set text [els::decode $raw $enc $bom declossy]
-    set eol  [els::detect_eol $text]
-    set text [string map [list \r\n \n \r \n] $text]
     set w [els::W $id]
-    $w delete 1.0 end
-    $w insert end $text
+    # re-decode the cached bytes with the newly chosen encoding (no disk read)
+    els::apply_decoded $id $::els::docRaw($id) $enc $bom
     $w mark set insert 1.0 ; $w see insert
-    set ::els::docEnc($id) $enc
-    set ::els::docBom($id) $bom
-    set ::els::docEol($id) $eol
-    # re-evaluate the lossy-decode flag for the newly chosen encoding
-    if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
     # a NEW encoding voids any earlier "lossy is fine" consent for the old one
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id)
     unset -nocomplain ::els::docExtModPause($id)
     set ::els::docFormatPending($id) 1
-    els::cache_saved_sig $id
-    $w edit reset
-    $w edit modified 0
     els::update_tab $id
     els::settitle
     els::disk_probe $id
@@ -4330,30 +4241,43 @@ proc els::read_preflight_size {path} { return [file size $path] }
 # decision and (when accepted) the remaining uncapped aggregate read use the SAME channel,
 # closing the old stat/read race where a small file could grow after the size
 # check and then be loaded without consent.  Returns a dict with state ok,
-# deferred, cancelled, or failed; I/O errors still raise to the caller.
+# placeholder, refused, cancelled, or failed; I/O errors still raise to the caller.
+# Gate freshly-read bytes on line length: a file with ANY line >= LONGLINE_CHARS
+# freezes Tk's layout on a horizontal scroll (measured quadratic — seconds to
+# minutes), so els refuses to open it rather than degrade.  Scans the RAW bytes
+# (has_long_line breaks on CR or LF, so any EOL convention is handled) before the
+# expensive decode.  The threshold counts BYTES: exact for ASCII/UTF-8 (the case
+# that matters — minified JS/CSS/JSON), and a safe over-estimate for UTF-16/32 (a
+# multi-byte line is refused at a proportionally smaller char count, which is fine —
+# such a line is already near the slow zone).  Interactive -> refused (a clear
+# message, no tab); quiet startup/session work -> a placeholder tab, so the file is
+# neither silently dropped nor forced to pop a modal during restore (a later click
+# surfaces the refusal).
+proc els::longline_gate {bytes quiet} {
+    if {[els::has_long_line $bytes $::els::LONGLINE_CHARS]} {
+        if {$quiet} { return [dict create state placeholder reason longline] }
+        return [dict create state refused reason longline]
+    }
+    return [dict create state ok bytes $bytes]
+}
 proc els::read_binary_guarded {path quiet consent} {
-    # Quiet startup/session work must not touch an offline share before
-    # the UI is usable.  Persist it locally; explicit Deferred Open is consent
-    # for the potentially blocking network operation.
+    # Quiet startup/session work must not synchronously touch an offline share or
+    # post a modal from a timer: signal the caller to make a placeholder tab instead.
     if {$quiet && !$consent && [els::remote_path $path]} {
-        set existed [els::deferred_contains $path]
-        if {$existed || [els::deferred_add $path]} {
-            return [dict create state deferred new [expr {!$existed}] reason remote]
-        }
-        return [dict create state failed error "the deferred-open list could not be saved"]
+        return [dict create state placeholder reason remote]
     }
     # A cheap pre-stat avoids reading 25 MiB merely to ask an already-known
     # question.  Do it before opening the channel so a user can leave the prompt
     # up without pinning a replaceable Windows file handle.
     if {!$consent && ![catch {els::read_preflight_size $path} knownSize] && \
             $knownSize > $::els::OPEN_WARN_SIZE} {
-        if {$quiet} {
-            set existed [els::deferred_contains $path]
-            if {$existed || [els::deferred_add $path]} {
-                return [dict create state deferred new [expr {!$existed}] reason large]
-            }
-            return [dict create state failed error "the deferred-open list could not be saved"]
+        # A genuinely fatal size (wouldn't fit in AVAILABLE RAM even at worst-case
+        # expansion) is REFUSED outright -- never deferred or warned -- so it can't
+        # OOM the process and take every other unsaved tab down.  Refuse precedes warn.
+        if {[els::open_would_oom $knownSize]} {
+            return [dict create state refused size $knownSize reason oom]
         }
+        if {$quiet} { return [dict create state placeholder reason large] }
         set mb [expr {max(1, int(ceil($::els::OPEN_WARN_SIZE / 1048576.0)))}]
         set ans [els::message_box -parent . -icon warning -type yesno -title els \
             -message "\"[file tail $path]\" is larger than $mb MB.\nOpening it may take a while and use a lot of memory. Open it anyway?"]
@@ -4364,16 +4288,10 @@ proc els::read_binary_guarded {path quiet consent} {
     try {
         set prefix [els::_read_binary_prefix $fh $::els::OPEN_WARN_SIZE]
         if {[string length $prefix] <= $::els::OPEN_WARN_SIZE} {
-            return [dict create state ok bytes $prefix]
+            return [els::longline_gate $prefix $quiet]
         }
         if {!$consent} {
-            if {$quiet} {
-                set existed [els::deferred_contains $path]
-                if {$existed || [els::deferred_add $path]} {
-                    return [dict create state deferred new [expr {!$existed}] reason large]
-                }
-                return [dict create state failed error "the deferred-open list could not be saved"]
-            }
+            if {$quiet} { return [dict create state placeholder reason large] }
             set mb [expr {max(1, int(ceil($::els::OPEN_WARN_SIZE / 1048576.0)))}]
             set ans [els::message_box -parent . -icon warning -type yesno -title els \
                 -message "\"[file tail $path]\" is larger than $mb MB.\nOpening it may take a while and use a lot of memory. Open it anyway?"]
@@ -4382,7 +4300,7 @@ proc els::read_binary_guarded {path quiet consent} {
         # Explicit consent removes the guard entirely; do not impose a hidden
         # second ceiling.  Continue from the already-open channel.
         append prefix [els::_read_binary_channel $fh]
-        return [dict create state ok bytes $prefix]
+        return [els::longline_gate $prefix $quiet]
     } finally {
         catch {close $fh}
     }
@@ -4413,36 +4331,30 @@ proc els::reload_from_disk {id {quiet 0} {largeConsent 0}} {
             set err [dict get $readResult error]
             catch {els::log error "quiet reload failed for $p: $err"}
             catch {els::status_note "couldn't reload [file tail $p]"}
-        } elseif {$readState eq "deferred" && [dict get $readResult new]} {
-            set what [expr {([dict exists $readResult reason] && [dict get $readResult reason] eq "remote") \
-                ? "network reload deferred" : "large reload deferred"}]
-            catch {els::status_note "$what — File > Deferred Opens"}
+        } elseif {$readState eq "refused"} {
+            # the file on disk grew too large, or (externally) gained a line too long
+            # to open -- don't reload it (that would freeze/OOM); keep the current
+            # buffer and say why, rather than silently doing nothing.
+            set reason [expr {[dict exists $readResult reason] ? [dict get $readResult reason] : "oom"}]
+            set why [expr {$reason eq "longline" ? "now has a line too long to open" : "is now too large to open safely"}]
+            if {$quiet} {
+                catch {els::status_note "not reloaded — [file tail $p] $why"}
+            } else {
+                els::message_box -parent . -icon warning -title els \
+                    -message "\"[file tail $p]\" on disk $why.\nels won't reload it; your current buffer is unchanged."
+            }
         }
         return 0
     }
     set raw [dict get $readResult bytes]
     set w [els::W $id]
-    lassign [els::detect_encoding $raw] enc bom
-    set text [els::decode $raw $enc $bom declossy]
-    set eol  [els::detect_eol $text]
-    set text [string map [list \r\n \n \r \n] $text]
     set ins [$w index insert]
-    $w delete 1.0 end
-    $w insert end $text
+    els::install_content $id $raw
     catch {$w mark set insert $ins}   ;# keep the caret line where it can still land
     $w see insert
-    set ::els::docEnc($id) $enc
-    set ::els::docBom($id) $bom
-    set ::els::docEol($id) $eol
-    set ::els::docRaw($id) $raw
-    # re-reading disk can newly introduce (or clear) U+FFFD substitutions -> refresh
-    # the decode-lossy marker just as open/reopen_with do (always interactive here)
-    if {$declossy} { set ::els::docDecodeLossy($id) 1 } else { unset -nocomplain ::els::docDecodeLossy($id) }
+    # a fresh disk read voids any per-doc format/lossy consent and ext-change pause
     unset -nocomplain ::els::docLossyOk($id) ::els::docLossyPause($id) \
         ::els::docExtModPause($id) ::els::docFormatPending($id)
-    els::cache_saved_sig $id
-    $w edit reset
-    $w edit modified 0
     els::update_tab $id
     els::settitle
     els::disk_probe $id
@@ -4553,22 +4465,35 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     variable docPath
     foreach id $::els::docs {
         if {[info exists docPath($id)] && [els::same_path $docPath($id) $p]} {
-            els::switch_to $id
+            # explicitly re-opening a not-yet-loaded placeholder loads it now
+            if {!$quiet && [info exists ::els::docLazy($id)]} {
+                els::materialize_tab $id
+            } else {
+                els::switch_to $id
+            }
             if {!$noRecent} { els::recent_add $p }
-            els::deferred_remove_many [list $p]
             set ::els::last_open_outcome already
             return $id
+        }
+    }
+    # Quiet startup / session restore must not block on a share, load a huge file,
+    # or post a modal from a timer.  Route a large-or-network file to a placeholder
+    # TAB (materialized on the user's click), not to a synchronous load here.
+    if {$quiet} {
+        if {[els::remote_path $p]} { return [els::make_placeholder $p remote] }
+        if {![catch {els::read_preflight_size $p} sz] && $sz > $::els::OPEN_WARN_SIZE} {
+            return [els::make_placeholder $p large]
         }
     }
     # Large-file guard: the whole file is read, decoded, and held ~4x in RAM with no
     # way to cancel, so a mis-dropped multi-hundred-MB file wedges the editor.  Warn
     # before the read on an interactive open — and BEFORE creating a tab, so a "no"
-    # leaves no stray buffer.  A quiet startup/session path MUST NOT make
-    # that memory decision itself or post a modal from a timer: persist the path in
-    # Deferred Opens instead.  largeConsent is set only by that dialog's explicit
-    # Open selected action; once consented there is deliberately no absolute cap.
-    # The guard reads at most threshold+1 from the actual open channel.  A file
-    # that grows after a stat can no longer slip into an unbounded read.
+    # leaves no stray buffer.  (Quiet startup/session paths never reach here for a
+    # large-or-network file: they returned a placeholder tab above.)  largeConsent
+    # bypasses the warn (materializing a placeholder is itself the consent); once
+    # consented there is deliberately no cap below the OOM refuse.  The guard reads
+    # at most threshold+1 from the channel, so a file that grows after a stat can't
+    # slip into an unbounded read.
     catch {. configure -cursor watch} ; update idletasks
     set readRc [catch {set readResult [els::read_binary_guarded $p $quiet $largeConsent]} readErr]
     if {$readRc} {
@@ -4585,17 +4510,37 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     if {$readState ne "ok"} {
         catch {. configure -cursor ""}
         switch $readState {
-            deferred {
-                set ::els::last_open_outcome deferred
-                if {[dict get $readResult new]} {
-                    set what [expr {([dict exists $readResult reason] && [dict get $readResult reason] eq "remote") \
-                        ? "network file deferred" : "large file deferred"}]
-                    catch {els::status_note "$what — File > Deferred Opens"}
-                }
+            placeholder {
+                # a quiet read that turned out large/remote (e.g. the file grew past
+                # the preflight stat) -> fall back to a placeholder tab, don't load
+                set reason [expr {[dict exists $readResult reason] ? [dict get $readResult reason] : "large"}]
+                return [els::make_placeholder $p $reason]
             }
             failed {
                 set ::els::last_open_outcome failed
                 els::open_quiet_failure $p [dict get $readResult error]
+            }
+            refused {
+                # too large (OOM) or too-long-lined to open -- decline, no tab created
+                set ::els::last_open_outcome failed
+                set reason [expr {[dict exists $readResult reason] ? [dict get $readResult reason] : "oom"}]
+                if {$reason eq "longline"} {
+                    set kc [expr {$::els::LONGLINE_CHARS / 1000}]
+                    if {$quiet} {
+                        catch {els::status_note "has a line too long to open — [file tail $p]"}
+                    } else {
+                        els::message_box -parent . -icon error -title els \
+                            -message "\"[file tail $p]\" has a line longer than ${kc}k characters.\nels won't open it — a line that long freezes the editor when you scroll."
+                    }
+                } else {
+                    set gb [format %.1f [expr {[dict get $readResult size] / 1073741824.0}]]
+                    if {$quiet} {
+                        catch {els::status_note "too large to open safely — [file tail $p]"}
+                    } else {
+                        els::message_box -parent . -icon error -title els \
+                            -message "\"[file tail $p]\" is about $gb GB — too large to open without running out of memory.\nels won't open it, to avoid crashing and losing your other tabs."
+                    }
+                }
             }
             default { set ::els::last_open_outcome cancelled }
         }
@@ -4613,11 +4558,6 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     # can strand a watch cursor on the whole app.
     set rc [catch {
         set raw [dict get $readResult bytes]
-        # detect encoding + EOL, decode, normalise the buffer to LF internally
-        lassign [els::detect_encoding $raw] enc bom
-        set text [els::decode $raw $enc $bom declossy]
-        set eol [els::detect_eol $text]
-        set text [string map [list \r\n \n \r \n] $text]
         if {[els::pristine $active]} {
             set id $active
         } else {
@@ -4625,8 +4565,8 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
             set created 1
         }
         set w [els::W $id]
-        $w delete 1.0 end
-        $w insert end $text
+        set docPath($id) $p       ;# set BEFORE install_content: cache_saved_sig pins the baseline to docPath
+        set declossy [els::install_content $id $raw]
     } err]
     catch {. configure -cursor ""}
     if {$rc} {
@@ -4643,7 +4583,8 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
         if {$created && $id ne "" && [llength $::els::docs] > 1} {
             els::close_doc $id
         } elseif {$w ne ""} {
-            catch {$w delete 1.0 end ; $w edit reset ; $w edit modified 0}
+            # docPath was set before the (failed) load; clear it so the reused tab stays pristine
+            catch {$w delete 1.0 end ; $w edit reset ; $w edit modified 0 ; set docPath($id) ""}
         }
         if {$prevActive ne "" && $prevActive in $::els::docs} {
             els::switch_to $prevActive
@@ -4652,32 +4593,18 @@ proc els::open {{p ""} {quiet 0} {noRecent 0} {largeConsent 0}} {
     }
     $w mark set insert 1.0
     $w see insert
-    set docPath($id) $p
-    set ::els::docEnc($id) $enc
-    set ::els::docBom($id) $bom
-    set ::els::docEol($id) $eol
-    set ::els::docRaw($id) $raw
-    els::cache_saved_sig $id
-    # flag a lossy decode (U+FFFD substituted for bytes the encoding can't hold): the
-    # user sees the replacement chars in the buffer but might not realise they are
-    # decode artifacts and save over the original.  A durable tab marker plus, on an
-    # interactive open, one status note point them at Reopen with Encoding.
-    if {$declossy} {
-        set ::els::docDecodeLossy($id) 1
-        if {!$quiet} {
-            els::status_note "lossy decode — try Reopen with Encoding"
-        }
-    } else {
-        unset -nocomplain ::els::docDecodeLossy($id)
+    # install_content already set docEnc/BOM/EOL/raw + the saved-sig baseline + the
+    # lossy marker and reset the edit stack.  A lossy decode (U+FFFD substituted for
+    # bytes the encoding can't hold) gets one status note on an interactive open,
+    # pointing at Reopen with Encoding.
+    if {$declossy && !$quiet} {
+        els::status_note "lossy decode — try Reopen with Encoding"
     }
-    $w edit reset
-    $w edit modified 0
     els::switch_to $id
     els::update_tab $id
     els::settitle
     els::refresh_view
     if {!$noRecent} { els::recent_add $p }
-    els::deferred_remove_many [list $p]
     set ::els::last_open_outcome opened
     return $id
 }
@@ -5312,6 +5239,7 @@ proc els::autosave_flush_pending {} {
 }
 proc els::autosave_flush_doc {id} {
     if {!$::els::autosave} { return }
+    if {$id ne "" && [info exists ::els::docLazy($id)]} { return }   ;# never write a not-yet-loaded placeholder over its own file
     if {$::els::swap_suspend} {
         if {$id ne ""} { dict set ::els::autosave_pending $id 1 }
         if {$::els::autosave_after eq ""} {
@@ -5338,6 +5266,7 @@ proc els::save {{id ""} {quiet 0} {force 0}} {
     variable docPath
     if {$id eq ""} { set id $active }
     if {$id eq ""} { return 0 }
+    if {[info exists ::els::docLazy($id)]} { return 0 }   ;# placeholder buffer is empty+disabled; never save over its file
     if {$docPath($id) eq ""} {
         if {$quiet} { return 0 }      ;# auto-save never invents a filename
         return [els::saveas]
@@ -5574,10 +5503,10 @@ proc els::session_restore {} {
     set ::els::session_pending {}
     set restored {}
     foreach p [els::session_sanitize $::els::session_files] {
-        # A local file that is missing, or any file that fails to open right now
-        # (a disconnected drive or a file briefly locked by a backup tool), is not
-        # dropped from the session.  Obvious network paths take the separate durable
-        # Deferred Opens route in quiet open, without probing the share at startup.
+        # A missing local file is not dropped from the session (a briefly locked or
+        # offline file must survive).  Large-or-network files come back as placeholder
+        # tabs (quiet els::open makes one) and so still count as "restored" below --
+        # with no synchronous stat/read of a share at startup.
         if {![els::remote_path $p] && ![file exists $p]} {
             lappend ::els::session_pending $p
             continue
@@ -5589,13 +5518,11 @@ proc els::session_restore {} {
         if {$id ne ""} {
             lappend restored [list $p $id]
         } else {
-            # The open produced no tab: the file could not be read right now, OR it was
-            # deferred (a network path, or larger than the open-warning size).  Keep it
-            # in the session either way -- session_pending is folded back into
+            # No tab at all: a genuine read failure (a missing/locked local file).
+            # Keep it in the session -- session_pending is folded back into
             # session_files by save_geometry, so dropping it here would silently erase
-            # the tab from every future startup, leaving it findable only via File >
-            # Deferred Opens.  A deferred path also lives in its own durable queue; the
-            # redundancy is harmless and self-heals the moment the file is opened (R05).
+            # the tab from every future startup (R05).  (Large/network files do NOT
+            # land here: quiet els::open returns a placeholder tab and counts above.)
             lappend ::els::session_pending $p
         }
     }
@@ -7732,6 +7659,8 @@ proc els::set_always_on_top {{persist 1}} {
 # Word wrap: soft-wrap long lines in every document.  The line-number gutter
 # (a Canvas, see els::draw_gutter) redraws from the text's dlineinfo, so wrapped
 # lines stay aligned automatically — refresh_view repaints it after the toggle.
+# (A file with a pathologically long line never reaches here: the open path refuses
+# it up front — see els::longline_gate — so no wrap mode has to lay such a line out.)
 proc els::set_wrap {{persist 1}} {
     variable docs
     set mode [expr {$::els::word_wrap ? "word" : "none"}]
@@ -7894,7 +7823,7 @@ proc els::startup_probe {report} {
         doc_bodies $bodies \
         doc_dirty $dirty \
         active_path [els::session_current_active] \
-        deferred $::els::deferred_files \
+        lazy [lmap id $::els::docs { if {![info exists ::els::docLazy($id)]} continue ; set ::els::docPath($id) }] \
         title [wm title .] \
         argv $::argv \
         argv0 $::argv0]
@@ -7980,6 +7909,11 @@ proc els::main {} {
             set fileArgs $::argv
         }
         els::build
+        # Load the native helper up front (the packaged exe registers it statically;
+        # a source/dev run loads build/winfs.dll here) so win_meminfo (the OOM refuse),
+        # win_drive_type (network detection) and the find workers are all available
+        # from the FIRST open — not lazily on first Find, which left the refuse blind.
+        catch {els::find_native_ready}
         # Start the disk observer now and keep it running for the whole session, so an
         # external rewrite is noticed within one interval no matter what — foreground or
         # background, focus change or none, window-activation event delivered or not.
@@ -8015,7 +7949,7 @@ proc els::main {} {
                 # Startup arguments are not yet an interactive event-loop action:
                 # never load a large one silently or surface an early modal.
                 els::open $f 1
-                if {$::els::last_open_outcome in {opened already deferred}} {
+                if {$::els::last_open_outcome in {opened already placeholder}} {
                     set openedArgs 1
                 } elseif {$::els::last_open_outcome eq "failed"} {
                     lappend failedArgs $f

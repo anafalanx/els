@@ -754,6 +754,30 @@ static int DriveType_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
     return TCL_OK;
 }
 
+/* ---- physical memory snapshot ---------------------------------------------
+ * els::win_meminfo -> {totalPhys availPhys}  (bytes, Tcl wide ints).
+ * GlobalMemoryStatusEx reads the LOCAL memory manager only -- it never blocks --
+ * so it is safe to call on Tk's event thread.  els::open_would_oom projects a
+ * file's worst-case peak working set against availPhys to REFUSE an open that
+ * would exhaust RAM and crash the session (taking every other unsaved tab down
+ * with it); the warn threshold covers merely-slow files, this covers fatal ones. */
+static int Meminfo_Cmd([[maybe_unused]] void *cd, Tcl_Interp *ip,
+                       int objc, Tcl_Obj *const objv[]) {
+    if (objc != 1) { Tcl_WrongNumArgs(ip, 1, objv, nullptr); return TCL_ERROR; }
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms)) {
+        Tcl_SetObjResult(ip, Tcl_ObjPrintf("GlobalMemoryStatusEx error %lu",
+                                           (unsigned long)GetLastError()));
+        return TCL_ERROR;
+    }
+    Tcl_Obj *r = Tcl_NewListObj(0, nullptr);
+    Tcl_ListObjAppendElement(ip, r, Tcl_NewWideIntObj((Tcl_WideInt)ms.ullTotalPhys));
+    Tcl_ListObjAppendElement(ip, r, Tcl_NewWideIntObj((Tcl_WideInt)ms.ullAvailPhys));
+    Tcl_SetObjResult(ip, r);
+    return TCL_OK;
+}
+
 int Winfs_Init(Tcl_Interp *ip) {
     if (Tcl_InitStubs(ip, "9.0", 0) == nullptr) return TCL_ERROR;
     WorkerState *workers = (WorkerState *)Tcl_GetAssocData(ip,
@@ -769,6 +793,7 @@ int Winfs_Init(Tcl_Interp *ip) {
     Tcl_CreateObjCommand(ip, "::els::win_open_folder",    OpenFolder_Cmd,    nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_fsync",          Fsync_Cmd,         nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_drive_type",     DriveType_Cmd,     nullptr, nullptr);
+    Tcl_CreateObjCommand(ip, "::els::win_meminfo",        Meminfo_Cmd,       nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_virtual_screen", VirtualScreen_Cmd, nullptr, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_worker_spawn_watch", WorkerSpawnWatch_Cmd, workers, nullptr);
     Tcl_CreateObjCommand(ip, "::els::win_worker_watch",   WorkerWatch_Cmd,   workers, nullptr);

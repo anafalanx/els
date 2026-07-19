@@ -970,7 +970,7 @@ test extmod-1.11 {a same-size middle rewrite with restored mtime PROMPTS (no sil
         -setup {els_reset} -cleanup {set ::els::SWAP_FILE_CRC_CAP 16777216} -body {
     # Keep the old cap low to prove it no longer changes authoritative hashing.
     set ::els::SWAP_FILE_CRC_CAP 100000
-    set base [string repeat A 200000]
+    set base [string repeat "AAAAAAAAAAAAAAAAAAAA\n" 10000] ;# 210k chars, short lines (a single 200k line would be refused as a long-line file)
     set p [els_tmpfile big_mid.txt $base]
     els::open $p ; set id $::els::active
     set originalMtime [file mtime $p]
@@ -986,7 +986,7 @@ test extmod-1.11 {a same-size middle rewrite with restored mtime PROMPTS (no sil
 
 test extmod-1.13 {quiet save pauses on a same-size same-mtime middle rewrite} \
         -setup {els_reset} -body {
-    set base [string repeat A 200000]
+    set base [string repeat "AAAAAAAAAAAAAAAAAAAA\n" 10000] ;# 210k chars, short lines (a single 200k line would be refused as a long-line file)
     set p [els_tmpfile big_mid_quiet.txt $base]
     els::open $p ; set id $::els::active ; set mt [file mtime $p]
     [els::W $id] insert end "local edit"
@@ -1001,7 +1001,7 @@ test extmod-1.13 {quiet save pauses on a same-size same-mtime middle rewrite} \
 test extmod-1.12 {a head-window rewrite of a >cap file still PROMPTS (control: crc-visible)} \
         -setup {els_reset} -cleanup {set ::els::SWAP_FILE_CRC_CAP 16777216} -body {
     set ::els::SWAP_FILE_CRC_CAP 100000
-    set base [string repeat A 200000]
+    set base [string repeat "AAAAAAAAAAAAAAAAAAAA\n" 10000] ;# 210k chars, short lines (a single 200k line would be refused as a long-line file)
     set p [els_tmpfile big_head.txt $base]
     els::open $p ; set id $::els::active
     [els::W $id] insert end "local edit"
@@ -1324,11 +1324,11 @@ test diskstate-1.7 {Save As moves an untitled document to the normal on-disk sta
 } -result {untitled 1 normal 1 {}}
 
 # ---- P2-c: large-file open guard + bounded undo (Wave 2) -------------------
-# The threshold is lowered per-test (a real 25 MB fixture would be slow + litter);
+# The threshold is lowered per-test (a real 40 MB fixture would be slow + litter);
 # -cleanup restores a large threshold so later tests never spuriously prompt.
 
 test bigfile-1.1 {a large-file open PROMPTS interactively; declining creates no tab} -setup {els_reset} \
-        -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+        -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
     set p [els_tmpfile big1.txt "0123456789 — more than five bytes\n"]
     set ::els::OPEN_WARN_SIZE 5
     set before [llength $::els::docs]
@@ -1338,31 +1338,67 @@ test bigfile-1.1 {a large-file open PROMPTS interactively; declining creates no 
 } -result {{} 1 1}
 
 test bigfile-1.2 {accepting the large-file prompt opens the file} -setup {els_reset} \
-        -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+        -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
     set p [els_tmpfile big2.txt "large content here\n"]
     set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbanswer yes
-    els::deferred_add $p
     set id [els::open $p]
-    list [expr {$id ne ""}] [els::same_path $::els::docPath($id) $p] \
-         [llength $::els::deferred_files]
-} -result {1 1 0}
+    list [expr {$id ne ""}] [els::same_path $::els::docPath($id) $p]
+} -result {1 1}
 
-test bigfile-1.3 {a quiet large-file open is persisted and deduplicated without prompting or loading} -setup {els_reset} \
-        -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
-    set p [els_tmpfile big3.txt "restored large file\n"]
-    set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbcount 0
+# The OOM refuse fires only when els::meminfo reports genuine memory pressure; the
+# native win_meminfo isn't loaded in this suite so els::meminfo returns {0 0} for
+# all other tests (never refusing).  Here we mock it small so a tiny fixture trips it.
+test oom-refuse-1.1 {a file whose projected memory exceeds available RAM is REFUSED — no tab, error, precedes the warn} \
+        -setup {els_reset ; rename ::els::meminfo ::els_saved_meminfo} \
+        -cleanup {set ::els::OPEN_WARN_SIZE 41943040 ; rename ::els::meminfo {} ; rename ::els_saved_meminfo ::els::meminfo} -body {
+    set p [els_tmpfile oom1.txt "0123456789 — well over the tiny threshold\n"]
+    set ::els::OPEN_WARN_SIZE 5
+    proc ::els::meminfo {} { return {1000 100} }      ;# avail 100 -> ceiling ~12 bytes -> refuse
     set before [llength $::els::docs]
-    set id1 [els::open $p 1]
-    set id2 [els::open $p 1]
-    set stored [raw_read [els::deferred_path]]
-    set ::els::deferred_files {}
-    els::deferred_load
-    list $id1 $id2 $::els_test_mbcount \
-         [expr {[llength $::els::docs] == $before}] \
-         [llength $::els::deferred_files] \
-         [els::same_path [lindex $::els::deferred_files 0] $p] \
-         [dict get $stored schema]
-} -result {{} {} 0 1 1 1 1}
+    set ::els_test_mbcount 0 ; set ::els_test_mbanswer yes
+    set rc [els::open $p]
+    list $rc [expr {[llength $::els::docs] == $before}] $::els::last_open_outcome \
+         [string match {*running out of memory*} [dict get $::els_test_mbargs -message]]
+} -result {{} 1 failed 1}
+
+test oom-refuse-1.2 {the same file opens when RAM is ample (the OOM net only fires under real pressure)} \
+        -setup {els_reset ; rename ::els::meminfo ::els_saved_meminfo} \
+        -cleanup {set ::els::OPEN_WARN_SIZE 41943040 ; rename ::els::meminfo {} ; rename ::els_saved_meminfo ::els::meminfo} -body {
+    set p [els_tmpfile oom2.txt "0123456789 — over the tiny threshold\n"]
+    set ::els::OPEN_WARN_SIZE 5
+    proc ::els::meminfo {} { return {68719476736 68719476736} }   ;# 64 GB avail -> no refuse
+    set ::els_test_mbanswer yes                                   ;# accept the warn prompt instead
+    set id [els::open $p]
+    list [expr {$id ne ""}] [els::same_path $::els::docPath($id) $p]
+} -result {1 1}
+
+# A pathologically long line freezes Tk's layout on a horizontal scroll, so els
+# refuses to open a file that has one.  The threshold is lowered per-test so fixtures
+# stay small.  Interactive -> refused (no tab); quiet/session-restore -> placeholder.
+test longline-refuse-1.1 {an interactive open of a too-long-lined file is refused, no tab created} \
+        -setup {els_reset} -cleanup {set ::els::LONGLINE_CHARS 50000} -body {
+    set ::els::LONGLINE_CHARS 100
+    set before [llength $::els::docs]
+    set p [els_tmpfile refuse.txt "[string repeat x 300]\ntail\n"]
+    set id [els::open $p 0 1]
+    list $id [expr {[llength $::els::docs] == $before}] $::els::last_open_outcome
+} -result {{} 1 failed}
+
+test longline-refuse-1.2 {a quiet (session-restore) open of a too-long-lined file becomes a placeholder} \
+        -setup {els_reset} -cleanup {set ::els::LONGLINE_CHARS 50000} -body {
+    set ::els::LONGLINE_CHARS 100
+    set p [els_tmpfile refuse-quiet.txt "[string repeat x 300]\n"]
+    set id [els::open $p 1 1]
+    list [expr {$id ne ""}] [info exists ::els::docLazy($id)] $::els::last_open_outcome
+} -result {1 1 placeholder}
+
+test longline-refuse-1.3 {a normal short-line file still opens normally} \
+        -setup {els_reset} -cleanup {set ::els::LONGLINE_CHARS 50000} -body {
+    set ::els::LONGLINE_CHARS 100
+    set p [els_tmpfile ok.txt "short\nlines\nonly\n"]
+    set id [els::open $p 0 1]
+    list [expr {$id ne ""}] [info exists ::els::docLazy($id)] $::els::last_open_outcome
+} -result {1 0 opened}
 
 test bigfile-1.4 {a normal (under-threshold) open never prompts} -setup {els_reset} -body {
     set p [els_tmpfile smallish.txt "small\n"]
@@ -1387,169 +1423,30 @@ test bigfile-1.6 {a throw during decode/insert (e.g. OOM) restores the busy curs
     catch {. configure -cursor ""}
 } -result {{} {}}
 
-test bigfile-1.7 {explicit deferred-open consent has no second prompt or absolute ceiling} \
-        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+test bigfile-1.7 {explicit consent opens a large file with no second prompt or absolute ceiling} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
     set p [els_tmpfile big7.txt [string repeat x 5000]]
     set ::els::OPEN_WARN_SIZE 1
-    els::deferred_add $p
     set ::els_test_mbcount 0
     set id [els::open $p 0 0 1]
     list [expr {$id ne ""}] $::els_test_mbcount \
-         [llength $::els::deferred_files] \
          [[els::W $id] count -chars 1.0 "end - 1 char"]
-} -result {1 0 0 5000}
+} -result {1 0 5000}
 
-test bigfile-1.8 {session restore defers a large file AND keeps it in the session so the tab never silently vanishes (R05)} \
-        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+test bigfile-1.8 {a quiet large-file open returns a placeholder tab whose path stays in the session (R05)} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
     set p [els_tmpfile big8.txt "large restored body\n"]
     set ::els::OPEN_WARN_SIZE 5
-    set ::els::session_files [list $p]
     set ::els_test_mbcount 0
-    set restored [els::session_restore]
-    # deferred (in the durable queue) AND retained in session_pending, so
-    # save_geometry keeps it in session_files instead of dropping it (R05).
-    list $restored $::els_test_mbcount [llength $::els::session_pending] \
-         [llength $::els::deferred_files] [els::deferred_contains $p]
-} -result {0 0 1 1 1}
-
-test bigfile-1.10 {a deferred-add write failure rolls memory back and reports failure} -setup {
-    els_reset
-    set p1 [els_tmpfile defer_txn_keep.txt "keep\n"]
-    set p2 [els_tmpfile defer_txn_add.txt "add\n"]
-    els::deferred_add $p1
-    set ::els::OPEN_WARN_SIZE 1
-    set beforeDisk [raw_read [els::deferred_path]]
-    rename ::els::write_atomic ::els::write_atomic_real
-    set ::deferred_write_calls 0
-    proc ::els::write_atomic {args} { incr ::deferred_write_calls ; return "injected queue write failure" }
-} -cleanup {
-    set ::els::OPEN_WARN_SIZE 26214400
-    catch {rename ::els::write_atomic {}}
-    if {[llength [info commands ::els::write_atomic_real]]} {
-        rename ::els::write_atomic_real ::els::write_atomic
-    }
-    unset -nocomplain ::deferred_write_calls
-} -body {
-    set rc [els::deferred_add $p2]
-    set beforeDocs [llength $::els::docs]
-    set quietRc [els::open $p2 1]
-    list $rc $quietRc $::deferred_write_calls [llength $::els::deferred_files] \
-         [els::deferred_contains $p1] [els::deferred_contains $p2] \
-         [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
-         [expr {[llength $::els::docs] == $beforeDocs}] \
-         [string match "*couldn't open*" [.sb.name cget -text]]
-} -result {0 {} 2 1 1 0 1 1 1}
-
-test bigfile-1.11 {a deferred-remove write failure retains the durable entry even after a successful open} -setup {
-    els_reset
-    set p [els_tmpfile defer_txn_remove.txt "large queued body\n"]
-    set ::els::OPEN_WARN_SIZE 1
-    els::deferred_add $p
-    rename ::els::write_atomic ::els::write_atomic_real
-    set ::deferred_write_calls 0
-    proc ::els::write_atomic {args} { incr ::deferred_write_calls ; return "injected queue write failure" }
-} -cleanup {
-    set ::els::OPEN_WARN_SIZE 26214400
-    catch {rename ::els::write_atomic {}}
-    if {[llength [info commands ::els::write_atomic_real]]} {
-        rename ::els::write_atomic_real ::els::write_atomic
-    }
-    unset -nocomplain ::deferred_write_calls
-} -body {
-    set removeRc [els::deferred_remove_many [list $p]]
-    set id [els::open $p 0 0 1]
-    set disk [raw_read [els::deferred_path]]
-    list $removeRc [expr {$id ne ""}] $::deferred_write_calls \
-         [els::deferred_contains $p] \
-         [els::same_path [lindex [dict get $disk files] 0] $p]
-} -result {0 1 2 1 1}
-
-test bigfile-1.14 {multi-entry deferred removal rolls memory and disk back on write failure} -setup {
-    els_reset
-    set p1 [els_tmpfile defer_many_1.txt "one\n"]
-    set p2 [els_tmpfile defer_many_2.txt "two\n"]
-    set p3 [els_tmpfile defer_many_3.txt "three\n"]
-    foreach p [list $p1 $p2 $p3] { els::deferred_add $p }
-    set beforeMem $::els::deferred_files
-    set beforeDisk [raw_read [els::deferred_path]]
-    rename ::els::write_atomic ::els::write_atomic_real
-    proc ::els::write_atomic {args} { return "injected multi-remove failure" }
-} -cleanup {
-    catch {rename ::els::write_atomic {}}
-    if {[llength [info commands ::els::write_atomic_real]]} {
-        rename ::els::write_atomic_real ::els::write_atomic
-    }
-} -body {
-    set rc [els::deferred_remove_many [list $p1 $p2]]
-    list $rc [expr {$::els::deferred_files eq $beforeMem}] \
-         [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
-         [lmap p [list $p1 $p2 $p3] {els::deferred_contains $p}]
-} -result {0 1 1 {1 1 1}}
-
-test deferred-state-1.1 {invalid UTF-8, schema, and exact parse are quarantined and reported} \
-        -setup {els_reset} -body {
-    set path [els::deferred_path]
-    set outcomes {}
-    foreach payload [list "\xff" \
-            [encoding convertto utf-8 [dict create schema 2 files {}]] \
-            [encoding convertto utf-8 [dict create schema 1 files {} extra x]] \
-            [encoding convertto utf-8 {schema 1 files \{}]] {
-        raw_write $path $payload
-        els::deferred_load
-        lappend outcomes [list [file exists $path] $::els::deferred_blocked \
-            [llength $::els::deferred_files] [expr {$::els::deferred_notice ne ""}]]
-    }
-    list $outcomes [llength [glob -nocomplain "$path.corrupt-*"]]
-} -result {{{0 0 0 1} {0 0 0 1} {0 0 0 1} {0 0 0 1}} 4}
-
-test deferred-state-1.2 {failed corruption quarantine blocks every overwrite of the evidence} \
-        -setup {
-            els_reset
-            set path [els::deferred_path]
-            raw_write $path "\xffbroken"
-            set before [raw_read $path]
-            rename ::els::deferred_quarantine ::els::deferred_quarantine_real
-            proc ::els::deferred_quarantine {path} { error "injected rename denial" }
-        } -cleanup {
-            catch {rename ::els::deferred_quarantine {}}
-            if {[llength [info commands ::els::deferred_quarantine_real]]} {
-                rename ::els::deferred_quarantine_real ::els::deferred_quarantine
-            }
-        } -body {
-    els::deferred_load
-    set add [els::deferred_add [els_tmpfile blocked_deferred.txt "body\n"]]
-    list $::els::deferred_blocked $add [expr {[raw_read $path] eq $before}] \
-         [llength $::els::deferred_files]
-} -result {1 0 1 0}
-
-test deferred-state-1.3 {a directory at the state-file path is corrupt state and is quarantined intact} \
-        -setup {els_reset} -body {
-    set path [els::deferred_path]
-    file mkdir $path
-    raw_write [file join $path evidence.txt] "preserve me"
-    els::deferred_load
-    set quarantined [glob -nocomplain "$path.corrupt-*"]
-    list [file exists $path] $::els::deferred_blocked \
-         [expr {$::els::deferred_notice ne ""}] [llength $quarantined] \
-         [expr {[llength $quarantined] == 1 &&
-                [file isdirectory [lindex $quarantined 0]] &&
-                [raw_read [file join [lindex $quarantined 0] evidence.txt]] eq "preserve me"}]
-} -result {0 0 1 1 1}
-
-test deferred-state-1.4 {an unpaired surrogate cannot be lossy-encoded and add rolls memory and disk back} \
-        -setup {els_reset} -body {
-    set keep [els_tmpfile deferred_encoding_keep.txt "keep\n"]
-    els::deferred_add $keep
-    set beforeMem $::els::deferred_files
-    set beforeDisk [raw_read [els::deferred_path]]
-    # A lexical UNC spelling keeps this deliberately malformed Tcl string away
-    # from filesystem normalization; strict UTF-8 must reject it, never replace it.
-    set malformed "//offline/share/[format %c 0xD800].txt"
-    set added [els::deferred_add $malformed]
-    list $added [expr {$::els::deferred_files eq $beforeMem}] \
-         [expr {[raw_read [els::deferred_path]] eq $beforeDisk}] \
-         [els::deferred_contains $keep]
-} -result {0 1 1 1}
+    set id [els::open $p 1]
+    # a large quiet open is now a lazy PLACEHOLDER tab: id non-empty, nothing read
+    # (docRaw empty), no modal, and its path is still part of the current session so
+    # save_geometry keeps it instead of dropping it (R05).
+    list [expr {$id ne ""}] $::els::last_open_outcome \
+         [info exists ::els::docLazy($id)] $::els::docRaw($id) \
+         $::els_test_mbcount \
+         [els::same_path [lindex [els::session_current_files] 0] $p]
+} -result {1 placeholder 1 {} 0 1}
 
 test quiet-open-1.1 {quiet startup-style open failure is logged, nonmodal, and not counted as opened} \
         -setup {els_reset} -body {
@@ -1567,7 +1464,7 @@ test quiet-open-1.1 {quiet startup-style open failure is logged, nonmodal, and n
          [expr {[file exists $log] && [string match "*quiet open failed*" [raw_read $log]]}]
 } -result {{} failed 0 1 1}
 
-test quiet-open-1.2 {quiet extended-UNC open defers durably before every document stat or read seam} \
+test quiet-open-1.2 {quiet extended-UNC open yields a placeholder tab before any document stat or read seam} \
         -setup {
             els_reset
             rename ::els::read_preflight_size ::els::read_preflight_size_real
@@ -1588,13 +1485,15 @@ test quiet-open-1.2 {quiet extended-UNC open defers durably before every documen
             unset -nocomplain ::unc_preflight_calls ::unc_read_calls
         } -body {
     set p {\\?\UNC\offline\share\quiet.txt}
-    set rc [els::open $p 1]
-    list $rc $::els::last_open_outcome [els::deferred_contains $p] \
-         [file exists [els::deferred_path]] $::unc_preflight_calls $::unc_read_calls \
-         $::els_test_mbcount
-} -result {{} deferred 1 1 0 0 0}
+    set id [els::open $p 1]
+    # a lazy placeholder tab, created without a single synchronous stat or read of
+    # the (offline) share and without a modal
+    list [expr {$id ne ""}] $::els::last_open_outcome \
+         [info exists ::els::docLazy($id)] $::els::docRaw($id) \
+         $::unc_preflight_calls $::unc_read_calls $::els_test_mbcount
+} -result {1 placeholder 1 {} 0 0 0}
 
-test quiet-open-1.3 {session restore routes UNC paths to the zero-probe durable queue} \
+test quiet-open-1.3 {session restore routes UNC paths to a zero-probe placeholder tab} \
         -setup {
             els_reset
             rename ::els::read_preflight_size ::els::read_preflight_size_real
@@ -1618,11 +1517,13 @@ test quiet-open-1.3 {session restore routes UNC paths to the zero-probe durable 
     set ::els::session_files [list $fromSession]
     set ::els::restore_session 1
     set restored [els::session_restore]
-    list $restored [els::deferred_contains $fromSession] \
+    set id $::els::active
+    list $restored [info exists ::els::docLazy($id)] $::els::docRaw($id) \
+         [els::same_path $::els::docPath($id) $fromSession] \
          $::unc_preflight_calls $::unc_read_calls $::els_test_mbcount
-} -result {0 1 0 0 0}
+} -result {1 1 {} 1 0 0 0}
 
-test bounded-read-1.1 {post-stat growth is caught by threshold+1 and durably deferred when quiet} \
+test bounded-read-1.1 {post-stat growth past the threshold yields a placeholder terminal state when quiet} \
         -setup {
             els_reset
             set ::els::OPEN_WARN_SIZE 5
@@ -1630,17 +1531,20 @@ test bounded-read-1.1 {post-stat growth is caught by threshold+1 and durably def
             rename ::els::read_preflight_size ::els::read_preflight_size_real
             proc ::els::read_preflight_size {path} { return 0 }
         } -cleanup {
-            set ::els::OPEN_WARN_SIZE 26214400
+            set ::els::OPEN_WARN_SIZE 41943040
             catch {rename ::els::read_preflight_size {}}
             if {[llength [info commands ::els::read_preflight_size_real]]} {
                 rename ::els::read_preflight_size_real ::els::read_preflight_size
             }
         } -body {
+    # the preflight stat reports 0 (mocked) so open commits to a load, then the
+    # channel read discovers the file is over the threshold: a quiet caller gets a
+    # non-modal terminal placeholder state (no prompt, no load), not a deferred call.
     set ::els_test_mbcount 0
-    set rc [els::open $p 1]
-    list $rc $::els::last_open_outcome [els::deferred_contains $p] \
-         $::els_test_mbcount [expr {[llength $::els::docs] == 1 && $::els::docPath($::els::active) eq ""}]
-} -result {{} deferred 1 0 1}
+    set id [els::open $p 1]
+    list [expr {$id ne ""}] $::els::last_open_outcome \
+         [info exists ::els::docLazy($id)] $::els::docRaw($id) $::els_test_mbcount
+} -result {1 placeholder 1 {} 0}
 
 test bounded-read-1.2 {foreground post-stat growth prompts once, then consent has no second cap} \
         -setup {
@@ -1650,7 +1554,7 @@ test bounded-read-1.2 {foreground post-stat growth prompts once, then consent ha
             rename ::els::read_preflight_size ::els::read_preflight_size_real
             proc ::els::read_preflight_size {path} { return 0 }
         } -cleanup {
-            set ::els::OPEN_WARN_SIZE 26214400 ; set ::els::IO_CHUNK 1048576
+            set ::els::OPEN_WARN_SIZE 41943040 ; set ::els::IO_CHUNK 1048576
             catch {rename ::els::read_preflight_size {}}
             if {[llength [info commands ::els::read_preflight_size_real]]} {
                 rename ::els::read_preflight_size_real ::els::read_preflight_size
@@ -1681,7 +1585,7 @@ test bounded-read-1.3 {all physical document reads are chunk-bounded even after 
             if {[llength [info commands ::els::read_preflight_size_real]]} {
                 rename ::els::read_preflight_size_real ::els::read_preflight_size
             }
-            set ::els::OPEN_WARN_SIZE 26214400 ; set ::els::IO_CHUNK 1048576
+            set ::els::OPEN_WARN_SIZE 41943040 ; set ::els::IO_CHUNK 1048576
             unset -nocomplain ::bounded_read_sizes
         } -body {
     set ::els_test_mbanswer yes
@@ -1694,7 +1598,7 @@ test bounded-read-1.3 {all physical document reads are chunk-bounded even after 
 } -result {1 1 1}
 
 test bounded-read-1.4 {large reload decline preserves buffer, raw bytes, signature, and dirty state; accept is uncapped} \
-        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
     set p [els_tmpfile bounded_reload.txt "small"]
     set id [els::open $p] ; set w [els::W $id]
     $w insert end " local"
@@ -1709,19 +1613,72 @@ test bounded-read-1.4 {large reload decline preserves buffer, raw bytes, signatu
          [els_text $id] $::els_test_mbcount [els::doc_dirty $id]
 } -result {0 1 1 {a much larger external replacement} 2 0}
 
-test bounded-read-1.5 {queued duplicate only activates an open dirty document and never discards edits} \
-        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400} -body {
-    set p [els_tmpfile bounded_reload_deferred.txt "old"]
+test bounded-read-1.5 {a quiet reload of a grown file preserves edits; a later explicit open reuses the same tab} \
+        -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
+    set p [els_tmpfile bounded_reload_grown.txt "old"]
     set id [els::open $p] ; [els::W $id] insert end " local edits"
     raw_write $p "a much larger replacement"
     set ::els::OPEN_WARN_SIZE 5 ; set ::els_test_mbcount 0
+    # the quiet reload finds the file grew past the threshold: it is a non-modal
+    # no-op (returns 0) that keeps the buffer's unsaved edits intact.
     set quiet [els::reload_from_disk $id 1]
-    set queued [els::deferred_contains $p]
     set before [els_text $id]
+    # a later explicit open of the same path reuses the SAME dirty tab, never a new
+    # one and never discarding the edits, with no prompt.
     set opened [els::open $p 0 0 1]
-    list $quiet $queued [expr {$opened eq $id}] [expr {[els_text $id] eq $before}] \
-         [els::doc_dirty $id] [els::deferred_contains $p] $::els_test_mbcount
-} -result {0 1 1 1 1 0 0}
+    list $quiet [expr {$opened eq $id}] [expr {[els_text $id] eq $before}] \
+         [els::doc_dirty $id] $::els_test_mbcount
+} -result {0 1 1 1 0}
+
+# ---- lazy placeholder tabs (the replacement for the old Deferred Opens) -------
+# A placeholder is a REAL tab whose file is not loaded yet: docLazy set, docPath
+# set, docRaw empty, its Text widget empty and disabled, and a "○" glyph in the
+# tab.  make_placeholder creates one without reading; materialize_tab loads it on
+# demand; save/autosave must never write an unloaded placeholder over its own file.
+
+test placeholder-1.1 {make_placeholder creates a lazy, disabled tab with the ○ marker and no read} -setup {els_reset} -body {
+    set p [els_tmpfile ph1.txt "placeholder body\n"]
+    set id [els::make_placeholder $p large]
+    list [expr {$id ne ""}] [info exists ::els::docLazy($id)] \
+         [els::same_path $::els::docPath($id) $p] $::els::docRaw($id) \
+         [[els::W $id] cget -state] \
+         [string match "*○*" [els::tab_markers $id]] \
+         $::els::last_open_outcome
+} -result {1 1 1 {} disabled 1 placeholder}
+
+test placeholder-1.2 {materialize_tab loads a placeholder into a live, enabled buffer} -setup {els_reset} -body {
+    set p [els_tmpfile ph2.txt "real content here"]
+    set id [els::make_placeholder $p large]
+    els::materialize_tab $id
+    list [info exists ::els::docLazy($id)] [els_text $id] \
+         [[els::W $id] cget -state] \
+         [string match "*○*" [els::tab_markers $id]] \
+         $::els::last_open_outcome
+} -result {0 {real content here} normal 0 opened}
+
+test placeholder-1.3 {a placeholder is never saved or auto-saved over its own file} -setup {els_reset} -body {
+    set ::els::autosave 1
+    set p [els_tmpfile ph3.txt "untouched bytes\n"]
+    set before [raw_read $p]
+    set id [els::make_placeholder $p large]
+    els::autosave_flush_doc $id           ;# must early-return, writing nothing
+    set afterAuto [raw_read $p]
+    set sv [els::save $id]                 ;# the data-loss guard: returns 0, writes nothing
+    set afterSave [raw_read $p]
+    list $sv [expr {$afterAuto eq $before}] [expr {$afterSave eq $before}]
+} -result {0 1 1}
+
+test placeholder-1.4 {session restore builds placeholders without reading the file} -setup {els_reset} \
+        -cleanup {set ::els::OPEN_WARN_SIZE 41943040} -body {
+    set p [els_tmpfile ph4.txt "large restored body\n"]
+    set ::els::OPEN_WARN_SIZE 5
+    set ::els::session_files [list $p]
+    set ::els_test_mbcount 0
+    set restored [els::session_restore]
+    set id $::els::active
+    list $restored [info exists ::els::docLazy($id)] $::els::docRaw($id) \
+         $::els_test_mbcount [els::same_path $::els::docPath($id) $p]
+} -result {1 1 {} 0 1}
 
 test channel-close-1.1 {open closes its channel when binary configuration/read throws} -setup {
     els_reset
@@ -1868,72 +1825,56 @@ test bk-1.16 {a backward clock step does not delete the just-written newest back
     set kept
 } -result 1
 
-test bigfile-1.12 {a deferred read tags remote vs oversize so the note is not wrongly "large" (R11)} -setup {els_reset} -cleanup {set ::els::OPEN_WARN_SIZE 26214400 ; catch {file delete -force [els::deferred_path]}} -body {
-    set r [els::read_binary_guarded {//server/share/tiny.txt} 1 0]
-    set big [els_tmpfile big12.txt [string repeat x 5000]]
-    set ::els::OPEN_WARN_SIZE 5
-    set l [els::read_binary_guarded $big 1 0]
-    list [dict get $r state] [dict get $r reason] [dict get $l state] [dict get $l reason]
-} -result {deferred remote deferred large}
-
-test deferred-state-1.5 {a transient read fault preserves the queue instead of quarantining it (R10)} -setup {els_reset} -cleanup {
-    # only if the body threw before its own finally restored ::open
-    if {[llength [info commands ::_defer_real_open]]} { catch {rename ::open {}} ; rename ::_defer_real_open ::open }
-    unset -nocomplain ::_defer_fail
-    catch {file delete -force [els::deferred_path]}
-    foreach c [glob -nocomplain "[els::deferred_path].corrupt-*"] { catch {file delete -force $c} }
-} -body {
-    set keep [els_tmpfile deferred-keep.txt "hello"]
-    els::deferred_add $keep
-    set p [els::deferred_path]
-    set before [raw_read $p]
-    set ::_defer_fail [file normalize $p]
-    rename ::open ::_defer_real_open
-    proc ::open {args} {
-        if {[file normalize [lindex $args 0]] eq $::_defer_fail} { error "simulated sharing violation" }
-        return [uplevel 1 [list ::_defer_real_open {*}$args]]
-    }
-    set blocked "" ; set exists "" ; set nocorrupt "" ; set noticed ""
-    try {
-        els::deferred_load
-        set blocked $::els::deferred_blocked
-        set exists [file exists $p]
-        set nocorrupt [expr {[llength [glob -nocomplain "$p.corrupt-*"]] == 0}]
-        set noticed [expr {$::els::deferred_notice ne ""}]
-    } finally {
-        rename ::open {} ; rename ::_defer_real_open ::open
-    }
-    # raw_read below uses the RESTORED real open
-    list $blocked $exists $nocorrupt [expr {[raw_read $p] eq $before}] $noticed
-} -result {1 1 1 1 1}
-
-test session-r05-1 {a deferred (network) session file stays in session_pending instead of vanishing (R05)} -setup {els_reset} -cleanup {
+test session-r05-1 {a network session file restores as a placeholder tab instead of vanishing (R05)} -setup {els_reset} -cleanup {
     set ::els::session_files {} ; set ::els::session_pending {} ; set ::els::session_active ""
-    catch {file delete -force [els::deferred_path]}
 } -body {
     set ::els::restore_session 1
     set ::els::session_files [list {//server/share/remote-doc.txt}]
     set ::els::session_active ""
-    els::session_restore
-    list [llength $::els::session_pending] [string match {*remote-doc.txt} [lindex $::els::session_pending 0]]
-} -result {1 1}
+    # the network file comes back as a lazy PLACEHOLDER tab (docLazy set, nothing
+    # read), so its path survives the round-trip via the tab rather than by sitting
+    # forever in session_pending.
+    set restored [els::session_restore]
+    set id $::els::active
+    list $restored [info exists ::els::docLazy($id)] $::els::docRaw($id) \
+         [string match {*remote-doc.txt} $::els::docPath($id)] \
+         [llength $::els::session_pending]
+} -result {1 1 {} 1 0}
 
-test session-r05-2 {a saved session file on a mapped network drive is deferred, never synchronously probed at startup} -setup {
+test session-r05-2 {a mapped-network session file restores as a placeholder, never synchronously probed at startup} -setup {
             els_reset
             rename ::els::drive_type ::els::drive_type_real
             proc ::els::drive_type {path} { return remote }
+            rename ::els::read_preflight_size ::els::read_preflight_size_real
+            rename ::els::_read_binary_prefix ::els::_read_binary_prefix_real
+            set ::mapped_probe_calls 0
+            proc ::els::read_preflight_size {path} { incr ::mapped_probe_calls ; error "must not stat a mapped share" }
+            proc ::els::_read_binary_prefix {fh limit} { incr ::mapped_probe_calls ; error "must not read a mapped share" }
         } -cleanup {
             catch {rename ::els::drive_type {}}
             if {[llength [info commands ::els::drive_type_real]]} { rename ::els::drive_type_real ::els::drive_type }
+            catch {rename ::els::read_preflight_size {}}
+            if {[llength [info commands ::els::read_preflight_size_real]]} {
+                rename ::els::read_preflight_size_real ::els::read_preflight_size
+            }
+            catch {rename ::els::_read_binary_prefix {}}
+            if {[llength [info commands ::els::_read_binary_prefix_real]]} {
+                rename ::els::_read_binary_prefix_real ::els::_read_binary_prefix
+            }
+            unset -nocomplain ::mapped_probe_calls
             set ::els::session_files {} ; set ::els::session_pending {} ; set ::els::session_active ""
-            catch {file delete -force [els::deferred_path]}
         } -body {
     set ::els::restore_session 1
     set ::els::session_files [list {Z:/share/mapped-doc.txt}]
     set ::els::session_active ""
-    els::session_restore
-    list [llength $::els::session_pending] [string match {*mapped-doc.txt} [lindex $::els::session_pending 0]]
-} -result {1 1}
+    # drive_type (a local mount-table read) may be consulted to classify the drive,
+    # but NO synchronous stat or read of the mapped share may happen at startup.
+    set restored [els::session_restore]
+    set id $::els::active
+    list $restored [info exists ::els::docLazy($id)] $::els::docRaw($id) \
+         [string match {*mapped-doc.txt} $::els::docPath($id)] \
+         $::mapped_probe_calls [llength $::els::session_pending]
+} -result {1 1 {} 1 0 0}
 
 test launchfail-1.1 {a failed launch-file open is collected and reported after the UI is up (R12)} -setup {els_reset} -cleanup {
     if {[llength [info commands ::_lf_real_mb]]} { catch {rename ::els::message_box {}} ; rename ::_lf_real_mb ::els::message_box }
@@ -1981,15 +1922,3 @@ test bk-1.17 {a file over BK_MAXSIZE is not backed up and the user is told once,
     set silent2 [expr {[.sb.name cget -text] eq "quiet"}]
     list $noBackup $noted $silent2
 } -result {1 1 1}
-
-test deferred-state-1.6 {oversized deferred-open state is quarantined like other corruption} -setup {els_reset} -cleanup {
-    catch {file delete -force [els::deferred_path]}
-    foreach c [glob -nocomplain "[els::deferred_path].corrupt-*"] { catch {file delete -force $c} }
-} -body {
-    set p [els::deferred_path]
-    set fh [open $p wb] ; puts -nonewline $fh [string repeat a [expr {$::els::DEFERRED_MAX_BYTES + 1}]] ; close $fh
-    els::deferred_load
-    list $::els::deferred_blocked [file exists $p] \
-         [expr {[llength [glob -nocomplain "$p.corrupt-*"]] > 0}] \
-         [llength $::els::deferred_files] [expr {$::els::deferred_notice ne ""}]
-} -result {0 0 1 0 1}

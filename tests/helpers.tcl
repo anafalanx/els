@@ -140,7 +140,7 @@ proc els_reset {} {
     set ::els::seq 0
     foreach a {docPath docEnc docBom docEol docRaw docDecodeLossy docFormatPending savedSig
                docDiskState docDiskMeta docDiskContent docDiskDetail docDiskDeepAt
-               savedSigPath loading docLossyOk docLossyPause docExtModPause docEpoch} {
+               savedSigPath loading docLossyOk docLossyPause docExtModPause docEpoch docLazy} {
         array unset ::els::$a
         array set ::els::$a {}
     }
@@ -160,7 +160,7 @@ proc els_reset {} {
     # litter-free; backup tests enable + retune the knobs per test
     set ::els::backups 0
     set ::els::BK_RING 8 ; set ::els::BK_MININT 60
-    set ::els::OPEN_WARN_SIZE 26214400
+    set ::els::OPEN_WARN_SIZE 41943040
     set ::els::FIND_MAXHITS 5000 ; set ::els::FIND_MAXINDEX 1000000
     set ::els::FIND_INPUT_MAX 268435456 ; set ::els::FIND_OUTPUT_MAX 268435456
     set ::els::FIND_SLICE_CHARS 262144 ; set ::els::FIND_SLICE_BYTES 262144
@@ -195,8 +195,6 @@ proc els_reset {} {
     set ::els::find_test_sync 1
     set ::els::find_history {} ; set ::els::find_hidx -1
     set ::els::recent {}
-    set ::els::deferred_files {}
-    set ::els::deferred_blocked 0 ; set ::els::deferred_notice ""
     set ::els::last_open_outcome ""
     set ::els::tabs_menu_choice ""
     # And as the final backstop, cancel EVERY pending after (e.g. the
@@ -224,9 +222,7 @@ proc els_reset {} {
     set ::els_test_mbcount 0 ; set ::els_test_mbargs {} ; set ::els_test_mbqueue {}
     set ::els_test_bgerrors {}
     catch {file delete -force $::els::config_path}
-    catch {file delete -force [els::deferred_path]}
     catch {file delete -force [file join $::ELS_TMP .els-find]}
-    foreach q [glob -nocomplain "[els::deferred_path].corrupt-*"] { catch {file delete -force $q} }
     catch {font configure elsMono -size 11}
     set ::els::font_size 11
     catch {set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]}

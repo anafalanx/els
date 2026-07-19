@@ -310,9 +310,10 @@
 
 <section id="large">
   <h2>Large files &amp; network paths</h2>
-  <p>An interactive open or reload asks before reading a file larger than about 25&nbsp;MB — it may take a while and use a lot of memory. When a large file (or a file on a network path) turns up during quiet work such as a session restore, els doesn't read it eagerly; it records it in <em>File ▸ Deferred Opens…</em>, from which you can open it deliberately.</p>
+  <p>An interactive open or reload asks before reading a file larger than about 40&nbsp;MB — it may take a while and use a lot of memory — and flatly refuses one so large it would run out of memory and lose your other tabs. When a large file (or a file on a network path) turns up during quiet work such as a session restore, els doesn't read it eagerly; it opens a <em>placeholder tab</em> (marked with a <code>○</code>) that loads when you click it — so startup never freezes or stalls on a share.</p>
+  <p><b>Very long lines</b> — els won't open a file that contains a line longer than about 50,000 characters (minified JS/CSS/JSON, or a single-line data blob). A line that long freezes the text engine when you scroll, so els declines it with a clear message, just as it refuses a file too large to fit in memory.</p>
   <p><b>Network paths</b> — a UNC path or a mapped network drive is recognised as remote and shown as <span class="pill">remote</span>: els checks it only when you explicitly open, save, or reload, so a slow or disconnected share can never freeze the editor while you work on local files.</p>
-  <p><b>Restore Previous Session</b> reopens the buffers from your last run; <b>Deferred Opens</b> is where anything held back during restore waits for you.</p>
+  <p><b>Restore Previous Session</b> reopens the buffers from your last run; a large or network file among them comes back as a placeholder tab that loads on click.</p>
 </section>
 
 <section id="requirements">

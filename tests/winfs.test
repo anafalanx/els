@@ -45,6 +45,16 @@ test winfs-3.1 {win_virtual_screen returns a 4-int rect covering all monitors} -
          [expr {[lindex $r 2] >= [winfo screenwidth .]}]
 } -result {4 1 1 1}
 
+test winfs-3.2 {win_meminfo returns {totalPhys availPhys} wide ints, total>=avail>0, and rejects args} -constraints winfsBuilt -setup {load_winfs} -body {
+    set m [els::win_meminfo]
+    lassign $m total avail
+    set arity [catch {els::win_meminfo extra} err]
+    list [llength $m] \
+         [expr {[string is wideinteger -strict $total] && [string is wideinteger -strict $avail]}] \
+         [expr {$total >= $avail && $avail > 0}] \
+         $arity [string match {wrong # args:*} $err]
+} -result {2 1 1 1 1}
+
 test winfs-4.1 {failed native atomic replacements keep the target and complete rescue temp intact} -constraints winfsBuilt -setup {load_winfs ; els_reset} -body {
     # Force BOTH the native ReplaceFileW and the rename-replace fallback to fail.
     # The save path must never then truncate the target in place; the complete temp

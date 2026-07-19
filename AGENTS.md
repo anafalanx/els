@@ -52,7 +52,9 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   set together.
 - The architecture, the proven static-link recipe, and the pitfalls are in
   `docs/native-port-study.md`; a robustness audit and hardening roadmap is in
-  `docs/robustness-hardening-study.md`.
+  `docs/robustness-hardening-study.md`. Decided-but-unbuilt work (with the
+  reasoning behind it, including approaches already declined) lives in
+  `docs/ROADMAP.md` — read it before proposing a "next big thing".
 - Verify the exe headlessly: `els.exe --selftest` writes a report file — to
   `<exe-dir>\els-selftest.txt` by default, or to a path given as the SECOND argument
   (the first argument, if any, is a document to open during the check), GUI subsystem
@@ -61,7 +63,7 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   Tcl UI startup; `z test` runs the packaging-independent suite. Never debug a GUI
   build by running it on a failure and waiting for stderr; read the selftest
   report, or build a console-subsystem twin.
-- The packaged application keeps `els.conf`, `els.deferred`, `backups\`,
+- The packaged application keeps `els.conf`, `backups\`,
   rotating `els.log`/`els.log.1`, and transient `.els-find\` only beside
   `els.exe`; a source run uses the `els.tcl` directory.  (0.95 removed
   crash-recovery snapshots and the single-instance handoff, so there are no

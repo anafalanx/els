@@ -76,9 +76,10 @@ in your browser). Its source is [`resources/els-manual.html`](resources/els-manu
   (up to its 1,000,000-match safety ceiling), zero-width matches are supported,
   and Replace All commits atomically as one undo step.
 - **Large-file guard**: an interactive open or reload asks before reading more
-  than 25 MiB. Large files encountered by startup or session restore are durably
-  queued instead of loaded in the background; inspect them with
-  **File > Deferred Opens...**.
+  than 40 MiB, and refuses a file so large it would exhaust memory and crash. A
+  large or network file met during startup or session restore opens as a
+  **placeholder tab** (an unloaded tab, shown with a `○`) that loads when you
+  click it — so launch never freezes or blocks on a share, and nothing is lost.
 - **Text commands** (Buffer menu): a curated, undo-atomic set — move lines up/down
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
   dedent (Tab / Shift+Tab), sort / sort-descending / reverse / remove-duplicate
@@ -133,8 +134,6 @@ document writes happen only when you turn on **File > Auto-save**.
 containing `els.tcl` instead.
 
 - `els.conf` stores settings, window state, recents and session paths.
-- `els.deferred` is the durable queue for large or network files that a quiet
-  startup or restore refused to read without foreground consent.
 - `backups\` holds the bounded previous-version ring when backups are enabled.
 - `els.log` and its one rotated generation, `els.log.1`, hold diagnostics.
 - `.els-find\` is transient scratch for immutable find snapshots, isolated
@@ -147,8 +146,7 @@ one left behind by a pre-0.95 install.
 There is no profile fallback, migration or deletion. If `els.conf` does not yet
 exist but an old **adjacent** `config.tcl` does, els makes a one-time copy to
 `els.conf` and leaves the old file alone; this is the only legacy-state bridge.
-Invalid `els.deferred` data is preserved under a `.corrupt-*` name when it can
-be quarantined, rather than silently overwritten. Atomic writers also create
+Atomic writers also create
 short-lived temporary sidecars, and a failed document replacement deliberately
 retains the complete rescue copy beside that document and names it in the error.
 
@@ -194,14 +192,16 @@ ordinary one: whoever saves last wins, and the on-disk change guard (below) warn
 the other before it overwrites.
 
 **Large and network files wait for you.** An interactive open or reload asks
-before reading a file larger than 25 MiB; for an open, the decision comes before
-a tab is created. Startup
-arguments and session restore are deliberately quiet: if they encounter
-a large file—or an obvious UNC/network path that could stall Tk's single UI
-thread—they durably add its path to `els.deferred`. **File > Deferred Opens...**
-shows the full paths and lets you explicitly open or forget selected entries; a
-deferred file also stays in the saved session, so it never silently disappears
-from a future startup.
+before reading a file larger than 40 MiB (~5 s worst-case load), and flatly
+refuses one so large it would run the process out of memory and take every other
+unsaved tab down with it; for an open, both decisions come before a tab is
+created. Startup arguments and session restore are deliberately quiet: if they
+encounter a large file—or an obvious UNC/network path that could stall Tk's
+single UI thread—they open it as a **placeholder tab**: a real tab, shown with a
+`○`, whose content is not loaded. It reads zero bytes and never touches the
+share at startup; click it (or press a key on it) and it loads then, in the
+foreground, going through the same 40 MiB warning. A placeholder stays in the
+saved session, so it never silently disappears from a future startup.
 
 **No save is silently lossy.** A document's encoding is preserved on save,
 and some encodings cannot represent every character you can type. When that
@@ -290,6 +290,13 @@ Stated plainly so you know before you rely on it:
 - **No right-to-left text shaping.** The same Tk text engine does no Unicode
   bidirectional reordering, so Arabic, Hebrew and mixed-direction text displays in
   logical rather than visual order. Another inherited Tk limitation, disclosed here.
+- **Very long lines are refused.** els won't open a file that contains a line
+  longer than ~50,000 characters (e.g. minified JS/CSS/JSON, or a single-line data
+  blob). A line that long freezes Tk's text widget — one *horizontal* scroll of a
+  250 KB line can block the UI for minutes, and the cost grows quadratically — so
+  rather than degrade, els declines with a clear message, the same way it refuses a
+  file too large to fit in memory. An inherited Tk-text-widget limit; opening these
+  files smoothly would need a virtualized renderer, which is out of scope today.
 - **Single, fixed appearance.** No settings UI: colours, fonts and the caret are
   not configurable by design (see [docs/DESIGN.md](docs/DESIGN.md)). No syntax
   highlighting and no minimap. els ships one hand-tuned light palette (already past

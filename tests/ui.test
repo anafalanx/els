@@ -1168,67 +1168,6 @@ test tabs-1.10 {Ctrl+T pops the all-documents switcher from the editor and the t
     list $fromText $fromTop [winfo exists .menu.tabs]
 } -result {1 2 1}
 
-test deferred-ui-1.1 {File exposes a bounded, scrollable, keyboard-operable deferred list} \
-        -setup {ui_reset} -body {
-    set p [els_tmpfile deferred_ui1.txt "body\n"]
-    els::deferred_add $p
-    els::deferred_dialog
-    catch {wm withdraw .deferred}
-    set lb .deferred.f.list.lb
-    set labels {}
-    for {set i 0} {$i <= [.menu.file index end]} {incr i} {
-        if {[.menu.file type $i] ne "separator"} { lappend labels [.menu.file entrycget $i -label] }
-    }
-    list [expr {"Deferred Opens..." in $labels}] [$lb cget -height] \
-         [$lb cget -selectmode] [winfo exists .deferred.f.list.vs] \
-         [winfo exists .deferred.f.list.hs] \
-         [.deferred.f.buttons.open cget -text] \
-         [.deferred.f.buttons.forget cget -text] \
-         [.deferred.f.buttons.close cget -text] \
-         [lindex [wm resizable .deferred] 1] \
-         [expr {[bind $lb <KeyPress-Return>] ne ""}] \
-         [expr {[bind $lb <KeyPress-Delete>] ne ""}]
-} -cleanup {catch {destroy .deferred}} \
-  -result {1 10 extended 1 1 {Open selected} {Forget selected} Close 0 1 1}
-
-test deferred-ui-1.2 {Return deliberately opens a queued large file and removes it only on success} \
-        -setup {ui_reset} -cleanup {
-            set ::els::OPEN_WARN_SIZE 26214400
-            catch {destroy .deferred}
-        } -body {
-    set p [els_tmpfile deferred_ui2.txt "large body\n"]
-    set ::els::OPEN_WARN_SIZE 1
-    els::deferred_add $p
-    els::deferred_dialog
-    set lb .deferred.f.list.lb
-    $lb selection clear 0 end ; $lb selection set 0
-    focus -force $lb ; update
-    set ::els_test_mbcount 0
-    event generate $lb <KeyPress-Return>
-    update
-    list $::els_test_mbcount [llength $::els::deferred_files] \
-         [els::same_path $::els::docPath($::els::active) $p]
-} -result {0 0 1}
-
-test deferred-ui-1.3 {a failed selected open stays queued; Delete explicitly forgets it} \
-        -setup {ui_reset} -cleanup {catch {destroy .deferred}} -body {
-    set p [file join $::ELS_TMP missing_deferred_ui3.txt]
-    catch {file delete -force $p}
-    els::deferred_add $p
-    els::deferred_dialog
-    set lb .deferred.f.list.lb
-    $lb selection clear 0 end ; $lb selection set 0
-    focus -force $lb ; update
-    set ::els_test_mbcount 0
-    .deferred.f.buttons.open invoke
-    set stayed [els::deferred_contains $p]
-    $lb selection clear 0 end ; $lb selection set 0
-    focus -force $lb ; update
-    event generate $lb <KeyPress-Delete>
-    update
-    list $::els_test_mbcount $stayed [llength $::els::deferred_files]
-} -result {1 1 0}
-
 test ui-10.3 {find bar sits above the text (row 1); text + gutter at row 2} -setup {ui_reset} -body {
     els::find_show find
     set fr [dict get [grid info .find]   -row]
@@ -2472,6 +2411,27 @@ test ui-7.5 {the horizontal scrollbar is chunky and matches the vertical thickne
     list [winfo ismapped .hs] [expr {[winfo reqheight .hs] >= 8}] \
          [expr {[winfo reqheight .hs] == [winfo reqwidth .vs]}]
 } -result {1 1 1}
+
+# Anti-flicker: showing the h-bar steals a row of height, which can push a wide line
+# below the fold so it "fits" -> hide -> the row returns -> overflow -> show, an
+# infinite toggle (worst with line numbers off at the top of a tall file).  A HIDE
+# that reflects NO genuine change since the bar was shown (same scroll position,
+# width, and edit epoch) must be suppressed; a real change (here, an edit that bumps
+# the epoch) releases it.
+test ui-7.6 {a horizontal-bar hide with no genuine change since it was shown is suppressed} -setup {ui_reset} -body {
+    set ::els::word_wrap 0 ; els::set_wrap 0
+    set w [els::T]
+    $w insert end "short\nlines\nonly\n"        ;# fits horizontally -> need=0
+    els::refresh_view ; ui_settle ; els::update_hscroll
+    # pretend the bar is currently shown at THIS exact sig (as a self-induced reflow would leave it)
+    grid .hs ; set ::els::hs_shown 1 ; set ::els::hs_gate_sig [els::hscroll_sig $w]
+    els::update_hscroll                          ;# need=0, sig unchanged -> MUST hold
+    set held [expr {[llength [grid info .hs]] > 0}]
+    incr ::els::docEpoch($::els::active)         ;# a real edit changes the sig
+    els::update_hscroll                          ;# now the hide is allowed
+    set released [expr {[llength [grid info .hs]] > 0}]
+    list $held $released
+} -result {1 0}
 
 # The find count area must fit a large "N of M" without clipping (the label was
 # 11 chars; a 20k-match file produced "15912 of 20631" and got truncated).

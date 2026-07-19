@@ -232,3 +232,45 @@ test unit-update-off-1 {ELS_NO_UPDATE_CHECK makes check_update a no-op (never sp
     if {$had} { set ::env(ELS_NO_UPDATE_CHECK) $saved } else { unset ::env(ELS_NO_UPDATE_CHECK) }
     set ::els::update_buf                    ;# unchanged -> the spawn path was skipped
 } -result {SENTINEL}
+
+test open-oom-1.1 {open_would_oom fires only past the RAM-scaled ceiling; unknown RAM never refuses} -setup {
+    rename ::els::meminfo ::els_saved_meminfo
+} -cleanup {
+    rename ::els::meminfo {} ; rename ::els_saved_meminfo ::els::meminfo
+} -body {
+    # MULT=8, RESERVE_FRAC=0.80 -> ceiling = avail*0.8/8 = avail*0.1.  avail=10 GB -> 1 GB.
+    proc ::els::meminfo {} { return {10737418240 10737418240} }
+    set below [els::open_would_oom 1000000000]     ;# ~0.93 GB -> ok (below ceiling)
+    set above [els::open_would_oom 2000000000]     ;# ~1.86 GB -> refuse
+    proc ::els::meminfo {} { return {0 0} }         ;# unknown RAM -> RAM-relative check never fires
+    set unknown [els::open_would_oom 999999999]     ;# ~0.93 GB, under the hard cap -> 0
+    list $below $above $unknown
+} -result {0 1 0}
+
+test open-oom-1.2 {the ABSOLUTE hard cap refuses a huge file regardless of free RAM or a missing meminfo} -setup {
+    rename ::els::meminfo ::els_saved_meminfo
+} -cleanup {
+    rename ::els::meminfo {} ; rename ::els_saved_meminfo ::els::meminfo
+} -body {
+    proc ::els::meminfo {} { return {1099511627776 1099511627776} }   ;# 1 TB free: RAM-relative would allow anything
+    set atCap    [els::open_would_oom $::els::OPEN_HARD_CAP]                 ;# == cap -> refuse
+    set overCap  [els::open_would_oom [expr {$::els::OPEN_HARD_CAP * 2}]]    ;# huge -> refuse
+    set underCap [els::open_would_oom [expr {$::els::OPEN_HARD_CAP - 1}]]    ;# just under + 1 TB RAM -> allow
+    proc ::els::meminfo {} { return {0 0} }                                 ;# and with NO meminfo the cap STILL fires
+    set noMem [els::open_would_oom [expr {$::els::OPEN_HARD_CAP + 1}]]
+    list $atCap $overCap $underCap $noMem
+} -result {1 1 0 1}
+
+test long-line-1.1 {has_long_line: run >= thresh (incl. early-exit, no-newline, empty)} -body {
+    list [els::has_long_line "short\n[string repeat x 50]\nend" 30] \
+         [els::has_long_line "all\nshort\nlines\n" 30] \
+         [els::has_long_line [string repeat z 40] 30] \
+         [els::has_long_line "exactly30[string repeat a 21]\n" 30] \
+         [els::has_long_line "" 30]
+} -result {1 0 1 1 0}
+
+test long-line-1.2 {has_long_line breaks on CR too, so CR-only bytes aren't one giant line} -body {
+    list [els::has_long_line "[string repeat a 10]\r[string repeat b 10]" 15] \
+         [els::has_long_line "[string repeat a 40]\rb" 30] \
+         [els::has_long_line "[string repeat a 10]\r\n[string repeat b 10]" 15]
+} -result {0 1 0}

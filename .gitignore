@@ -38,8 +38,6 @@
 /config.tcl
 /els.log
 /els.log.1
-/els.deferred
-/els.deferred.*
 # runtime state directories a source run creates next to els.tcl
 /swap/
 /handoff/

@@ -167,14 +167,23 @@ Tabs are identifiers, not merely filenames:
 
 ## Large files and disk state
 
-An interactive open or reload asks before reading more than 25 MiB. Quiet paths
-(startup arguments and session restore) may not make that
-memory decision or display a timer-driven prompt. They persist the path in
-`els.deferred`; **File > Deferred Opens...** is the explicit foreground consent
-surface. Network paths follow the same route during quiet work so an offline
-share cannot block Tk's only event thread before the UI is usable — both a UNC
-path (recognised lexically) and a **mapped network drive** (`Z:`, recognised via
-`GetDriveType`, which reads the local mount table without contacting the server).
+An interactive open or reload asks before reading more than 40 MiB, and REFUSES a
+file too large to load safely (`els::open_would_oom`): an absolute **1 GiB hard
+cap** — no text file that big survives a synchronous load into the Tk text widget
+on *any* machine (a single huge line alone crashes it), and it needs no RAM query
+so the refuse is never blind — plus, when the native `win_meminfo` is available, a
+RAM-relative check that refuses smaller files whose projected peak wouldn't fit in
+available physical memory. A crash-prevention net, not a slowness warning; the
+native helper is loaded at startup (not lazily on first Find) so both paths work
+from the first open. Quiet paths (startup arguments and session
+restore) may not make that memory decision or display a timer-driven prompt, so a
+large or network file opens as a **placeholder tab** — a real tab whose content
+is not loaded (`docLazy`, buffer `-state disabled`) — materialized on the user's
+first click through the same interactive guard. This reads zero bytes at startup,
+so an offline share cannot block Tk's only event thread before the UI is usable —
+both a UNC path (recognised lexically) and a **mapped network drive** (`Z:`,
+recognised via `GetDriveType`, which reads the local mount table without
+contacting the server) route to a placeholder.
 Removable and optical drives stay locally observable: they fail fast when absent,
 so they carry no SMB-style reconnect stall to guard against.
 
@@ -198,7 +207,7 @@ before replacing a target, so the label is never treated as permission to write.
 ## Adjacent state
 
 There is one state root: beside `els.exe` when packaged, beside `els.tcl` in a
-source run. `els.conf`, `els.deferred`, `backups\`, `els.log`/`els.log.1`, and
+source run. `els.conf`, `backups\`, `els.log`/`els.log.1`, and
 transient `.els-find\` all live there. (0.95 removed crash recovery and the
 single-instance handoff, so there are no `swap\`/`handoff\` dirs; a boot-time
 sweep reaps either left behind by a pre-0.95 install.) No user-profile
