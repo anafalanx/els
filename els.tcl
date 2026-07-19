@@ -422,7 +422,7 @@ unset ::elsworker::_dispatch
 package require Tk
 
 namespace eval els {
-    variable version "0.98"      ;# 0.98: large-file + long-line handling — 40 MB open warning, RAM-aware OOM refuse with a 1 GiB hard cap, lazy placeholder tabs replacing the Deferred Opens queue, refusal of files with pathologically long lines, horizontal-scrollbar flicker fix; bundled manual; built on Tcl/Tk 9.0.4
+    variable version "0.99"      ;# 0.99: the caret scales with the zoom level — held at a fixed width it covered ~90% of a character cell at minimum zoom and ~11% at maximum; now derived from the DPI-scaled 3p base, capped at 2x
     variable docs {}             ;# ordered list of open document ids
     variable active ""           ;# active document id ("" = none)
     variable seq 0               ;# monotonic id counter
