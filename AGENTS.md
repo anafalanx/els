@@ -55,6 +55,11 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   `docs/robustness-hardening-study.md`. Decided-but-unbuilt work (with the
   reasoning behind it, including approaches already declined) lives in
   `docs/ROADMAP.md` — read it before proposing a "next big thing".
+- `docs/scintilla-feasibility-study.md` answers "should els replace Tk's text
+  widget with Scintilla (Direct2D) to lift the long-line / large-file limits?".
+  Verdict: feasible, only partly effective, and not advisable for 1.x. Read it
+  before re-opening the text-engine question — it also records why a hand-written
+  D2D viewer was evaluated and rejected.
 - Verify the exe headlessly: `els.exe --selftest` writes a report file — to
   `<exe-dir>\els-selftest.txt` by default, or to a path given as the SECOND argument
   (the first argument, if any, is a document to open during the check), GUI subsystem
