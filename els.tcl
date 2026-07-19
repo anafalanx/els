@@ -709,9 +709,22 @@ proc els::modal_window_release {top suspendToken destroyed} {
 # ---- app resources / preferences ---------------------------------------
 proc els::find_resource {args} {
     set rel [file join {*}$args]
-    foreach base [list [file dirname [info script]] [pwd]] {
-        set p [file normalize [file join $base $rel]]
-        if {[file exists $p]} { return $p }
+    # Use the boot script captured at load time, NOT `info script`: this resolver
+    # runs from later callbacks (Help ▸ Manual) where `info script` is "" — which
+    # collapsed BOTH bases to the cwd, so a packaged build never looked inside its
+    # own zipfs and Help ▸ Manual fell back to the website.  It only appeared to
+    # work in a dev run because the cwd happened to be the repo.  Same fix
+    # config_roots and association_exe already carry.
+    set bases {}
+    if {$::els::boot_script ne ""} { lappend bases [file dirname $::els::boot_script] }
+    lappend bases [pwd]
+    foreach base $bases {
+        set p [file join $base $rel]
+        if {[file exists $p]} {
+            # a zipfs path must be returned verbatim (open_manual copies it out);
+            # normalize only real filesystem paths, as before
+            return [expr {[string match "//zipfs:*" $p] ? $p : [file normalize $p]}]
+        }
     }
     return ""
 }

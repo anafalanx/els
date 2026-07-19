@@ -269,6 +269,18 @@ test long-line-1.1 {has_long_line: run >= thresh (incl. early-exit, no-newline, 
          [els::has_long_line "" 30]
 } -result {1 0 1 1 0}
 
+# find_resource must resolve against the script/zipfs root captured at load time,
+# never `info script` (which is "" in a later callback) and never the cwd.  When it
+# depended on those, Help ▸ Manual in the packaged exe found nothing and silently
+# fell back to opening the website — it only looked right in a dev run because the
+# cwd happened to be the repo.
+test resource-1.1 {find_resource resolves from the boot script, not the cwd} \
+        -setup {els_reset} -cleanup {cd $::ELS_ROOT} -body {
+    cd $::ELS_TMP                       ;# a cwd with no resources/ directory
+    set p [els::find_resource resources els-manual.html]
+    list [expr {$p ne ""}] [file tail $p]
+} -result {1 els-manual.html}
+
 test long-line-1.2 {has_long_line breaks on CR too, so CR-only bytes aren't one giant line} -body {
     list [els::has_long_line "[string repeat a 10]\r[string repeat b 10]" 15] \
          [els::has_long_line "[string repeat a 40]\rb" 30] \
