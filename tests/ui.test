@@ -240,9 +240,18 @@ test ui-1.5 {empty document does not paint a text current-line band} -setup {ui_
     list $emptyRanges [expr {[llength [$w tag ranges currentLine]] > 0}]
 } -result {0 1}
 
-test ui-1.6 {document caret is a non-blinking bar sized in DPI-scaling points; the gutter is a caret-less canvas} -setup {ui_reset} -body {
-    list [[els::T] cget -insertwidth] [[els::T] cget -insertofftime] [winfo class .ln]
-} -result {3p 0 Canvas}
+test ui-1.6 {document caret is a non-blinking bar sized from DPI-scaling points; the gutter is a caret-less canvas} -setup {ui_reset} -cleanup {els::set_font_size 11 0} -body {
+    # The caret is now derived from 3p AND scaled by zoom (see ui-7.7), so it carries
+    # a pixel value rather than the literal "3p" it used to.  The guarantee under
+    # test is unchanged: its width comes from DPI-scaling points, never a bare pixel
+    # literal.  Pin the default zoom explicitly -- els_reset restores font_size only
+    # AFTER building the UI, so the widget would otherwise inherit the previous
+    # test's zoom.
+    els::set_font_size 11 0
+    set w [els::T]
+    list [expr {[winfo pixels $w [$w cget -insertwidth]] == max(1, round([winfo fpixels . 3p]))}] \
+         [$w cget -insertofftime] [winfo class .ln]
+} -result {1 0 Canvas}
 
 # ---- tabs (via generated events) ----------------------------------------
 test ui-2.1 {Ctrl+N opens a new tab} -setup {ui_reset} -body {
@@ -2411,6 +2420,23 @@ test ui-7.5 {the horizontal scrollbar is chunky and matches the vertical thickne
     list [winfo ismapped .hs] [expr {[winfo reqheight .hs] >= 8}] \
          [expr {[winfo reqheight .hs] == [winfo reqwidth .vs]}]
 } -result {1 1 1}
+
+# The caret is a chunky bar sized against the text, so it must scale with zoom.
+# Held at a fixed 3p it covered ~90% of a character cell at zoom 6 and ~11% at zoom
+# 48; it now scales linearly, capped at 2x the base so extreme zoom stays sane.
+test ui-7.7 {the caret width scales with zoom, is capped, and is unchanged at the default} \
+        -setup {ui_reset} -cleanup {els::set_font_size 11 0} -body {
+    set w [els::T]
+    set base [expr {max(1, round([winfo fpixels . 3p]))}]
+    els::set_font_size 11 0 ; set at11 [winfo pixels $w [$w cget -insertwidth]]
+    els::set_font_size 6  0 ; set at6  [winfo pixels $w [$w cget -insertwidth]]
+    els::set_font_size 48 0 ; set at48 [winfo pixels $w [$w cget -insertwidth]]
+    list [expr {$at11 == $base}] \
+         [expr {$at6 < $at11}] \
+         [expr {$at48 > $at11}] \
+         [expr {$at48 == 2*$base}] \
+         [expr {$at6 >= 1}]
+} -result {1 1 1 1 1}
 
 # Anti-flicker: showing the h-bar steals a row of height, which can push a wide line
 # below the fold so it "fits" -> hide -> the row returns -> overflow -> show, an

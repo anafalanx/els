@@ -2187,7 +2187,7 @@ proc els::new_doc {{path ""} {lazy 0}} {
     # pixel literal is NOT scaled (same lesson as -arrowsize 12p above).
     text $w -undo 1 -maxundo $::els::MAXUNDO -wrap [expr {$::els::word_wrap ? "word" : "none"}] -font elsMono \
         -bg $::els::PAGE -fg $::els::INK \
-        -insertbackground $::els::CARET -insertwidth 3p -insertofftime 0 \
+        -insertbackground $::els::CARET -insertwidth [els::caret_px] -insertofftime 0 \
         -selectbackground $::els::SEL -selectforeground $::els::INK \
         -inactiveselectbackground $::els::SELOFF \
         -borderwidth 0 -highlightthickness 0 -padx 10.5p -pady 4.5p \
@@ -7690,14 +7690,29 @@ proc els::set_wrap {{persist 1}} {
 # Text size (the font FAMILY is fixed; users can only zoom).  elsMono is a named
 # font shared by every document and the gutter, so resizing it scales them all;
 # we then recompute the leading and rebuild the gutter so numbers stay aligned.
+# Caret width in PIXELS for the current zoom.  The caret is a deliberate chunky red
+# bar -- half a character cell at the default size -- so it has to scale WITH the
+# text: held at a fixed 3p it covered ~90% of a cell at zoom 6 (a block beside the
+# glyphs) and only ~11% at zoom 48.  Scale linearly from the DPI-scaled 3p base,
+# capped at 2x so extreme zoom doesn't turn the caret into a slab.
+proc els::caret_px {} {
+    # round the base first: winfo fpixels yields 7.999999999999998 for 3p at 200%,
+    # and truncating that later would silently shave a pixel off the cap
+    set base [expr {max(1, round([winfo fpixels . 3p]))}]   ;# design width at size 11
+    set w [expr {round($base * $::els::font_size / 11.0)}]
+    return [expr {max(1, min($w, 2 * $base))}]
+}
 proc els::set_font_size {size {persist 1}} {
     set size [expr {max(6, min(48, $size))}]
     set ::els::font_size $size
     font configure elsMono -size $size
     set ::els::LEAD [expr {int([font metrics elsMono -linespace] * 0.17)}]
+    set caret [els::caret_px]
     foreach id $::els::docs {
         set w [els::W $id]
-        if {[winfo exists $w]} { $w configure -spacing1 $::els::LEAD -spacing3 $::els::LEAD }
+        if {[winfo exists $w]} {
+            $w configure -spacing1 $::els::LEAD -spacing3 $::els::LEAD -insertwidth $caret
+        }
     }
     set ::els::gutter_px -1   ;# font size changed: force a width recompute
     els::refresh_view
