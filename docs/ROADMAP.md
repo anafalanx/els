@@ -3,6 +3,37 @@
 Decided-but-not-yet-built work, nearest target first. Anything still being argued
 about belongs in a study under `docs/`, not here.
 
+## Decided against — do not re-open
+
+### Replacing Tk's text widget (Scintilla, or a custom Direct2D component)
+
+**Decision (2026-07-20): els keeps Tk's text widget and accepts its limits.** The
+long-line refusal (≥ 50,000 chars), the 40 MB open warning and the 1 GiB hard refuse
+stay. They are honest, they are tested, and they are cheap to maintain.
+
+This was studied properly before deciding — see `docs/scintilla-feasibility-study.md`,
+which includes benchmarks from an actual Scintilla 5.6.4 build against els's own
+toolchain. Summary of why the answer is no:
+
+- **It only partly works.** On the document shape that actually motivates it — files
+  made *of* long lines, not one long line among short ones — Scintilla gives roughly
+  5 fps scrolling and 9–11× the file size in RAM. A huge improvement on Tk's 375 s
+  freeze, but not a solved problem.
+- **The real blocker is testability, and it is permanent.** The suite drives real Tk
+  widgets in-process; a hosted Scintilla (or custom D2D) control is a foreign HWND
+  that `event generate` cannot reach, and its idle deferrals sit outside the
+  cancel-every-pending-`after` invariant in `tests/helpers.tcl` that makes the suite
+  deterministic. That is not a porting cost, it is a standing one.
+- **A hand-written D2D viewer is not the cheap middle path it looks like.** It needs
+  mostly *rendering* correctness — font fallback, grapheme clusters, bidi, UTF-8 ↔
+  UTF-16 index duality — which is exactly the part you do not get for free, and it
+  inherits the same foreign-HWND testing problem.
+
+If this is ever reconsidered, the honest headline is **accessibility**, not long
+lines: a custom-drawn surface forecloses screen-reader support permanently, whereas
+today's gap is at least fixable in principle. Reconsider only as a 2.0, and only with
+that trade stated out loud.
+
 ## 1.1
 
 ### Chunked file reading with a progress indicator
