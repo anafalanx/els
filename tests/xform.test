@@ -95,47 +95,9 @@ test xform-join-1.3 {join on the last line is a no-op} -setup {els_reset} -body 
     els::xform::join_lines ; xf_body
 } -result "a\nb"
 
-# ---- sort / reverse / dedupe (whole buffer with no selection) -------------
-test xform-sort-1.1 {sort the whole buffer ascending} -setup {els_reset} -body {
-    xf_fill "cherry\napple\nbanana" ; els::xform::sort 1 ; xf_body
-} -result "apple\nbanana\ncherry"
-test xform-sort-1.2 {sort descending} -setup {els_reset} -body {
-    xf_fill "apple\nbanana\ncherry" ; els::xform::sort -1 ; xf_body
-} -result "cherry\nbanana\napple"
-test xform-sort-1.3 {sort only the selected lines, leaving the rest} -setup {els_reset} -body {
-    set w [xf_fill "z\nc\na\nx"] ; xf_sel 2.0 3.end
-    els::xform::sort 1 ; xf_body
-} -result "z\na\nc\nx"
-test xform-rev-1.1 {reverse the line order} -setup {els_reset} -body {
-    xf_fill "a\nb\nc" ; els::xform::reverse ; xf_body
-} -result "c\nb\na"
-test xform-dedupe-1.1 {remove duplicate lines, keeping first occurrence order} -setup {els_reset} -body {
-    xf_fill "a\nb\na\nc\nb\na" ; els::xform::dedupe ; xf_body
-} -result "a\nb\nc"
-
-# ---- case transforms ------------------------------------------------------
-test xform-case-1.1 {UPPERCASE the selection} -setup {els_reset} -body {
-    set w [xf_fill "hello there"] ; xf_sel 1.0 1.5
-    els::xform::case upper ; xf_body
-} -result "HELLO there"
-test xform-case-1.2 {lowercase the selection} -setup {els_reset} -body {
-    set w [xf_fill "HELLO THERE"] ; xf_sel 1.0 1.end
-    els::xform::case lower ; xf_body
-} -result "hello there"
-test xform-case-1.3 {with no selection, case acts on the current line} -setup {els_reset} -body {
-    set w [xf_fill "one\ntwo"] ; $w mark set insert 2.0
-    els::xform::case upper ; xf_body
-} -result "one\nTWO"
-
-# ---- trim trailing whitespace ---------------------------------------------
-test xform-trim-1.1 {trim trailing spaces and tabs on every line} -setup {els_reset} -body {
-    xf_fill "a  \nb\t\nc" ; els::xform::trim_trailing ; xf_body
-} -result "a\nb\nc"
-test xform-trim-1.2 {a clean buffer is left untouched (not dirtied)} -setup {els_reset} -body {
-    set w [xf_fill "a\nb\nc"] ; $w edit modified 0
-    els::xform::trim_trailing
-    list [xf_body] [$w edit modified]
-} -result [list "a\nb\nc" 0]
+# (sort / reverse / dedupe / case / trim are no longer built-ins: they ship as
+# the seeded default BUFFER SCRIPTS.  Their behavior — including the
+# newline-terminated-buffer cases — is covered in tests/scripts.test.)
 
 # ---- indent / dedent ------------------------------------------------------
 test xform-indent-1.1 {indent the selected lines with a tab} -setup {els_reset} -body {
@@ -182,20 +144,15 @@ test xform-tab-1.5 {Shift+Tab dedents the selected lines} -setup {els_reset} -bo
 } -result "a\nb"
 
 # ---- undo atomicity: one transform == one undo ----------------------------
-test xform-undo-1.1 {a sort is a single undo step} -setup {els_reset} -body {
-    set w [xf_fill "c\nb\na"] ; els::xform::sort 1
-    $w edit undo ; xf_body
-} -result "c\nb\na"
 test xform-undo-1.2 {a duplicate is a single undo step} -setup {els_reset} -body {
     set w [xf_fill "a\nb"] ; $w mark set insert 1.0 ; els::xform::duplicate
     $w edit undo ; xf_body
 } -result "a\nb"
 
 # ---- boundary / edge cases ------------------------------------------------
-test xform-edge-1.1 {every command is safe (no throw) on an empty buffer} -setup {els_reset} -body {
+test xform-edge-1.1 {every built-in command is safe (no throw) on an empty buffer} -setup {els_reset} -body {
     set errs {}
-    foreach cmd {{move 1} {move -1} duplicate delete_line join_lines {sort 1} {sort -1} \
-                 reverse dedupe {case upper} {case lower} trim_trailing indent dedent} {
+    foreach cmd {{move 1} {move -1} duplicate delete_line join_lines indent dedent} {
         xf_fill ""    ;# a fresh empty buffer before each
         if {[catch {els::xform::[lindex $cmd 0] {*}[lrange $cmd 1 end]} e]} { lappend errs "$cmd: $e" }
     }
@@ -205,19 +162,10 @@ test xform-edge-1.2 {duplicate the LAST line (mandatory-final-newline boundary)}
     set w [xf_fill "a\nb"] ; $w mark set insert 2.0
     els::xform::duplicate ; xf_body
 } -result "a\nb\nb"
-test xform-edge-1.3 {trim preserves a trailing blank final line, only stripping the trailing spaces} -setup {els_reset} -body {
-    xf_fill "x \ny " ; els::xform::trim_trailing ; xf_body
-} -result "x\ny"
 test xform-edge-1.4 {a selection ending at column 0 does not pull in that trailing line (move down)} -setup {els_reset} -body {
     set w [xf_fill "a\nb\nc"] ; xf_sel 1.0 2.0
     els::xform::move 1 ; xf_body
 } -result "b\na\nc"
-test xform-edge-1.5 {sort / reverse of a single line is a no-op (does not dirty the doc)} -setup {els_reset} -body {
-    set w [xf_fill "solo"] ; $w edit modified 0
-    els::xform::sort 1 ; els::xform::reverse
-    list [xf_body] [$w edit modified]
-} -result [list "solo" 0]
-
 # ---- keybinding smoke: Ctrl+D is wired to Duplicate -----------------------
 test xform-key-1.1 {Ctrl+D on elsText invokes Duplicate Line (repurposed from a neutralized default)} -setup {els_reset} -body {
     string match "*xform::duplicate*" [bind elsText <Control-d>]
@@ -234,50 +182,8 @@ test xform-menu-1.1 {a Buffer menu carries the transforms; Edit no longer does} 
 # ---- bug-hunt wave 2: newline-terminated buffers (the phantom final line) ----
 # A document whose text ends in \n leaves the widget's mandatory final line
 # EMPTY: that pseudo-line represents the trailing newline, not content.  Line
-# ops must stop at the last DOCUMENT line (xform::lastdoc) — before this wave,
-# sort/reverse dragged a phantom "" to the top of the buffer and ate the
-# trailing newline, dedupe ate it whenever an interior blank line existed,
-# Select-All case grew the buffer by one newline per pass, and move-down/join
-# at the last content line swapped real text with the phantom.
-
-test xform-nl-2.1 {sort of a newline-terminated buffer: no blank first line, trailing newline kept} -setup {els_reset} -body {
-    xf_fill "banana\napple\ncherry\n" ; els::xform::sort 1 ; xf_body
-} -result "apple\nbanana\ncherry\n"
-
-test xform-nl-2.2 {sort descending of a newline-terminated buffer} -setup {els_reset} -body {
-    xf_fill "b\na\nc\n" ; els::xform::sort -1 ; xf_body
-} -result "c\nb\na\n"
-
-test xform-nl-2.3 {Select All then sort behaves exactly like whole-buffer sort} -setup {els_reset} -body {
-    set w [xf_fill "banana\napple\ncherry\n"] ; xf_sel 1.0 end
-    els::xform::sort 1 ; xf_body
-} -result "apple\nbanana\ncherry\n"
-
-test xform-nl-2.4 {reverse of a newline-terminated buffer} -setup {els_reset} -body {
-    xf_fill "1\n2\n3\n" ; els::xform::reverse ; xf_body
-} -result "3\n2\n1\n"
-
-test xform-nl-2.5 {dedupe with an interior blank line keeps the trailing newline (and stays clean)} -setup {els_reset} -body {
-    set w [xf_fill "x\n\ny\n"] ; $w edit modified 0
-    els::xform::dedupe
-    list [xf_body] [$w edit modified]
-} -result [list "x\n\ny\n" 0]
-
-test xform-nl-2.6 {dedupe with real duplicates keeps the trailing newline} -setup {els_reset} -body {
-    xf_fill "x\nx\ny\n" ; els::xform::dedupe ; xf_body
-} -result "x\ny\n"
-
-test xform-nl-2.7 {dedupe on a lone-newline buffer is a no-op} -setup {els_reset} -body {
-    xf_fill "\n" ; els::xform::dedupe ; xf_body
-} -result "\n"
-
-test xform-nl-2.8 {Select-All UPPERCASE is stable: no extra newline, idempotent} -setup {els_reset} -body {
-    set w [xf_fill "ab\ncd\n"]
-    xf_sel 1.0 end ; els::xform::case upper
-    set once [xf_body]
-    xf_sel 1.0 end ; els::xform::case upper
-    list $once [xf_body]
-} -result [list "AB\nCD\n" "AB\nCD\n"]
+# ops must stop at the last DOCUMENT line (xform::lastdoc).  (The sort/reverse/
+# dedupe/case halves of this wave moved to tests/scripts.test with the scripts.)
 
 test xform-nl-2.9 {move down at the last content line of a terminated buffer is a no-op} -setup {els_reset} -body {
     set w [xf_fill "a\nb\nc\n"] ; $w mark set insert 3.0

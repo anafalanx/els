@@ -235,27 +235,43 @@ Written down so they stay decided:
 - No minimap.
 - No regex debugger, token-builder, or named-search manager: over-scoped.
 - No modal find/replace dialog.
-- **No scripting / extension API.** The text-manipulation commands ship as a fixed,
-  curated set (Buffer menu; see below), not as a user-scriptable buffer API. A scripting
-  surface is the ultimate knob — it would contradict the whole "no settings" identity,
-  add a security/API-stability surface to a data-safety editor, and turn 1.0 from "a
-  decided tool" into "an extensible platform." Decided against, 2026-07-05.
+- **No extension API.** Buffer scripts (below) are deliberately NOT a plugin system:
+  a script is a sandboxed text filter — no UI hooks, no event hooks, no access to
+  anything but the text it is given. The API surface is four variables and a return
+  value, chosen so it can stay stable forever. (History: scripting was originally
+  declined outright, 2026-07-05, in favour of fixed built-ins; sustained real-world
+  use showed the fixed set genuinely wasn't enough, and the filter contract keeps
+  the original objections — knob explosion, security surface, API creep — answered.)
 - **No tab-width setting**, so no Tabs↔Spaces conversion (which needs one). Indent inserts
   a literal tab; dedent removes one leading tab (or up to four leading spaces).
 
 ## Text commands
 
-A small, opinionated set of buffer transforms (Buffer menu + keys), each undo-atomic. Line
-ops act on the selected lines or the current line; sort/reverse/dedupe act on the selection
-or, with none, the whole buffer.
+The caret/keyboard line ops are built in (Buffer menu + keys), each undo-atomic, acting
+on the selected lines or the current line: Move Up/Down (Alt+↑/↓), Duplicate (Ctrl+D),
+Delete (Ctrl+Shift+K), Join (Ctrl+J), Indent/Dedent (Tab/Shift+Tab on a selection).
 
-- **Lines:** Move Up/Down (Alt+↑/↓), Duplicate (Ctrl+D), Delete (Ctrl+Shift+K),
-  Join (Ctrl+J), Indent/Dedent (Tab/Shift+Tab on a selection).
-- **Reorder:** Sort, Sort Descending, Reverse, Remove Duplicate Lines.
-- **Transform:** UPPERCASE, lowercase, Trim Trailing Whitespace.
+The pure text transforms ship as **buffer scripts** instead — see below. Deliberately
+excluded to keep the built-in set tight: Title Case (fiddly), Tabs↔Spaces (needs a
+width knob).
 
-Deliberately excluded to keep the set tight: Title Case (fiddly), Tabs↔Spaces (needs a
-width knob), sort variants beyond the two directions.
+## Buffer scripts
+
+A buffer script is a Tcl **text filter**: a `*.tcl` file in `scripts\` next to
+`els.conf`, listed in the Buffer menu by its file name. It runs in a **safe
+interpreter** (Tcl's `-safe` base: no file, exec, network, or env access) with a hard
+time limit, receives `$text` (the selection, else the whole buffer) plus
+`$hasSelection` / `$path` / `$lineCount`, and whatever it returns replaces that text
+as one undo step. An error or timeout is one status note; the buffer is never touched
+on error — a script can at worst mangle text, and undo covers that.
+
+The classic transforms (Sort, Sort Descending, Reverse, Remove Duplicate Lines,
+UPPERCASE, lowercase, Trim Trailing Whitespace) are **seeded as default scripts** —
+working examples that double as the contract's documentation. Seeding happens once
+(when `scripts\` doesn't exist), so deleting a default is respected; **Buffer ▸
+Restore Default Scripts** rewrites the pristine set on request, leaving other files
+alone. **New Script…** names a file through the standard save dialog, seeds the
+contract template, and opens it for editing — in els, naturally.
 
 ## Sources
 

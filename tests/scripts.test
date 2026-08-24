@@ -1,0 +1,240 @@
+# tests/scripts.test -- buffer scripts: user-editable Tcl text filters.
+# Covers the seeded defaults' behavior (ported from the old built-in transforms,
+# including the newline-terminated-buffer wave), the filter contract (selection
+# else whole buffer; result replaces; one undo; no-op leaves the buffer clean),
+# the sandbox (safe interp, time limit), and the menu/seeding/restore lifecycle.
+
+source [file join [file dirname [info script]] helpers.tcl]
+namespace import ::tcltest::test
+
+proc sc_fill {s} {
+    set w [els::T]
+    $w delete 1.0 end ; $w insert end $s ; $w edit reset ; $w edit modified 0
+    $w mark set insert 1.0
+    return $w
+}
+proc sc_body {} { return [[els::T] get 1.0 "end - 1 char"] }
+proc sc_sel {a b} { set w [els::T] ; $w tag remove sel 1.0 end ; $w tag add sel $a $b }
+# Run a DEFAULT script, self-healing: an earlier test may have deleted the file.
+proc sc_run {name} {
+    set d [els::scripts_dir]
+    file mkdir $d
+    set f [file join $d $name]
+    if {![file exists $f]} { els::script_write $f [dict get [els::scripts_defaults] $name] }
+    els::script_run $name
+}
+# Write a THROWAWAY script, run it, delete it.
+proc sc_adhoc {body} {
+    set d [els::scripts_dir]
+    file mkdir $d
+    set f [file join $d "_adhoc test.tcl"]
+    els::script_write $f $body
+    els::script_run "_adhoc test.tcl"
+    catch {file delete -force $f}
+}
+proc sc_menu_labels {} {
+    set out {}
+    set m .menu.buffer
+    for {set i 0} {$i <= [$m index end]} {incr i} {
+        if {[$m type $i] eq "command"} { lappend out [$m entrycget $i -label] }
+    }
+    return $out
+}
+
+# ---- seeding + lifecycle ---------------------------------------------------
+test scripts-seed-1.1 {a missing scripts folder is seeded with all defaults at menu build} -setup {els_reset} -body {
+    file delete -force [els::scripts_dir]
+    els::buffer_menu_rebuild
+    set present [lmap n [dict keys [els::scripts_defaults]] {file exists [file join [els::scripts_dir] $n]}]
+    list [lsort -unique $present] [llength [dict keys [els::scripts_defaults]]]
+} -result {1 7}
+
+test scripts-seed-1.2 {seeding is ONCE: a deleted default stays deleted on rebuild; its menu entry is gone} -setup {els_reset} -body {
+    file delete -force [els::scripts_dir]
+    els::buffer_menu_rebuild                              ;# seed
+    file delete -force [file join [els::scripts_dir] "Reverse Lines.tcl"]
+    els::buffer_menu_rebuild                              ;# dir exists -> no reseed
+    list [file exists [file join [els::scripts_dir] "Reverse Lines.tcl"]] \
+         [expr {"Reverse Lines" in [sc_menu_labels]}]
+} -result {0 0}
+
+test scripts-seed-1.3 {Restore Default Scripts rewrites the pristine set (after a yes) and leaves other files alone} -setup {els_reset} -body {
+    file delete -force [els::scripts_dir]
+    els::buffer_menu_rebuild
+    file delete -force [file join [els::scripts_dir] "Reverse Lines.tcl"]
+    els::script_write [file join [els::scripts_dir] "Mine.tcl"] "return \$text"
+    set ::els_test_mbanswer yes
+    els::scripts_restore_defaults
+    list [file exists [file join [els::scripts_dir] "Reverse Lines.tcl"]] \
+         [file exists [file join [els::scripts_dir] "Mine.tcl"]] \
+         [expr {"Reverse Lines" in [sc_menu_labels]}] \
+         [expr {"Mine" in [sc_menu_labels]}]
+} -cleanup {
+    catch {file delete -force [file join [els::scripts_dir] "Mine.tcl"]}
+    els::buffer_menu_rebuild
+} -result {1 1 1 1}
+
+test scripts-seed-1.4 {Restore answered no changes nothing} -setup {els_reset} -body {
+    file delete -force [els::scripts_dir]
+    els::buffer_menu_rebuild
+    file delete -force [file join [els::scripts_dir] "Reverse Lines.tcl"]
+    set ::els_test_mbanswer no
+    els::scripts_restore_defaults
+    file exists [file join [els::scripts_dir] "Reverse Lines.tcl"]
+} -cleanup {set ::els_test_mbanswer yes} -result 0
+
+test scripts-menu-1.1 {the Buffer menu carries built-ins, script entries by root name, and management} -setup {els_reset} -body {
+    file delete -force [els::scripts_dir]
+    els::buffer_menu_rebuild
+    set labels [sc_menu_labels]
+    list [expr {"Duplicate Line" in $labels}] \
+         [expr {"Sort Lines" in $labels}] \
+         [expr {"Sort Lines.tcl" ni $labels}] \
+         [expr {"New Script..." in $labels}] \
+         [expr {"Open Scripts Folder" in $labels}] \
+         [expr {"Reload Scripts" in $labels}] \
+         [expr {"Restore Default Scripts" in $labels}]
+} -result {1 1 1 1 1 1 1}
+
+# ---- default scripts: ported transform behavior ----------------------------
+test scripts-sort-1.1 {sort the whole buffer ascending} -setup {els_reset} -body {
+    sc_fill "cherry\napple\nbanana" ; sc_run "Sort Lines.tcl" ; sc_body
+} -result "apple\nbanana\ncherry"
+test scripts-sort-1.2 {sort descending} -setup {els_reset} -body {
+    sc_fill "apple\nbanana\ncherry" ; sc_run "Sort Lines Descending.tcl" ; sc_body
+} -result "cherry\nbanana\napple"
+test scripts-sort-1.3 {a selection scopes the script to just those lines} -setup {els_reset} -body {
+    sc_fill "z\nc\na\nx" ; sc_sel 2.0 3.end
+    sc_run "Sort Lines.tcl" ; sc_body
+} -result "z\na\nc\nx"
+test scripts-rev-1.1 {reverse the line order} -setup {els_reset} -body {
+    sc_fill "a\nb\nc" ; sc_run "Reverse Lines.tcl" ; sc_body
+} -result "c\nb\na"
+test scripts-dedupe-1.1 {remove duplicates, keeping first-occurrence order} -setup {els_reset} -body {
+    sc_fill "a\nb\na\nc\nb\na" ; sc_run "Remove Duplicate Lines.tcl" ; sc_body
+} -result "a\nb\nc"
+test scripts-case-1.1 {UPPERCASE the selection only} -setup {els_reset} -body {
+    sc_fill "hello there" ; sc_sel 1.0 1.5
+    sc_run "UPPERCASE.tcl" ; sc_body
+} -result "HELLO there"
+test scripts-case-1.2 {lowercase the selection} -setup {els_reset} -body {
+    sc_fill "HELLO THERE" ; sc_sel 1.0 1.end
+    sc_run "lowercase.tcl" ; sc_body
+} -result "hello there"
+test scripts-case-1.3 {with no selection a script acts on the WHOLE buffer (the filter contract)} -setup {els_reset} -body {
+    sc_fill "one\ntwo" ; sc_run "UPPERCASE.tcl" ; sc_body
+} -result "ONE\nTWO"
+test scripts-trim-1.1 {trim trailing spaces and tabs on every line} -setup {els_reset} -body {
+    sc_fill "a  \nb\t\nc" ; sc_run "Trim Trailing Whitespace.tcl" ; sc_body
+} -result "a\nb\nc"
+test scripts-trim-1.2 {a clean buffer is left untouched (not dirtied)} -setup {els_reset} -body {
+    set w [sc_fill "a\nb\nc"]
+    sc_run "Trim Trailing Whitespace.tcl"
+    list [sc_body] [$w edit modified]
+} -result [list "a\nb\nc" 0]
+test scripts-trim-1.3 {trim preserves a trailing blank final line, only stripping the spaces} -setup {els_reset} -body {
+    sc_fill "x \ny " ; sc_run "Trim Trailing Whitespace.tcl" ; sc_body
+} -result "x\ny"
+
+# ---- newline-terminated buffers (the phantom final line, ported) -----------
+test scripts-nl-2.1 {sort of a newline-terminated buffer: no blank first line, trailing newline kept} -setup {els_reset} -body {
+    sc_fill "banana\napple\ncherry\n" ; sc_run "Sort Lines.tcl" ; sc_body
+} -result "apple\nbanana\ncherry\n"
+test scripts-nl-2.2 {sort descending of a newline-terminated buffer} -setup {els_reset} -body {
+    sc_fill "b\na\nc\n" ; sc_run "Sort Lines Descending.tcl" ; sc_body
+} -result "c\nb\na\n"
+test scripts-nl-2.3 {Select All then sort behaves exactly like whole-buffer sort} -setup {els_reset} -body {
+    sc_fill "banana\napple\ncherry\n" ; sc_sel 1.0 end
+    sc_run "Sort Lines.tcl" ; sc_body
+} -result "apple\nbanana\ncherry\n"
+test scripts-nl-2.4 {reverse of a newline-terminated buffer} -setup {els_reset} -body {
+    sc_fill "1\n2\n3\n" ; sc_run "Reverse Lines.tcl" ; sc_body
+} -result "3\n2\n1\n"
+test scripts-nl-2.5 {dedupe with an interior blank line keeps the trailing newline (and stays clean)} -setup {els_reset} -body {
+    set w [sc_fill "x\n\ny\n"]
+    sc_run "Remove Duplicate Lines.tcl"
+    list [sc_body] [$w edit modified]
+} -result [list "x\n\ny\n" 0]
+test scripts-nl-2.6 {dedupe with real duplicates keeps the trailing newline} -setup {els_reset} -body {
+    sc_fill "x\nx\ny\n" ; sc_run "Remove Duplicate Lines.tcl" ; sc_body
+} -result "x\ny\n"
+test scripts-nl-2.7 {dedupe on a lone-newline buffer is a no-op} -setup {els_reset} -body {
+    sc_fill "\n" ; sc_run "Remove Duplicate Lines.tcl" ; sc_body
+} -result "\n"
+test scripts-nl-2.8 {Select-All UPPERCASE is stable: no extra newline, idempotent} -setup {els_reset} -body {
+    set w [sc_fill "ab\ncd\n"]
+    sc_sel 1.0 end ; sc_run "UPPERCASE.tcl"
+    set once [sc_body]
+    sc_sel 1.0 end ; sc_run "UPPERCASE.tcl"
+    list $once [sc_body]
+} -result [list "AB\nCD\n" "AB\nCD\n"]
+test scripts-nl-2.9 {sort of a single line is a no-op that does not dirty the doc} -setup {els_reset} -body {
+    set w [sc_fill "solo"]
+    sc_run "Sort Lines.tcl" ; sc_run "Reverse Lines.tcl"
+    list [sc_body] [$w edit modified]
+} -result [list "solo" 0]
+
+# ---- the filter contract ---------------------------------------------------
+test scripts-run-1.1 {a script's result replaces the buffer as ONE undo step} -setup {els_reset} -body {
+    set w [sc_fill "c\nb\na"]
+    sc_run "Sort Lines.tcl"
+    $w edit undo ; sc_body
+} -result "c\nb\na"
+test scripts-run-1.2 {after a selection-scoped run, the replacement is selected} -setup {els_reset} -body {
+    set w [sc_fill "hello there"] ; sc_sel 1.0 1.5
+    sc_run "UPPERCASE.tcl"
+    set r [$w tag ranges sel]
+    list [$w get [lindex $r 0] [lindex $r end]] [$w index insert]
+} -result {HELLO 1.0}
+test scripts-run-1.3 {a script may end in a plain expression instead of `return`} -setup {els_reset} -body {
+    sc_fill "abc" ; sc_adhoc {string toupper $text} ; sc_body
+} -result "ABC"
+test scripts-run-1.4 {the context variables are provided: hasSelection, lineCount, path} -setup {els_reset} -body {
+    sc_fill "one\ntwo\nthree"
+    set ::els::docPath($::els::active) "C:/tmp/ctx.txt"
+    sc_adhoc {return "$hasSelection $lineCount $path"}
+    sc_body
+} -result "0 3 C:/tmp/ctx.txt"
+
+# ---- errors + sandbox ------------------------------------------------------
+test scripts-err-1.1 {a throwing script leaves the buffer untouched and clean; one status note} -setup {els_reset} -body {
+    set w [sc_fill "precious"]
+    set ::els::status_note_full ""
+    sc_adhoc {error "kaput"}
+    list [sc_body] [$w edit modified] [string match "script failed:*" $::els::status_note_full]
+} -result {precious 0 1}
+test scripts-err-1.2 {the sandbox has no exec and no open: both fail without touching the buffer} -setup {els_reset} -body {
+    set w [sc_fill "safe"]
+    sc_adhoc {exec cmd /c echo pwned}
+    set afterExec [sc_body]
+    sc_adhoc {open "C:/Windows/win.ini" r}
+    list $afterExec [sc_body] [$w edit modified]
+} -result {safe safe 0}
+test scripts-err-1.3 {a runaway loop is cut off by the time limit; the buffer survives} -setup {
+    els_reset
+    set ::els_scripts_saved_timeout $::els::SCRIPT_TIMEOUT
+    set ::els::SCRIPT_TIMEOUT 1
+} -cleanup {
+    set ::els::SCRIPT_TIMEOUT $::els_scripts_saved_timeout
+    unset -nocomplain ::els_scripts_saved_timeout
+} -body {
+    set w [sc_fill "alive"]
+    sc_adhoc {while {1} {}}
+    list [sc_body] [$w edit modified]
+} -result {alive 0}
+
+# ---- New Script... ---------------------------------------------------------
+test scripts-new-1.1 {New Script writes the template, opens it in a tab, and appears in the menu} -setup {els_reset} -body {
+    file mkdir [els::scripts_dir]
+    set ::els_test_savefile [file join [els::scripts_dir] "My Thing.tcl"]
+    els::script_new
+    set opened [expr {[info exists ::els::docPath($::els::active)] && \
+                      [file tail $::els::docPath($::els::active)] eq "My Thing.tcl"}]
+    set fh [::open $::els_test_savefile r] ; set body [read $fh] ; close $fh
+    list [file exists $::els_test_savefile] $opened \
+         [string match "*return \$text*" $body] \
+         [expr {"My Thing" in [sc_menu_labels]}]
+} -cleanup {
+    catch {file delete -force [file join [els::scripts_dir] "My Thing.tcl"]}
+    els::buffer_menu_rebuild
+} -result {1 1 1 1}

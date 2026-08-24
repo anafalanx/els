@@ -461,6 +461,7 @@ namespace eval els {
     variable OPEN_HARD_CAP 1073741824  ;# 1 GiB: an ABSOLUTE refuse ceiling. No text file this big loads safely into a Tk text widget on ANY machine (a single huge line alone crashes it), and it fires with no RAM query -- so the refuse works even before win_meminfo is available.
     variable last_open_outcome ""    ;# opened|already|placeholder|cancelled|failed (quiet callers inspect it)
     variable MAXUNDO 2000           ;# cap the per-doc undo stack (compound actions) so a long session can't grow it without bound
+    variable SCRIPT_TIMEOUT 10      ;# seconds a buffer script may run before its safe interp is cut off
     # Re-entrancy guard: background work (an autosave flush, the async find/replace
     # worker's buffer commit) is deferred while a modal message pump is up, so it can
     # never mutate a document beneath a dialog.  Tokens allow overlapping guards.
@@ -1798,24 +1799,12 @@ proc els::build {} {
     # Buffer: the text-manipulation commands, lifted out of Edit to keep it uncluttered.
     # Line ops act on the selected lines (or the current line); sort/reverse/dedupe act on
     # the selection, else the whole buffer.
+    # Buffer: the built-in line ops + one entry per buffer script + management.
+    # Built dynamically (els::buffer_menu_rebuild) so adding/removing script files
+    # updates the menu via Reload Scripts.
     menu .menu.buffer
     .menu add cascade -label Buffer -underline 0 -menu .menu.buffer
-    .menu.buffer add command -label "Move Line Up"    -accelerator Alt+Up       -command {els::xform::move -1}
-    .menu.buffer add command -label "Move Line Down"  -accelerator Alt+Down     -command {els::xform::move 1}
-    .menu.buffer add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
-    .menu.buffer add command -label "Delete Line"     -accelerator Ctrl+Shift+K -command els::xform::delete_line
-    .menu.buffer add command -label "Join Lines"      -accelerator Ctrl+J       -command els::xform::join_lines
-    .menu.buffer add command -label "Indent"                                    -command els::xform::indent
-    .menu.buffer add command -label "Dedent"          -accelerator Shift+Tab    -command els::xform::dedent
-    .menu.buffer add separator
-    .menu.buffer add command -label "Sort Lines"             -command {els::xform::sort 1}
-    .menu.buffer add command -label "Sort Lines Descending"  -command {els::xform::sort -1}
-    .menu.buffer add command -label "Reverse Lines"          -command els::xform::reverse
-    .menu.buffer add command -label "Remove Duplicate Lines" -command els::xform::dedupe
-    .menu.buffer add separator
-    .menu.buffer add command -label "UPPERCASE"                -command {els::xform::case upper}
-    .menu.buffer add command -label "lowercase"                -command {els::xform::case lower}
-    .menu.buffer add command -label "Trim Trailing Whitespace" -command els::xform::trim_trailing
+    els::buffer_menu_rebuild
     # The all-documents switcher menu is no longer a menu-bar cascade: it is popped
     # by the ▾ tab-strip button and by Ctrl+T, which cover both mouse and keyboard.
     menu .menu.tabs -postcommand els::tabs_menu_rebuild
@@ -3159,10 +3148,6 @@ proc els::xform::span {w} {
     lassign [split [$w index insert] .] l c
     return [list $l $l]
 }
-proc els::xform::span_or_all {w} {
-    if {[llength [$w tag ranges sel]]} { return [els::xform::span $w] }
-    return [list 1 [els::xform::lastdoc $w]]
-}
 # Replace whole lines L1..L2 with LIST (leaving the trailing newline structure intact).
 proc els::xform::replace_lines {w l1 l2 list} {
     $w replace "$l1.0" "$l2.end" [join $list \n]
@@ -3235,66 +3220,9 @@ proc els::xform::join_lines {} {
     $w tag remove sel 1.0 end ; $w mark set insert "$l1.end"
 }
 
-# --- sort / reverse / dedupe lines (selection, else whole buffer) ---------
-proc els::xform::sort {{dir 1}} {
-    set w [els::T] ; if {$w eq ""} return
-    lassign [els::xform::span_or_all $w] l1 l2
-    set lines [split [$w get "$l1.0" "$l2.end"] \n]
-    set out [expr {$dir < 0 ? [lsort -decreasing $lines] : [lsort $lines]}]
-    if {$out eq $lines} return
-    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 $out }
-    els::xform::reselect $w $l1 [llength $out]
-}
-proc els::xform::reverse {} {
-    set w [els::T] ; if {$w eq ""} return
-    lassign [els::xform::span_or_all $w] l1 l2
-    set lines [split [$w get "$l1.0" "$l2.end"] \n]
-    if {[llength $lines] < 2} return
-    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 [lreverse $lines] }
-    els::xform::reselect $w $l1 [llength $lines]
-}
-proc els::xform::dedupe {} {
-    set w [els::T] ; if {$w eq ""} return
-    lassign [els::xform::span_or_all $w] l1 l2
-    set lines [split [$w get "$l1.0" "$l2.end"] \n]
-    set out {} ; set seen {}
-    foreach l $lines { if {![dict exists $seen $l]} { dict set seen $l 1 ; lappend out $l } }
-    if {$out eq $lines} return
-    els::xform::atomic $w { els::xform::replace_lines $w $l1 $l2 $out }
-    els::xform::reselect $w $l1 [llength $out]
-}
-
-# --- case transforms (selection, else current line) -----------------------
-proc els::xform::case {mode} {
-    set w [els::T] ; if {$w eq ""} return
-    set r [$w tag ranges sel]
-    if {[llength $r]} {
-        set a [$w index [lindex $r 0]] ; set b [$w index [lindex $r end]]
-        # Select All runs to `end`, past the mandatory final newline: a replace
-        # can never delete that newline, but it WOULD insert the copy carried
-        # in $new — growing the buffer by one line per pass.  Clamp to the
-        # last real character.
-        if {[$w compare $b > "end - 1 char"]} { set b [$w index "end - 1 char"] }
-    } \
-    else { set a [$w index "insert linestart"] ; set b [$w index "insert lineend"] }
-    set txt [$w get $a $b]
-    set new [expr {$mode eq "upper" ? [string toupper $txt] : [string tolower $txt]}]
-    if {$new eq $txt} return
-    els::xform::atomic $w { $w replace $a $b $new }
-    $w tag remove sel 1.0 end
-    $w tag add sel $a [$w index "$a + [string length $new] chars"]
-}
-
-# --- trim trailing whitespace across the whole buffer ---------------------
-proc els::xform::trim_trailing {} {
-    set w [els::T] ; if {$w eq ""} return
-    set lines [split [$w get 1.0 "end - 1 char"] \n]
-    set out [lmap l $lines { string trimright $l " \t" }]
-    if {$out eq $lines} return
-    set ins [$w index insert]
-    els::xform::atomic $w { $w replace 1.0 "end - 1 char" [join $out \n] }
-    catch {$w mark set insert $ins} ; $w see insert
-}
+# (sort / reverse / dedupe / case / trim moved out of the built-ins: they are pure
+# text filters, and ship as the seeded DEFAULT BUFFER SCRIPTS instead — see the
+# buffer-scripts section below.  The caret/keyboard line ops stay built-in.)
 
 # --- indent / dedent the selected lines (or the current line) -------------
 proc els::xform::indent {} {
@@ -3329,6 +3257,205 @@ proc els::xform::dedent {} {
 proc els::xform::tab_indents {w} {
     return [expr {[llength [$w tag ranges sel]] > 0}]
 }
+
+# ---- buffer scripts (user-editable text filters) ---------------------------
+# A buffer script is a Tcl TEXT FILTER: a *.tcl file in <configdir>/scripts, run
+# in a SAFE interpreter (no file / exec / network / env access — Tcl's -safe
+# base) with a hard time limit, so a script can at worst mangle text, and undo
+# covers that.  The script sees:
+#   $text          the selection if there is one, else the whole buffer
+#   $hasSelection  1 / 0
+#   $path          the document's file path ("" for untitled)
+#   $lineCount     number of lines in $text
+# and whatever it returns REPLACES that text as ONE undo step.  Returning $text
+# unchanged leaves the buffer untouched (not even dirtied); any error is one
+# status note + a log line, and the buffer is never touched on error.  The menu
+# label is the file's root name, verbatim — name the file what the entry should
+# say.  The default transforms (sort/reverse/dedupe/case/trim) ship as seeded
+# scripts: seeding happens ONCE, when the scripts folder does not exist yet, so
+# a deleted default stays deleted; Buffer > Restore Default Scripts rewrites the
+# pristine set on request.
+proc els::scripts_dir {} {
+    if {$::els::config_path eq "" || $::els::selftest} { return "" }
+    return [file join [file dirname $::els::config_path] scripts]
+}
+# name -> content of the seeded defaults.  Filenames carry spaces on purpose:
+# the menu shows the root name verbatim.  Each header doubles as the contract
+# documentation a user copies from; the line-oriented ones carry the
+# trailing-newline idiom (split of "a\nb\n" ends in an empty element, which a
+# naive sort would surface as a blank first line).
+proc els::scripts_defaults {} {
+    set contract {
+        {# A buffer script: Tcl, run sandboxed when picked from the Buffer menu.}
+        {# In:  $text (the selection, else the whole buffer), $hasSelection,}
+        {#      $path, $lineCount.   Out: return the replacement text.}
+    }
+    set nlguard {
+        {# keep a trailing newline as-is instead of treating it as an empty line}
+        {set nl "" ; if {[string index $text end] eq "\n"} { set nl "\n" ; set text [string range $text 0 end-1] }}
+    }
+    set d {}
+    dict set d "Sort Lines.tcl" [join [concat $contract $nlguard {
+        {return "[join [lsort [split $text \n]] \n]$nl"}
+    }] \n]
+    dict set d "Sort Lines Descending.tcl" [join [concat $contract $nlguard {
+        {return "[join [lsort -decreasing [split $text \n]] \n]$nl"}
+    }] \n]
+    dict set d "Reverse Lines.tcl" [join [concat $contract $nlguard {
+        {return "[join [lreverse [split $text \n]] \n]$nl"}
+    }] \n]
+    dict set d "Remove Duplicate Lines.tcl" [join [concat $contract $nlguard {
+        {# keeps the FIRST occurrence of each line, in order}
+        {set out {} ; set seen {}}
+        {foreach line [split $text \n] { if {![dict exists $seen $line]} { dict set seen $line 1 ; lappend out $line } }}
+        {return "[join $out \n]$nl"}
+    }] \n]
+    dict set d "UPPERCASE.tcl" [join [concat $contract {
+        {return [string toupper $text]}
+    }] \n]
+    dict set d "lowercase.tcl" [join [concat $contract {
+        {return [string tolower $text]}
+    }] \n]
+    dict set d "Trim Trailing Whitespace.tcl" [join [concat $contract {
+        {return [join [lmap line [split $text \n] {string trimright $line " \t"}] \n]}
+    }] \n]
+    return $d
+}
+proc els::script_write {path body} {
+    set fh [::open $path w]
+    fconfigure $fh -encoding utf-8 -translation lf
+    puts -nonewline $fh $body
+    close $fh
+}
+proc els::scripts_seed {} {
+    set d [els::scripts_dir]
+    if {$d eq "" || [file isdirectory $d]} { return }   ;# seed ONCE: an existing dir is the user's
+    if {[catch {
+        file mkdir $d
+        dict for {name body} [els::scripts_defaults] { els::script_write [file join $d $name] $body }
+    } e]} { catch {els::log error "script seed failed: $e"} }
+}
+proc els::scripts_restore_defaults {} {
+    set d [els::scripts_dir]
+    if {$d eq ""} { return }
+    set ans [els::message_box -parent . -icon question -type yesno -title els \
+        -message "Restore the default scripts?\nDefault-named script files are rewritten to their original\ncontent. Scripts with other names are left untouched."]
+    if {$ans ne "yes"} { return }
+    if {[catch {
+        file mkdir $d
+        dict for {name body} [els::scripts_defaults] { els::script_write [file join $d $name] $body }
+    } e]} {
+        els::status_note "restore failed: $e"
+        return
+    }
+    els::buffer_menu_rebuild
+    els::status_note "default scripts restored"
+}
+proc els::scripts_list {} {
+    set d [els::scripts_dir]
+    if {$d eq "" || ![file isdirectory $d]} { return {} }
+    return [lsort -dictionary [glob -nocomplain -directory $d -tails *.tcl]]
+}
+# Run one script file against the active buffer (see the section comment for the
+# contract).  rc 2 (a toplevel `return` in the script) is the NORMAL way a script
+# yields its result.
+proc els::script_run {name} {
+    set w [els::T]
+    if {$w eq ""} { return }
+    set dir [els::scripts_dir]
+    if {$dir eq ""} { return }
+    if {[catch {
+        set fh [::open [file join $dir $name] r]
+        fconfigure $fh -encoding utf-8
+        set body [read $fh]
+        close $fh
+    } e]} {
+        els::status_note "script failed: [file rootname $name]"
+        catch {els::log error "script $name: $e"}
+        return
+    }
+    # input range: the selection if any (clamped to the last real character —
+    # Select All runs past the mandatory final newline, and replacing through
+    # `end` would re-insert its copy, growing the buffer), else the whole buffer
+    set r [$w tag ranges sel]
+    if {[llength $r]} {
+        set a [$w index [lindex $r 0]] ; set b [$w index [lindex $r end]]
+        if {[$w compare $b > "end - 1 char"]} { set b [$w index "end - 1 char"] }
+    } else {
+        set a 1.0 ; set b [$w index "end - 1 char"]
+    }
+    set text [$w get $a $b]
+    set ip [interp create -safe]
+    set rc [catch {
+        interp limit $ip time -seconds [expr {[clock seconds] + $::els::SCRIPT_TIMEOUT}]
+        $ip eval [list set text $text]
+        $ip eval [list set hasSelection [expr {[llength $r] > 0}]]
+        $ip eval [list set path [expr {[info exists ::els::docPath($::els::active)] ? $::els::docPath($::els::active) : ""}]]
+        $ip eval [list set lineCount [llength [split $text \n]]]
+        $ip eval $body
+    } out]
+    catch {interp delete $ip}
+    if {$rc != 0 && $rc != 2} {
+        els::status_note "script failed: [file rootname $name]"
+        catch {els::log error "script $name: $out"}
+        return
+    }
+    if {$out eq $text} { return }   ;# no change: don't dirty the buffer
+    els::xform::atomic $w { $w replace $a $b $out }
+    $w tag remove sel 1.0 end
+    catch {$w tag add sel $a [$w index "$a + [string length $out] chars"]}
+    catch {$w mark set insert $a ; $w see insert}
+}
+# New Script: name it through the standard save dialog (pointed at the scripts
+# folder), seed it with the contract template, and open it in a tab to edit.
+proc els::script_new {} {
+    set d [els::scripts_dir]
+    if {$d eq ""} { return }
+    file mkdir $d
+    set p [tk_getSaveFile -parent . -initialdir $d -defaultextension .tcl \
+               -filetypes {{{Buffer scripts} {.tcl}}} -title "New Script"]
+    if {$p eq ""} { return }
+    if {[catch {
+        els::script_write $p "# A buffer script: Tcl, run sandboxed when picked from the Buffer menu.\n# In:  \$text (the selection, else the whole buffer), \$hasSelection,\n#      \$path, \$lineCount.   Out: return the replacement text.\n\nreturn \$text\n"
+    } e]} {
+        els::status_note "new script failed: $e"
+        return
+    }
+    els::buffer_menu_rebuild
+    els::open $p
+}
+proc els::scripts_open_folder {} {
+    set d [els::scripts_dir]
+    if {$d eq ""} { return }
+    file mkdir $d
+    els::open_folder $d
+}
+# (Re)build the whole Buffer menu: the built-in line ops (keyboard-bound,
+# caret-relative), then one entry per script file, then script management.
+proc els::buffer_menu_rebuild {} {
+    set m .menu.buffer
+    if {![winfo exists $m]} { return }
+    $m delete 0 end
+    $m add command -label "Move Line Up"    -accelerator Alt+Up       -command {els::xform::move -1}
+    $m add command -label "Move Line Down"  -accelerator Alt+Down     -command {els::xform::move 1}
+    $m add command -label "Duplicate Line"  -accelerator Ctrl+D       -command els::xform::duplicate
+    $m add command -label "Delete Line"     -accelerator Ctrl+Shift+K -command els::xform::delete_line
+    $m add command -label "Join Lines"      -accelerator Ctrl+J       -command els::xform::join_lines
+    $m add command -label "Indent"                                    -command els::xform::indent
+    $m add command -label "Dedent"          -accelerator Shift+Tab    -command els::xform::dedent
+    $m add separator
+    els::scripts_seed
+    set names [els::scripts_list]
+    foreach n $names {
+        $m add command -label [file rootname $n] -command [list els::script_run $n]
+    }
+    if {[llength $names]} { $m add separator }
+    $m add command -label "New Script..."           -command els::script_new
+    $m add command -label "Open Scripts Folder"     -command els::scripts_open_folder
+    $m add command -label "Reload Scripts"          -command els::buffer_menu_rebuild
+    $m add command -label "Restore Default Scripts" -command els::scripts_restore_defaults
+}
+
 proc els::on_modified {w} {
     variable active
     set id [els::id_of $w]

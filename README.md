@@ -81,10 +81,17 @@ in your browser). Its source is [`resources/els-manual.html`](resources/els-manu
   large or network file met during startup or session restore opens as a
   **placeholder tab** (an unloaded tab, shown with a `○`) that loads when you
   click it — so launch never freezes or blocks on a share, and nothing is lost.
-- **Text commands** (Buffer menu): a curated, undo-atomic set — move lines up/down
+- **Text commands** (Buffer menu): undo-atomic line ops — move lines up/down
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
-  dedent (Tab / Shift+Tab), sort / sort-descending / reverse / remove-duplicate
-  lines, UPPERCASE / lowercase, and trim trailing whitespace.
+  dedent (Tab / Shift+Tab).
+- **Buffer scripts** (Buffer menu): your own text filters as plain Tcl files in a
+  `scripts` folder next to `els.conf` — each gets the selection (or the whole
+  buffer) in `$text`, and what it returns replaces it, as one undo. Scripts run
+  sandboxed (no file / exec / network access, hard time limit), so a script can at
+  worst mangle text — and undo covers that. The classic transforms (sort, reverse,
+  remove duplicates, UPPERCASE / lowercase, trim trailing whitespace) ship as
+  editable default scripts; delete what you don't want, restore them anytime with
+  **Buffer > Restore Default Scripts**, add your own with **New Script...**.
 - **Encoding & EOL**: auto-detected on open and preserved on save (mixed line
   endings are normalized to one style), shown in the
   status bar. All 95 Tcl encodings, BOM sniffing (UTF-8/16/32), and

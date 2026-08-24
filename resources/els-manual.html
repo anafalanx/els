@@ -82,6 +82,7 @@
   <a href="#keys">Keyboard reference</a>
   <a href="#find">Find &amp; replace</a>
   <a href="#buffer">Buffer transforms</a>
+  <a href="#scripts">Buffer scripts</a>
   <a href="#view">View options</a>
   <div class="grp">Files on disk</div>
   <a href="#safety">Data safety</a>
@@ -237,18 +238,18 @@
 
 <section id="buffer">
   <h2>Buffer transforms</h2>
-  <p>The <em>Buffer</em> menu holds line- and text-level operations. Line operations act on the selected lines (or the current line); sort, reverse, dedupe, and case transforms act on the selection, or the whole buffer if nothing is selected.</p>
+  <p>The <em>Buffer</em> menu holds the built-in line operations, which act on the selected lines (or the current line):</p>
   <table>
     <tr><th>Command</th><th>Effect</th></tr>
     <tr><td class="k">Move Line Up / Down</td><td>Shift the current line (or selection) by one row.</td></tr>
     <tr><td class="k">Duplicate Line</td><td>Copy the current line below itself.</td></tr>
     <tr><td class="k">Delete Line · Join Lines</td><td>Remove the line; or merge the next line onto this one.</td></tr>
     <tr><td class="k">Indent · Dedent</td><td>Add or remove leading indentation. <kbd>Tab</kbd> indents when a selection spans lines.</td></tr>
-    <tr><td class="k">Sort Lines · Sort Descending · Reverse Lines</td><td>Reorder the selected lines.</td></tr>
-    <tr><td class="k">Remove Duplicate Lines</td><td>Keep the first occurrence of each line.</td></tr>
-    <tr><td class="k">UPPERCASE · lowercase</td><td>Change the case of the selected text.</td></tr>
-    <tr><td class="k">Trim Trailing Whitespace</td><td>Strip spaces and tabs at the end of each line.</td></tr>
   </table>
+  <h2 id="scripts">Buffer scripts</h2>
+  <p>Below the line operations, the Buffer menu lists your <b>buffer scripts</b>: plain Tcl files in a <code>scripts</code> folder next to <code>els.conf</code>, shown by file name. A script is a <em>text filter</em> — it receives the selection (or, with nothing selected, the whole buffer) in <code>$text</code>, along with <code>$hasSelection</code>, <code>$path</code>, and <code>$lineCount</code>, and whatever it returns replaces that text as a single undo step.</p>
+  <p>Scripts run in a sandbox: no file, program, or network access, and a hard time limit, so a script can at worst mangle text — and undo covers that. If a script fails, the buffer is left untouched and the status bar says so.</p>
+  <p>The classic transforms ship as editable default scripts — <em>Sort Lines</em>, <em>Sort Lines Descending</em>, <em>Reverse Lines</em>, <em>Remove Duplicate Lines</em> (first occurrence wins), <em>UPPERCASE</em>, <em>lowercase</em>, and <em>Trim Trailing Whitespace</em>. They double as worked examples of the contract: open one from the scripts folder to see the pattern. Delete any you don't want (the menu follows the folder after <em>Reload Scripts</em>); <em>Restore Default Scripts</em> rewrites the pristine set, leaving your own files alone; <em>New Script…</em> creates a file from the template and opens it for editing.</p>
 </section>
 
 <section id="view">
