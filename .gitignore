@@ -37,6 +37,7 @@
 /els.conf
 /config.tcl
 /els.log
+/scripts/
 /els.log.1
 # runtime state directories a source run creates next to els.tcl
 /swap/
