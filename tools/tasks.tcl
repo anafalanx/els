@@ -1892,7 +1892,15 @@ proc task_run {args} {
     # against a missing or stale winfs.dll: the resulting editor would appear
     # healthy but Find/Replace would be deliberately unavailable.
     ensure_native_support
-    exec [wish] [P els.tcl] {*}$args &
+    # Launch OUTSIDE the launcher's process tree, via the WMI service: a child
+    # exec'd directly (even through cmd `start`) inherits the launcher's Job
+    # Object, and when z exits and that job closes, Windows silently TERMINATES
+    # els — no error, no log, just a window that never appears.  A WMI-created
+    # process is parented to the WMI provider host instead, so it survives z.
+    set cmdline "\"[file nativename [wish]]\" \"[file nativename [P els.tcl]]\""
+    foreach a $args { append cmdline " \"[file nativename $a]\"" }
+    exec {*}[auto_execok powershell.exe] -NoProfile -NonInteractive -Command \
+        "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '$cmdline'; CurrentDirectory = '[file nativename [P .]]' } | Out-Null"
     puts "launched els"
 }
 
