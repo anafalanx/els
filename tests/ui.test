@@ -696,7 +696,7 @@ test ui-8.3 {Edit menu opens Find and Replace} -setup {ui_reset} -body {
     list $f [winfo ismapped .find] [winfo ismapped .find.rr]
 } -result {1 1 1}
 
-test ui-8.3a {Open and Save As dialogs default to .txt files} -setup {ui_reset} -body {
+test ui-8.3a {Open and Save As dialogs default to All files (nothing hidden); Save As still appends .txt} -setup {ui_reset} -body {
     .menu.file invoke "Open..." ; update
     set openTypes [dict get $::els_test_open_args -filetypes]
     set ::els_test_savefile [file join $::ELS_TMP dialog_default.txt]
@@ -707,7 +707,7 @@ test ui-8.3a {Open and Save As dialogs default to .txt files} -setup {ui_reset} 
          [lindex [lindex $saveTypes 0] 0] \
          [lindex [lindex $saveTypes 0] 1] \
          [dict get $::els_test_save_args -defaultextension]
-} -result {Text .txt Text .txt .txt}
+} -result {{All files} * {All files} * .txt}
 
 test ui-8.3b {opening an already-open file switches to its tab} -setup {ui_reset} -body {
     set p1 [els_tmpfile already_open_one.txt "one\n"]
@@ -849,61 +849,36 @@ test help-manual-1.1 {Help > Manual is wired to els::open_manual and the manual 
     list $wired [expr {$res ne "" && [file exists $res]}]
 } -result {1 1}
 
-test ui-9.4 {app registration is per-user, declares text types, never takes a default or touches UserChoice} -setup {ui_reset} -body {
-    set cmds [els::assoc_commands [file join $::ELS_TMP els.exe]]
-    set blob [join [lmap cmd $cmds {join $cmd "\n"}] "\n"]
-    set takesDefault 0
-    set touchesUserChoice 0
-    foreach cmd $cmds {
-        if {[lrange $cmd 0 3] eq [list reg.exe add {HKCU\Software\Classes\.txt} /ve]} {
-            set takesDefault 1
-        }
-        if {[string first UserChoice [join $cmd "\n"]] >= 0} {
-            set touchesUserChoice 1
-        }
-    }
-    list [expr {[string first {HKCU\Software\Classes\Applications\els.exe\shell\open\command} $blob] >= 0}] \
-         [expr {[string first {FriendlyAppName} $blob] >= 0}] \
-         [expr {[string first {HKCU\Software\RegisteredApplications} $blob] >= 0}] \
-         [expr {[string first {HKCU\Software\anafalanx\els\Capabilities\FileAssociations} $blob] >= 0}] \
-         [expr {[string first {HKLM} $blob] < 0}] \
-         [expr {!$takesDefault}] \
-         [expr {!$touchesUserChoice}]
-} -result {1 1 1 1 1 1 1}
+test ui-9.4 {els no longer registers itself: the register machinery is gone; only cleanup remains} -setup {ui_reset} -body {
+    list [llength [info procs ::els::assoc_commands]] \
+         [llength [info procs ::els::assoc_register]] \
+         [llength [info procs ::els::assoc_unregister]] \
+         [llength [info procs ::els::assoc_unregister_commands]]
+} -result {0 0 1 1}
 
-test ui-9.5 {File Associations: opening shows the dialog; Register issues the app registration; no per-type or UserChoice writes} -setup {
+test ui-9.5 {File Associations opens as pure guidance: Open with > Always steps, no Register button} -setup {
     ui_reset
-    set ::els_test_assoc_exe [raw_write assoc_els.exe ""]
-    set ::els_test_assoc_commands {}
-    rename ::els::association_exe ::els::association_exe_real
-    proc ::els::association_exe {} { return $::els_test_assoc_exe }
-    rename ::els::assoc_run ::els::assoc_run_real
-    proc ::els::assoc_run {cmd} { lappend ::els_test_assoc_commands $cmd }
+    rename ::els::assoc_registered ::els::assoc_registered_real
+    proc ::els::assoc_registered {} { return 0 }
 } -cleanup {
-    rename ::els::association_exe {} ; rename ::els::association_exe_real ::els::association_exe
-    rename ::els::assoc_run {} ; rename ::els::assoc_run_real ::els::assoc_run
+    rename ::els::assoc_registered {} ; rename ::els::assoc_registered_real ::els::assoc_registered
     catch {destroy .assoc}
 } -body {
     .menu.help invoke "File Associations..."          ;# opens the dialog
-    set isWin [winfo exists .assoc]
-    els::assoc_register
-    set blob [join [lmap cmd $::els_test_assoc_commands {join $cmd " "}] "\n"]
-    list $isWin \
-         [expr {[string first {FriendlyAppName} $blob] >= 0}] \
-         [expr {[string first [file nativename $::els_test_assoc_exe] $blob] >= 0}] \
-         [expr {[string first {OpenWithProgids} $blob] >= 0}] \
-         [expr {[string first {UserChoice} $blob] < 0}]
+    catch {wm withdraw .assoc}
+    set texts {} ; set stack [list .assoc]
+    while {[llength $stack]} {
+        set w [lindex $stack 0] ; set stack [lrange $stack 1 end]
+        if {![catch {$w cget -text} t]} { lappend texts $t }
+        foreach c [winfo children $w] { lappend stack $c }
+    }
+    set blob [join $texts \n]
+    list [winfo exists .assoc] \
+         [string match "*does not write itself into the Windows registry*" $blob] \
+         [string match "*Choose another app*" $blob] \
+         [string match "*Always*" $blob] \
+         [expr {![string match "*Register els*" $blob]}]
 } -result {1 1 1 1 1}
-
-test assoc-1.1 {assoc_commands registers els as an app + Open-with option for the curated types; sets no default} -setup {ui_reset} -body {
-    set blob [join [lmap c [els::assoc_commands [file join $::ELS_TMP els.exe]] {join $c " "}] "\n"]
-    list [expr {[string first {\Applications\els.exe\shell\open\command} $blob] >= 0}] \
-         [expr {[string first {\.txt\OpenWithProgids /v els.txt} $blob] >= 0}] \
-         [expr {[string first {SupportedTypes /v .txt} $blob] >= 0}] \
-         [expr {[string first {FileAssociations /v .csv} $blob] >= 0}] \
-         [expr {[string first HKLM $blob] < 0}] \
-         [expr {[string first UserChoice $blob] < 0}]
-} -result {1 1 1 1 1 1}
 
 test assoc-1.2 {assoc_unregister_commands removes only els-owned keys/values and preserves the vendor root} -setup {ui_reset} -body {
     set blob [join [lmap c [els::assoc_unregister_commands [file join $::ELS_TMP els.exe]] {join $c " "}] "\n"]
@@ -923,7 +898,7 @@ test assoc-1.3 {curated set is the plain-text core; no markdown or code types} -
          [expr {"json" ni $exts && "js" ni $exts && "py" ni $exts && "html" ni $exts}]
 } -result {{txt log ini conf cfg nfo text toml yaml yml csv tsv env properties srt} 1 1}
 
-test assoc-2.1 {dialog shows a Register button + status when els is NOT registered; no checkboxes} -setup {
+test assoc-2.1 {no old registration: guidance only — no cleanup button, no status line, Close is default} -setup {
     ui_reset
     rename ::els::assoc_registered ::els::assoc_registered_real
     proc ::els::assoc_registered {} { return 0 }
@@ -933,16 +908,15 @@ test assoc-2.1 {dialog shows a Register button + status when els is NOT register
 } -body {
     els::file_associations
     catch {wm withdraw .assoc}
-    set nchk 0
-    foreach c [winfo children .assoc.f] { if {[winfo class $c] eq "Checkbutton"} { incr nchk } }
     list [winfo exists .assoc] \
-         [winfo exists .assoc.f.b.reg] \
          [expr {![winfo exists .assoc.f.b.un]}] \
-         [winfo exists .assoc.f.status] \
-         $nchk [.assoc.f.b.reg cget -default]
-} -result {1 1 1 1 0 active}
+         [expr {![winfo exists .assoc.f.b.reg]}] \
+         [expr {![winfo exists .assoc.f.status]}] \
+         [winfo exists .assoc.f.b.def] \
+         [.assoc.f.b.close cget -default]
+} -result {1 1 1 1 1 active}
 
-test assoc-2.2 {dialog shows Remove + Open Default Apps (and no Register) when els IS registered} -setup {
+test assoc-2.2 {an old self-registration is detected: status line + Remove Old Registration appear} -setup {
     ui_reset
     rename ::els::assoc_registered ::els::assoc_registered_real
     proc ::els::assoc_registered {} { return 1 }
@@ -953,10 +927,16 @@ test assoc-2.2 {dialog shows Remove + Open Default Apps (and no Register) when e
     els::file_associations
     catch {wm withdraw .assoc}
     list [winfo exists .assoc.f.b.un] \
+         [winfo exists .assoc.f.status] \
          [winfo exists .assoc.f.b.def] \
          [expr {![winfo exists .assoc.f.b.reg]}] \
          [.assoc.f.b.close cget -default]
-} -result {1 1 1 active}
+} -result {1 1 1 1 active}
+
+test filetypes-1.1 {the open/save dialogs default to All files, not .txt (nothing hidden)} -body {
+    set first [lindex [els::filetypes] 0]
+    list [lindex $first 0] [lindex $first 1]
+} -result {{All files} *}
 
 # Regression for the "can only set from the built els.exe" intermittency: the exe
 # is resolved from the boot script captured at load (info script is "" in

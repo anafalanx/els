@@ -114,7 +114,7 @@
     <li><b>Open a file</b> — <kbd>Ctrl</kbd>+<kbd>O</kbd>, or drag a file onto the window, or <em>File ▸ Open Recent</em>.</li>
     <li><b>New tab</b> — <kbd>Ctrl</kbd>+<kbd>N</kbd>. Every file opens in its own tab.</li>
     <li><b>Save</b> — <kbd>Ctrl</kbd>+<kbd>S</kbd> (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> for Save As).</li>
-    <li><b>Make els your default editor</b> — <em>Help ▸ File Associations…</em> registers els for common text types. (Association registration works from the built <code>els.exe</code>, not a source run.)</li>
+    <li><b>Make els your default editor</b> — els writes nothing into the registry; use Windows' own mechanism, once per file type: right-click a file, <em>Open with ▸ Choose another app</em>, pick els (the first time, <em>Choose an app on your PC</em> and browse to <code>els.exe</code> — Windows remembers it afterwards), and tick <em>Always</em>. <em>Help ▸ File Associations…</em> walks through this and can remove the self-registration an older els may have left.</li>
   </ul>
   <p>els remembers its window position and the set of open files between runs; a plain relaunch restores your last session. Launching els with a specific file (for example by double-clicking a document) opens just that file and leaves the saved session untouched until you next start els on its own.</p>
 </section>

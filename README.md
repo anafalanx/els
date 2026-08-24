@@ -36,12 +36,13 @@ you move it. It never falls back to the user profile and deliberately ignores
 old profile-stored els state. The complete inventory is under
 [Data safety](#data-safety).
 
-To make els open `.txt` and other plain-text files, open **Help > File
-Associations...** and click **Register els with Windows**. That puts els in
-Explorer's **Open with** menu (and in Settings > Default apps) without ever
-seizing a default. Then right-click a file, pick **Open with > els**, and tick
-**Always** to make it the default for that type. Manage or reset defaults anytime
-in **Settings > Default apps**.
+els never writes itself into the Windows registry. To make it open `.txt` and
+other plain-text files, use Windows' own mechanism once per type: right-click a
+file, pick **Open with > Choose another app**, choose els (the first time, use
+**Choose an app on your PC** and browse to `els.exe` — Windows remembers it
+afterwards), and tick **Always**. **Help > File Associations...** explains this
+in-app, links to **Settings > Default apps**, and can remove the
+self-registration an older els (0.99 or earlier) may have left behind.
 
 A full manual ships inside els — open it any time from **Help > Manual** (it opens
 in your browser). Its source is [`resources/els-manual.html`](resources/els-manual.html).
@@ -100,10 +101,10 @@ in your browser). Its source is [`resources/els-manual.html`](resources/els-manu
   reopen-on-start, on by default.
 - **Zoom** the text with Ctrl `+` / `-` / `0` or Ctrl+mouse-wheel, remembered
   across sessions (the font family is fixed: no picker, by design).
-- **File associations**: **Help > File Associations...** registers els with
-  Windows as an app that can open files (it never seizes a type's default). els
-  then appears in Explorer's **Open with** menu; point any type at it with
-  **Open with > Always**, and manage defaults in **Settings > Default apps**.
+- **File associations, the Windows way**: els writes nothing into the registry.
+  Point a type at it with Explorer's **Open with > Choose another app > Always**
+  (browse to `els.exe` the first time); **Help > File Associations...** walks
+  through it and can clean up an older els's self-registration.
 - **Update check** (on launch): els makes one anonymous HTTPS request to the
   GitHub Releases API to notice a newer version and light a status-bar hint if
   one exists. Nothing is sent but the request, it fails silently when offline,

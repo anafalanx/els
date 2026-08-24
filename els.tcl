@@ -1484,55 +1484,15 @@ proc els::association_exe {} {
     if {[file exists $near]} { return [file normalize $near] }
     return ""
 }
-# The curated set of plain-text file types els advertises itself for (declared as
-# SupportedTypes / Capabilities so els surfaces for them in Open with and Default
-# apps).  Code/markup (json, xml, html, js, py, ...) is deliberately absent: els
-# has no syntax highlighting, so it should not claim to handle those.
+# The text types an OLDER els (<= 0.99) once declared in the registry.  Kept ONLY so
+# "Remove Old Registration" can clean up exactly what those versions wrote: els no
+# longer registers itself at all — the preferred mechanism is Windows' own
+# Open with > Always, explained in the File Associations dialog.
 proc els::assoc_exts {} {
     return {txt log ini conf cfg nfo text toml yaml yml csv tsv env properties srt}
 }
-# reg.exe commands that register els with Windows as an application that can open
-# files — type-independent, per-user (HKCU) only.  This makes "els" appear by name
-# and icon in Explorer's Open with list for ANY file, and as a manageable entry in
-# Settings > Default apps.  It NEVER sets a file type's default or touches
-# UserChoice: the user picks els per type via Open with > Always.  The curated text
-# extensions are merely DECLARED (SupportedTypes / Capabilities) so els surfaces for
-# them and Default apps shows what it handles — declaring a type is not the same as
-# becoming its default.
-proc els::assoc_commands {exe} {
-    set exe [file nativename [file normalize $exe]]
-    set appExe [file tail $exe]
-    set progid els.txt
-    set openCmd [format {"%s" "%%1"} $exe]
-    set icon [format {"%s",0} $exe]
-    set clsKey "HKCU\\Software\\Classes\\$progid"
-    set appKey "HKCU\\Software\\Classes\\Applications\\$appExe"
-    set capKey {HKCU\Software\anafalanx\els\Capabilities}
-    set cmds {}
-    # one shared ProgID els uses to open a text file
-    lappend cmds [list reg.exe add $clsKey /ve /d {els Text File} /f]
-    lappend cmds [list reg.exe add "$clsKey\\DefaultIcon" /ve /d $icon /f]
-    lappend cmds [list reg.exe add "$clsKey\\shell\\open\\command" /ve /d $openCmd /f]
-    # the application itself: friendly name + launcher (-> Open with, any file)
-    lappend cmds [list reg.exe add $appKey /v FriendlyAppName /t REG_SZ /d els /f]
-    lappend cmds [list reg.exe add "$appKey\\shell\\open\\command" /ve /d $openCmd /f]
-    # capabilities (-> a manageable "els" entry in Settings > Default apps)
-    lappend cmds [list reg.exe add $capKey /v ApplicationName /t REG_SZ /d els /f]
-    lappend cmds [list reg.exe add $capKey /v ApplicationDescription /t REG_SZ /d {A tiny text editor for Windows.} /f]
-    lappend cmds [list reg.exe add $capKey /v ApplicationIcon /t REG_SZ /d $icon /f]
-    lappend cmds [list reg.exe add {HKCU\Software\RegisteredApplications} /v els /t REG_SZ /d {Software\anafalanx\els\Capabilities} /f]
-    # declare the curated text types: list els as an Open-with option for each
-    # (OpenWithProgids -> the inline right-click "Open with" submenu), advertise
-    # support (SupportedTypes), and list them under Default apps (Capabilities).
-    # All three are options/declarations — NONE sets the type's default.
-    foreach e [els::assoc_exts] {
-        lappend cmds [list reg.exe add "HKCU\\Software\\Classes\\.$e\\OpenWithProgids" /v $progid /t REG_SZ /d "" /f]
-        lappend cmds [list reg.exe add "$appKey\\SupportedTypes" /v ".$e" /t REG_SZ /d "" /f]
-        lappend cmds [list reg.exe add "$capKey\\FileAssociations" /v ".$e" /t REG_SZ /d $progid /f]
-    }
-    return $cmds
-}
-# reg.exe commands that fully remove exactly what assoc_commands writes.  The
+# reg.exe commands that fully remove exactly what an older els's self-registration
+# wrote (the register path itself is gone — see assoc_exts above).  The
 # shared HKCU\Software\anafalanx vendor root may contain other anafalanx products,
 # so it is never deleted merely to tidy empty parents.  Per-user only.  Any
 # default the USER set via Open with > Always is left alone — that's their choice,
@@ -1603,25 +1563,8 @@ proc els::open_default_apps {} {
     if {$cmd ne "" && ![catch {exec $cmd /c start "" ms-settings:defaultapps &}]} { return }
     els::open_url ms-settings:defaultapps
 }
-# Register / unregister actions, driven by the dialog buttons.  Both re-render the
-# dialog so its status line and buttons reflect the new reality.
-proc els::assoc_register {} {
-    set exe [els::association_exe]
-    if {$exe eq "" || ![file exists $exe]} {
-        els::message_box -parent .assoc -icon warning -title els \
-            -message "File associations can only be registered from the built els.exe, not a source run.\nRun the packaged els.exe and try again."
-        return
-    }
-    set errs {}
-    foreach cmd [els::assoc_commands $exe] {
-        if {[catch {els::assoc_run $cmd} e]} { lappend errs $e }
-    }
-    if {[llength $errs]} {
-        els::message_box -parent .assoc -icon error -title els \
-            -message "Registration didn't fully complete:\n[join [lsort -unique $errs] \n]"
-    }
-    catch {els::assoc_render}
-}
+# Remove an old (<= 0.99) self-registration, driven by the dialog's cleanup button;
+# re-renders the dialog so its state reflects the new reality.
 proc els::assoc_unregister {} {
     set exe [els::association_exe]
     if {$exe eq ""} { set exe els.exe }   ;# canonical app-key name, never the host interpreter
@@ -1637,7 +1580,9 @@ proc els::assoc_unregister {} {
     catch {els::assoc_render}
     return [expr {![llength $errs]}]
 }
-# (Re)build the dialog body to reflect the current registration state.
+# (Re)build the dialog body: guidance on Windows' own Open with > Always mechanism.
+# els no longer writes itself into the registry; the only action offered is a
+# CLEANUP button when an old (<= 0.99) self-registration is still present.
 proc els::assoc_render {} {
     set bg $::els::PAGE
     catch {destroy .assoc.f}
@@ -1646,34 +1591,34 @@ proc els::assoc_render {} {
     set reg [els::assoc_registered]
     label .assoc.f.title -text "File Associations" -font elsUIb -fg $::els::INK -bg $bg
     grid  .assoc.f.title -row 0 -column 0 -sticky w -pady {0 10}
-    set blurb "els registers with Windows as an app that can open files. To point a\nfile type at els, right-click it in Explorer, choose Open with, pick\nels, and turn on Always. Defaults are managed and reset anytime in\nWindows Settings > Default apps."
+    set blurb "els does not write itself into the Windows registry. To open a file\
+\ntype with els, use Windows' own mechanism, once per type:\
+\n\
+\n   1.  Right-click the file in Explorer and choose\
+\n        Open with > Choose another app.\
+\n   2.  Pick els. The first time, use \"Choose an app on your PC\"\
+\n        and browse to els.exe; Windows remembers it afterwards.\
+\n   3.  Tick Always to make els the default for that type.\
+\n\
+\nDefaults are managed and reset anytime in Settings > Default apps."
     label .assoc.f.blurb -text $blurb -font elsUI -fg $::els::MUTED -bg $bg -justify left -anchor w
     grid  .assoc.f.blurb -row 1 -column 0 -sticky w -pady {0 16}
-    set statusTxt [expr {$reg ? "els is registered with Windows." : "els is not registered with Windows yet."}]
-    set statusFg  [expr {$reg ? $::els::INK : $::els::MUTED}]
-    label .assoc.f.status -text $statusTxt -font elsUIb -fg $statusFg -bg $bg -anchor w
-    grid  .assoc.f.status -row 2 -column 0 -sticky w -pady {0 6}
-    label .assoc.f.types -text "Text types els advertises: [join [lmap e [els::assoc_exts] {string cat . $e}] {  }]" \
-        -font elsUI -fg $::els::MUTED -bg $bg -justify left -anchor w -wraplength 470
-    grid  .assoc.f.types -row 3 -column 0 -sticky w -pady {0 18}
-    frame .assoc.f.b -bg $bg
-    grid  .assoc.f.b -row 4 -column 0 -sticky ew
-    ttk::button .assoc.f.b.def   -text "Open Default Apps" -style Dialog.TButton -command els::open_default_apps
-    ttk::button .assoc.f.b.close -text Close -style Dialog.TButton -command {destroy .assoc}
     if {$reg} {
-        ttk::button .assoc.f.b.un -text "Remove els" -style Dialog.TButton -command els::assoc_unregister
-        pack .assoc.f.b.close -side right -padx {6 0}
-        pack .assoc.f.b.un    -side right -padx {6 0}
-        pack .assoc.f.b.def   -side left
-        set ::els::assoc_default .assoc.f.b.close
-    } else {
-        ttk::button .assoc.f.b.reg -text "Register els with Windows" \
-            -style Dialog.TButton -default active -command els::assoc_register
-        pack .assoc.f.b.close -side right -padx {6 0}
-        pack .assoc.f.b.reg   -side left
-        set ::els::assoc_default .assoc.f.b.reg
+        label .assoc.f.status -text "An older els registered itself with Windows on this machine." \
+            -font elsUIb -fg $::els::INK -bg $bg -anchor w
+        grid  .assoc.f.status -row 2 -column 0 -sticky w -pady {0 18}
     }
-    if {$reg} { .assoc.f.b.close configure -default active }
+    frame .assoc.f.b -bg $bg
+    grid  .assoc.f.b -row 3 -column 0 -sticky ew
+    ttk::button .assoc.f.b.def   -text "Open Default Apps" -style Dialog.TButton -command els::open_default_apps
+    ttk::button .assoc.f.b.close -text Close -style Dialog.TButton -default active -command {destroy .assoc}
+    pack .assoc.f.b.close -side right -padx {6 0}
+    if {$reg} {
+        ttk::button .assoc.f.b.un -text "Remove Old Registration" -style Dialog.TButton -command els::assoc_unregister
+        pack .assoc.f.b.un -side right -padx {6 0}
+    }
+    pack .assoc.f.b.def -side left
+    set ::els::assoc_default .assoc.f.b.close
     # Enter activates the -default active button (Tk 9's TButton ignores Return);
     # no entry/list in this dialog, so a toplevel binding is unambiguous (R21).
     bind .assoc <Return>   {catch {$::els::assoc_default invoke}}
@@ -4432,9 +4377,12 @@ proc els::set_eol {v} {
 # default type, while All files remains available for extensionless or unusual
 # names.
 proc els::filetypes {} {
+    # "All files" FIRST: the dialog opens with the first filter active, and a
+    # plain-text editor must not hide every non-.txt file by default (logs, conf,
+    # extensionless files, ...).  The named groups remain one click away.
     return {
-        {{Text}           {.txt}}
         {{All files}      *}
+        {{Text}           {.txt}}
         {{Tcl}            {.tcl}}
         {{C / C++}        {.c .h .cpp .hpp .cc}}
         {{Web}            {.html .htm .css .js .json .xml}}
