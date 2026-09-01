@@ -771,12 +771,14 @@ proc els::config_roots {} {
     }
     return [list $progdir]
 }
+# All of els's state lives under ONE folder next to the program: els-data\
+# (els.conf, els.log, els.deferred, backups\, scripts\, transient worker dirs).
+# The user sees exactly two things: els.exe and els-data.  Everything else in
+# the codebase derives its location from [file dirname $config_path], so rooting
+# the config here roots the whole inventory.
 proc els::config_candidates {{name els.conf}} {
     set near [lindex [els::config_roots] 0]
-    return [list [file join $near $name]]
-}
-proc els::config_legacy_candidates {} {
-    return [els::config_candidates config.tcl]
+    return [list [file join $near els-data $name]]
 }
 proc els::config_file {} { return $::els::config_path }
 
@@ -795,13 +797,7 @@ proc els::config_resolve_existing {} {
     set near [lindex [els::config_candidates] 0]
     set existed [file exists $near]
     els::set_config_path $near
-    if {$existed} { return 1 }
-    set oldNear [lindex [els::config_legacy_candidates] 0]
-    if {[file exists $oldNear]} {
-        catch {file copy -force $oldNear $near}
-        return 1
-    }
-    return 0
+    return [expr {$existed ? 1 : 0}]
 }
 # The VIRTUAL desktop rect {x y w h} — the bounding box of ALL monitors, with a
 # possibly-negative top-left.  From the native GetSystemMetrics(SM_*VIRTUALSCREEN)

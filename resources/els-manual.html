@@ -247,7 +247,7 @@
     <tr><td class="k">Indent · Dedent</td><td>Add or remove leading indentation. <kbd>Tab</kbd> indents when a selection spans lines.</td></tr>
   </table>
   <h2 id="scripts">Buffer scripts</h2>
-  <p>Below the line operations, the Buffer menu lists your <b>buffer scripts</b>: plain Tcl files in a <code>scripts</code> folder next to <code>els.conf</code>, shown by file name. A script is a <em>text filter</em> — it receives the selection (or, with nothing selected, the whole buffer) in <code>$text</code>, along with <code>$hasSelection</code>, <code>$path</code>, and <code>$lineCount</code>, and whatever it returns replaces that text as a single undo step.</p>
+  <p>Below the line operations, the Buffer menu lists your <b>buffer scripts</b>: plain Tcl files in the <code>scripts</code> folder inside <code>els-data</code> (els&#8217;s one state folder, beside the program), shown by file name. A script is a <em>text filter</em> — it receives the selection (or, with nothing selected, the whole buffer) in <code>$text</code>, along with <code>$hasSelection</code>, <code>$path</code>, and <code>$lineCount</code>, and whatever it returns replaces that text as a single undo step.</p>
   <p>Scripts run in a sandbox: no file, program, or network access, and a hard time limit, so a script can at worst mangle text — and undo covers that. If a script fails, the buffer is left untouched and the status bar says so.</p>
   <p>The classic transforms ship as editable default scripts — <em>Sort Lines</em>, <em>Sort Lines Descending</em>, <em>Reverse Lines</em>, <em>Remove Duplicate Lines</em> (first occurrence wins), <em>UPPERCASE</em>, <em>lowercase</em>, and <em>Trim Trailing Whitespace</em>. They double as worked examples of the contract: open one from the scripts folder to see the pattern. Delete any you don't want (the menu follows the folder after <em>Reload Scripts</em>); <em>Restore Default Scripts</em> rewrites the pristine set, leaving your own files alone; <em>New Script…</em> creates a file from the template and opens it for editing.</p>
 </section>
@@ -281,7 +281,7 @@
 
 <section id="backups">
   <h2>Backups</h2>
-  <p><em>File ▸ Keep Backups</em> (on by default) preserves the file's previous version every time you overwrite it — the primary safety net for edit-by-mistake. Backups live in a <code>backups\</code> folder next to els's settings.</p>
+  <p><em>File ▸ Keep Backups</em> (on by default) preserves the file's previous version every time you overwrite it — the primary safety net for edit-by-mistake. Backups live in the <code>backups\</code> folder inside <code>els-data</code> — plain copies you can open even without els.</p>
   <ul>
     <li>The folder is bounded, not an archive: a handful of versions per file, a burst of rapid saves keeps the version from before the burst, and copies age out after about a month.</li>
     <li>Very large files are skipped (you get a one-time note when one is), and a backup that can't be written never blocks the save — you get a quiet status note and the save proceeds.</li>

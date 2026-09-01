@@ -1656,8 +1656,8 @@ test cfg-1.1 {config_candidates yields exactly the source/executable-adjacent pa
     set fake [file normalize [file join $::ELS_TMP cfg-one els.tcl]]
     set ::els::boot_script $fake
     set candidates [els::config_candidates]
-    list [llength $candidates] [lindex $candidates 0] [file join [file dirname $fake] els.conf]
-} -result [list 1 [file normalize [file join $::ELS_TMP cfg-one els.conf]] [file normalize [file join $::ELS_TMP cfg-one els.conf]]]
+    list [llength $candidates] [lindex $candidates 0] [file join [file dirname $fake] els-data els.conf]
+} -result [list 1 [file normalize [file join $::ELS_TMP cfg-one els-data els.conf]] [file normalize [file join $::ELS_TMP cfg-one els-data els.conf]]]
 
 test cfg-1.2 {resolve_existing ignores a profile config and pins the adjacent path} -setup {
     els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_self $::els::selftest
@@ -1677,7 +1677,7 @@ test cfg-1.2 {resolve_existing ignores a profile config and pins the adjacent pa
     set ::env(LOCALAPPDATA) [file join $root profile]
     set ::els::selftest 1 ; set ::els::config_path ""
     set found [els::config_resolve_existing]
-    set near [file join $root app els.conf]
+    set near [file join $root app els-data els.conf]
     list $found [expr {$::els::config_path eq $near}] [file exists $near] [file exists $profile]
 } -result {0 1 0 1}
 
@@ -1694,27 +1694,25 @@ test cfg-1.3 {first run is pinned immediately and has no location chooser} -setu
     set ::els::boot_script [file join $root els.tcl]
     set ::els::selftest 1 ; set ::els::config_path ""
     set found [els::config_resolve_existing]
-    list $found [expr {$::els::config_path eq [file join $root els.conf]}] \
+    list $found [expr {$::els::config_path eq [file join $root els-data els.conf]}] \
          [llength [info commands els::config_choice_dialog]] [winfo exists .cfgask]
 } -result {0 1 0 0}
 
-test cfg-1.4 {adjacent legacy config.tcl is migrated to adjacent els.conf} -setup {
-    els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_self $::els::selftest
+test cfg-1.4 {all state roots inside els-data: backups and scripts derive from the config dir} -setup {
+    els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_cp $::els::config_path
 } -cleanup {
-    set ::els::boot_script $::__cfg_bs ; set ::els::selftest $::__cfg_self
-    set ::els::config_path [file join $::ELS_TMP els.conf]
-    catch {file delete -force [file join $::ELS_TMP cfg-legacy]}
-    unset -nocomplain ::__cfg_bs ::__cfg_self
+    set ::els::boot_script $::__cfg_bs ; set ::els::config_path $::__cfg_cp
+    catch {file delete -force [file join $::ELS_TMP cfg-data]}
+    unset -nocomplain ::__cfg_bs ::__cfg_cp
 } -body {
-    set root [file join $::ELS_TMP cfg-legacy]
+    set root [file join $::ELS_TMP cfg-data]
     file mkdir $root
     set ::els::boot_script [file join $root els.tcl]
-    raw_write [file join $root config.tcl] [dict create geometry 810x610 word_wrap 1]
-    set ::els::selftest 1 ; set ::els::config_path ""
-    set found [els::config_resolve_existing]
-    set near [file join $root els.conf]
-    list $found [file exists $near] [expr {$::els::config_path eq $near}]
-} -result {1 1 1}
+    set ::els::config_path [lindex [els::config_candidates] 0]
+    list [file tail [file dirname $::els::config_path]] \
+         [file tail [file dirname [els::backup_dir]]] \
+         [file tail [file dirname [els::scripts_dir]]]
+} -result {els-data els-data els-data}
 
 # ---- bug-hunt wave 4: config + session robustness ------------------------
 

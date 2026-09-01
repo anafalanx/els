@@ -40,6 +40,7 @@ proc startup_appdir {name} {
     return $d
 }
 proc startup_write {path bytes} {
+    file mkdir [file dirname $path]
     set f [open $path w]
     fconfigure $f -translation binary
     puts -nonewline $f $bytes
@@ -103,8 +104,8 @@ test startup-1.1 {first launch pins adjacent config with no location prompt} -co
 } -body {
     set r [startup_probe $app]
     list [dict get $r mapped] [dict get $r cfgask] [dict get $r cfgask_mapped] \
-         [expr {[dict get $r config] eq [file join $app els.conf]}] \
-         [file exists [file join $app els.conf]] \
+         [expr {[dict get $r config] eq [file join $app els-data els.conf]}] \
+         [file exists [file join $app els-data els.conf]] \
          [file exists [file join $app localappdata els els.conf]]
 } -cleanup {
     catch {file delete -force $app}
@@ -113,7 +114,7 @@ test startup-1.1 {first launch pins adjacent config with no location prompt} -co
 test startup-1.2 {existing adjacent config is loaded without any location prompt} -constraints startup -setup {
     set app [startup_appdir configured]
 } -body {
-    set conf [file join $app els.conf]
+    set conf [file join $app els-data els.conf]
     startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
         restore_session 1 session_files {} session_active ""]
     set r [startup_probe $app]
@@ -129,7 +130,7 @@ test startup-1.3 {startup restore reopens saved files and active tab} -constrain
     set p1 [startup_write [file join $app one.txt] "one\n"]
     set p2 [startup_write [file join $app two.txt] "two\n"]
     set miss [file join $app missing.txt]
-    set conf [file join $app els.conf]
+    set conf [file join $app els-data els.conf]
     startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
         restore_session 1 session_files [list $p1 $miss $p2] session_active $p2]
     set r [startup_probe $app]
@@ -145,7 +146,7 @@ test startup-1.4 {explicit launch file takes precedence over saved session} -con
 } -body {
     set p1 [startup_write [file join $app previous.txt] "previous\n"]
     set p2 [startup_write [file join $app explicit.txt] "explicit\n"]
-    set conf [file join $app els.conf]
+    set conf [file join $app els-data els.conf]
     startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
         restore_session 1 session_files [list $p1] session_active $p1]
     set r [startup_probe $app $p2]
@@ -178,11 +179,11 @@ test startup-1.6 {failed explicit path is logged and does not suppress a usable 
 } -body {
     set prior [startup_write [file join $app prior.txt] "prior session\n"]
     set missing [file join $app missing-explicit.txt]
-    set conf [file join $app els.conf]
+    set conf [file join $app els-data els.conf]
     startup_write $conf [dict create geometry 800x600 recent {} word_wrap 0 \
         restore_session 1 session_files [list $prior] session_active $prior]
     set r [startup_probe $app $missing]
-    set log [file join $app els.log]
+    set log [file join $app els-data els.log]
     list [dict get $r docs] [lmap p [dict get $r paths] {file tail $p}] \
          [expr {[file exists $log] && [string match "*quiet open failed*" [startup_read $log]]}]
 } -cleanup {
@@ -196,10 +197,10 @@ test startup-1.7 {mixed good and failed explicit paths keep the good launch and 
     set prior [startup_write [file join $app previous.txt] "previous\n"]
     set good [startup_write [file join $app good.txt] "good\n"]
     set missing [file join $app absent.txt]
-    startup_write [file join $app els.conf] [dict create geometry 800x600 recent {} word_wrap 0 \
+    startup_write [file join $app els-data els.conf] [dict create geometry 800x600 recent {} word_wrap 0 \
         restore_session 1 session_files [list $prior] session_active $prior]
     set r [startup_probe $app $missing $good]
-    set log [file join $app els.log]
+    set log [file join $app els-data els.log]
     list [dict get $r docs] [lmap p [dict get $r paths] {file tail $p}] \
          [expr {[file exists $log] && [string match "*quiet open failed*" [startup_read $log]]}]
 } -cleanup {

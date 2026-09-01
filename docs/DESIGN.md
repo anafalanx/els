@@ -206,15 +206,25 @@ before replacing a target, so the label is never treated as permission to write.
 
 ## Adjacent state
 
-There is one state root: beside `els.exe` when packaged, beside `els.tcl` in a
-source run. `els.conf`, `backups\`, `els.log`/`els.log.1`, and
-transient `.els-find\` all live there. (0.95 removed crash recovery and the
-single-instance handoff, so there are no `swap\`/`handoff\` dirs; a boot-time
-sweep reaps either left behind by a pre-0.95 install.) No user-profile
-path is a fallback, migration source or deletion target. The sole compatibility
-case is an adjacent `config.tcl`: when `els.conf` is absent, it is copied once to
-the new name and retained. Corrupt deferred-open state is quarantined rather than
-silently rewritten when that preservation is possible.
+There is one state root: the **`els-data\`** folder beside `els.exe` when
+packaged, beside `els.tcl` in a source run — so the user sees exactly two
+things, the program and its one data folder. `els.conf`, `backups\`,
+`scripts\`, `els.log`/`els.log.1`, `els.deferred`, and transient `.els-find\`
+all live inside it; everything derives its location from the config file's
+directory, so the config path *is* the layout. (0.95 removed crash recovery and
+the single-instance handoff, so there are no `swap\`/`handoff\` dirs; a
+boot-time sweep reaps either left behind by a pre-0.95 install. The pre-1.0
+flat layout and the ancient `config.tcl` shim have no migration path — decided
+while els still has a single user.) No user-profile path is a fallback,
+migration source or deletion target. Corrupt deferred-open state is quarantined
+rather than silently rewritten when that preservation is possible.
+
+A single SQLite `els.db` was considered for this and rejected: backups exist to
+be openable *without* els (plain copies, low-tech restore), scripts must be
+real files (menu-by-filename, edited in els itself), and a log must be readable
+when things are broken. One folder gives the same one-thing-to-move cleanliness
+without making the safety net opaque or coupling every artifact to one file's
+integrity.
 
 ## About and credits
 

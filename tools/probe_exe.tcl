@@ -180,7 +180,7 @@ proc run_probe {name src {conf ""} {files {}} {fileArgs {}}} {
     if {[file exists $app]} { error "unique exe probe directory already exists: $app" }
     file mkdir $app
     file copy -force $src [file join $app els.exe]
-    if {$conf ne ""} { write_file [file join $app els.conf] $conf }
+    if {$conf ne ""} { write_file [file join $app els-data els.conf] $conf }
     foreach {tail bytes} $files {
         write_file [file join $app $tail] $bytes
     }
@@ -209,7 +209,7 @@ proc probe_packaged_worker_bypass {src} {
     set ec   [dict get $bounded errorcode]
     set err  [dict get $bounded error]
     if {!$code || [lindex $ec 0] ne "CHILDSTATUS" || [lindex $ec 2] != 3 \
-            || [file exists $report] || [file exists [file join $app els.conf]] \
+            || [file exists $report] || [file exists [file join $app els-data els.conf]] \
             || [llength [glob -nocomplain -directory $job *]]} {
         error "packaged worker bypass probe failed: code=$code errorcode=$ec err=$err"
     }
@@ -277,7 +277,7 @@ proc probe_packaged_worker_bypass {src} {
                 || [dict get $result output_crc] != 0 \
                 || [dict get $result error] ne "" || $index ne $expectedIndex \
                 || [file exists [file join $authJob replacement.utf8]] \
-                || [file exists $report] || [file exists [file join $app els.conf]]} {
+                || [file exists $report] || [file exists [file join $app els-data els.conf]]} {
             error "authorized packaged worker returned invalid data: $result"
         }
         puts "packaged worker authorized-search probe ok (2 exact matches)"
@@ -309,7 +309,7 @@ try {
 probe_packaged_worker_bypass $SRC
 
 set first [run_probe first $SRC]
-set firstConfig [file normalize [file join $BASE first els.conf]]
+set firstConfig [file normalize [file join $BASE first els-data els.conf]]
 set reportedConfig [dict get $first config]
 if {[dict get $first mapped] != 1 || [dict get $first cfgask] != 0 ||
     [dict get $first cfgask_mapped] != 0 ||
@@ -335,7 +335,7 @@ write_file $profileConfig $profileBytes
 set profileStamp [expr {[clock seconds] - 7200}]
 file mtime $profileConfig $profileStamp
 set profileRun [launch_probe $profileApp]
-set adjacentConfig [file normalize [file join $profileApp els.conf]]
+set adjacentConfig [file normalize [file join $profileApp els-data els.conf]]
 if {[file normalize [dict get $profileRun config]] ne $adjacentConfig ||
     $profileDoc in [dict get $profileRun paths] ||
     [dict get $profileRun active_path] eq $profileDoc ||
@@ -345,23 +345,8 @@ if {[file normalize [dict get $profileRun config]] ne $adjacentConfig ||
 }
 puts "profile config probe ok (ignored and untouched)"
 
-# The forbidden profile lookup is distinct from the supported adjacent-name
-# migration.  A legacy config.tcl beside the exe is copied to adjacent els.conf,
-# remains intact itself, and still restores its session.
-set adjacentApp [file join $BASE adjacent-legacy]
-set adjacentDoc [file normalize [file join $adjacentApp adjacent.txt]]
-set adjacentBytes [dict create geometry 800x600 recent {} word_wrap 0 \
-    restore_session 1 session_files [list $adjacentDoc] session_active $adjacentDoc]
-set adjacentRun [run_probe adjacent-legacy $SRC "" \
-    [list config.tcl $adjacentBytes adjacent.txt "adjacent migration\n"]]
-set migratedConfig [file normalize [file join $adjacentApp els.conf]]
-if {[file normalize [dict get $adjacentRun config]] ne $migratedConfig ||
-    [dict get $adjacentRun active_path] ne $adjacentDoc ||
-    [read_file [file join $adjacentApp config.tcl]] ne $adjacentBytes ||
-    [read_file $migratedConfig] ne $adjacentBytes} {
-    error "adjacent config.tcl migration failed: $adjacentRun"
-}
-puts "adjacent config migration probe ok"
+# (The legacy adjacent-config.tcl migration shim was removed with the els-data
+# layout — pre-1.0, single user, no migration paths to honour.)
 
 set app2 [file join $BASE restore]
 set p1 [file normalize [file join $app2 one.txt]]

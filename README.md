@@ -30,11 +30,12 @@ file, nothing to install. Releases are **code-signed** ("Open Source Developer
 Vincent Vercauteren", via Certum); Windows SmartScreen may still warn on first
 launch until that signature builds reputation — choose **More info → Run anyway**.
 
-els keeps all of its application-managed runtime state beside the executable. Put `els.exe` in a
-directory you can write to and keep its adjacent files and folders with it when
-you move it. It never falls back to the user profile and deliberately ignores
-old profile-stored els state. The complete inventory is under
-[Data safety](#data-safety).
+els keeps all of its application-managed runtime state in a single **`els-data`**
+folder beside the executable — settings, backups, scripts, diagnostics, all of
+it. Put `els.exe` in a directory you can write to; moving els means moving two
+things, `els.exe` and `els-data`. It never falls back to the user profile and
+deliberately ignores old profile-stored els state. The complete inventory is
+under [Data safety](#data-safety).
 
 els never writes itself into the Windows registry. To make it open `.txt` and
 other plain-text files, use Windows' own mechanism once per type: right-click a
@@ -85,7 +86,7 @@ in your browser). Its source is [`resources/els-manual.html`](resources/els-manu
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
   dedent (Tab / Shift+Tab).
 - **Buffer scripts** (Buffer menu): your own text filters as plain Tcl files in a
-  `scripts` folder next to `els.conf` — each gets the selection (or the whole
+  `scripts` folder inside `els-data` — each gets the selection (or the whole
   buffer) in `$text`, and what it returns replaces it, as one undo. Scripts run
   sandboxed (no file / exec / network access, hard time limit), so a script can at
   worst mangle text — and undo covers that. The classic transforms (sort, reverse,
@@ -151,9 +152,8 @@ containing `els.tcl` instead.
 are no longer any `swap\` or `handoff\` folders; a boot-time sweep deletes either
 one left behind by a pre-0.95 install.
 
-There is no profile fallback, migration or deletion. If `els.conf` does not yet
-exist but an old **adjacent** `config.tcl` does, els makes a one-time copy to
-`els.conf` and leaves the old file alone; this is the only legacy-state bridge.
+There is no profile fallback, migration or deletion. Everything lives under the
+one `els-data` folder beside the program; a first start simply creates it.
 Atomic writers also create
 short-lived temporary sidecars, and a failed document replacement deliberately
 retains the complete rescue copy beside that document and names it in the error.
@@ -245,7 +245,7 @@ Reload from Disk** re-reads the current file from disk at any time.
 **Previous versions (backups).** Saving is the one moment els overwrites
 your data with new content, so a save that replaces an existing file
 first preserves what the file held, as a plain copy in a `backups` folder
-next to `els.conf`, and therefore next to `els.exe` in a packaged run.
+inside `els-data`, right next to your settings.
 The folder is bounded, not an archive: a handful of versions per file, a
 burst of rapid saves keeps the version from before the burst rather than
 churning, very large files are skipped, and copies age out after about a
@@ -287,7 +287,7 @@ Stated plainly so you know before you rely on it:
   There is no 32-bit build.
 - **A writable directory for `els.exe`.** Settings, the deferred-open queue,
   backups, find-worker scratch and diagnostics are
-  intentionally stored beside the executable, never in the user profile. A
+  intentionally stored under the single `els-data` folder beside the executable, never in the user profile. A
   read-only application directory prevents those facilities from persisting;
   move els and its adjacent state to a writable directory.
 - **Not accessible to screen readers.** els draws its own text surface on Tk,

@@ -32,12 +32,9 @@
 # `z build build/custom.exe`) must never be committed either
 /els.exe
 
-# source runs always store config next to els.tcl (the repo root here); packaged
-# builds always store it next to els.exe
-/els.conf
-/config.tcl
-/els.log
-/scripts/
+# source runs root ALL their state in els-data next to els.tcl (the repo root
+# here); packaged builds do the same next to els.exe
+/els-data/
 /els.log.1
 # runtime state directories a source run creates next to els.tcl
 /swap/
