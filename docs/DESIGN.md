@@ -209,19 +209,14 @@ before replacing a target, so the label is never treated as permission to write.
 There is one state root: the **`els-data\`** folder beside `els.exe` when
 packaged, beside `els.tcl` in a source run — so the user sees exactly two
 things, the program and its one data folder. `els.conf`, `backups\`,
-`scripts\`, `els.log`/`els.log.1`, `els.deferred`, and transient `.els-find\`
-all live inside it; everything derives its location from the config file's
-directory, so the config path *is* the layout. (0.95 removed crash recovery and
-the single-instance handoff, so there are no `swap\`/`handoff\` dirs; a
-boot-time sweep reaps either left behind by a pre-0.95 install. The pre-1.0
-flat layout and the ancient `config.tcl` shim have no migration path — decided
-while els still has a single user.) No user-profile path is a fallback,
-migration source or deletion target. Corrupt deferred-open state is quarantined
-rather than silently rewritten when that preservation is possible.
+`els.log`/`els.log.1`, and transient `.els-find\` all live inside it;
+everything derives its location from the config file's directory, so the
+config path *is* the layout. There is no fallback to, migration from, or
+cleanup of older state beside the program or in the user profile, including
+`config.tcl`. Maintenance operates only inside the current state directory.
 
 A single SQLite `els.db` was considered for this and rejected: backups exist to
-be openable *without* els (plain copies, low-tech restore), scripts must be
-real files (menu-by-filename, edited in els itself), and a log must be readable
+be openable *without* els (plain copies, low-tech restore), and a log must be readable
 when things are broken. One folder gives the same one-thing-to-move cleanliness
 without making the safety net opaque or coupling every artifact to one file's
 integrity.
@@ -245,43 +240,27 @@ Written down so they stay decided:
 - No minimap.
 - No regex debugger, token-builder, or named-search manager: over-scoped.
 - No modal find/replace dialog.
-- **No extension API.** Buffer scripts (below) are deliberately NOT a plugin system:
-  a script is a sandboxed text filter — no UI hooks, no event hooks, no access to
-  anything but the text it is given. The API surface is four variables and a return
-  value, chosen so it can stay stable forever. (History: scripting was originally
-  declined outright, 2026-07-05, in favour of fixed built-ins; sustained real-world
-  use showed the fixed set genuinely wasn't enough, and the filter contract keeps
-  the original objections — knob explosion, security surface, API creep — answered.)
+- **No scripting / extension API.** Text transforms are a fixed, curated set of
+  built-in Buffer commands. By owner decision on 2026-10-05, custom buffer scripts
+  are removed and the built-in transforms restored; the other post-0.99 changes
+  remain. Existing script files are left untouched and are no longer loaded.
 - **No tab-width setting**, so no Tabs↔Spaces conversion (which needs one). Indent inserts
   a literal tab; dedent removes one leading tab (or up to four leading spaces).
 
 ## Text commands
 
-The caret/keyboard line ops are built in (Buffer menu + keys), each undo-atomic, acting
-on the selected lines or the current line: Move Up/Down (Alt+↑/↓), Duplicate (Ctrl+D),
-Delete (Ctrl+Shift+K), Join (Ctrl+J), Indent/Dedent (Tab/Shift+Tab on a selection).
+A small, opinionated set of buffer transforms (Buffer menu + keys), each undo-atomic. Line
+ops act on the selected lines or the current line; sort/reverse/dedupe act on the selection
+or, with none, the whole buffer. Case conversion acts on the selection or current
+line; trimming trailing whitespace always acts on the whole buffer.
 
-The pure text transforms ship as **buffer scripts** instead — see below. Deliberately
-excluded to keep the built-in set tight: Title Case (fiddly), Tabs↔Spaces (needs a
-width knob).
+- **Lines:** Move Up/Down (Alt+↑/↓), Duplicate (Ctrl+D), Delete (Ctrl+Shift+K),
+  Join (Ctrl+J), Indent/Dedent (Tab/Shift+Tab on a selection).
+- **Reorder:** Sort, Sort Descending, Reverse, Remove Duplicate Lines.
+- **Transform:** UPPERCASE, lowercase, Trim Trailing Whitespace.
 
-## Buffer scripts
-
-A buffer script is a Tcl **text filter**: a `*.tcl` file in `scripts\` next to
-`els.conf`, listed in the Buffer menu by its file name. It runs in a **safe
-interpreter** (Tcl's `-safe` base: no file, exec, network, or env access) with a hard
-time limit, receives `$text` (the selection, else the whole buffer) plus
-`$hasSelection` / `$path` / `$lineCount`, and whatever it returns replaces that text
-as one undo step. An error or timeout is one status note; the buffer is never touched
-on error — a script can at worst mangle text, and undo covers that.
-
-The classic transforms (Sort, Sort Descending, Reverse, Remove Duplicate Lines,
-UPPERCASE, lowercase, Trim Trailing Whitespace) are **seeded as default scripts** —
-working examples that double as the contract's documentation. Seeding happens once
-(when `scripts\` doesn't exist), so deleting a default is respected; **Buffer ▸
-Restore Default Scripts** rewrites the pristine set on request, leaving other files
-alone. **New Script…** names a file through the standard save dialog, seeds the
-contract template, and opens it for editing — in els, naturally.
+Deliberately excluded to keep the set tight: Title Case (fiddly), Tabs↔Spaces (needs a
+width knob), sort variants beyond the two directions.
 
 ## Sources
 

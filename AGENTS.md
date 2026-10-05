@@ -69,7 +69,7 @@ the Tcl/Tk script libraries and `els.tcl` riding inside an appended zipfs image.
   Tcl UI startup; `z test` runs the packaging-independent suite. Never debug a GUI
   build by running it on a failure and waiting for stderr; read the selftest
   report, or build a console-subsystem twin.
-- The packaged application keeps `els.conf`, `backups\`, `scripts\`,
+- The packaged application keeps `els.conf`, `backups\`,
   rotating `els.log`/`els.log.1`, and transient `.els-find\` under the single
   `els-data\` folder beside `els.exe`; a source run uses `els-data\` beside
   `els.tcl`. There is no fallback to, migration from, or cleanup of older

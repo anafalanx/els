@@ -1698,8 +1698,12 @@ test cfg-1.3 {first run is pinned immediately and has no location chooser} -setu
          [llength [info commands els::config_choice_dialog]] [winfo exists .cfgask]
 } -result {0 1 0 0}
 
-test cfg-1.4 {all state roots inside els-data: backups and scripts derive from the config dir} -setup {
+test cfg-1.4 {all state roots inside els-data: backups and find work derive from the config dir} -setup {
     els_reset ; set ::__cfg_bs $::els::boot_script ; set ::__cfg_cp $::els::config_path
+    # Load the native path checks before the fixture redirects boot_script.
+    if {![els::find_native_ready]} {
+        error "native find support is required for the state-root test"
+    }
 } -cleanup {
     set ::els::boot_script $::__cfg_bs ; set ::els::config_path $::__cfg_cp
     catch {file delete -force [file join $::ELS_TMP cfg-data]}
@@ -1711,7 +1715,7 @@ test cfg-1.4 {all state roots inside els-data: backups and scripts derive from t
     set ::els::config_path [lindex [els::config_candidates] 0]
     list [file tail [file dirname $::els::config_path]] \
          [file tail [file dirname [els::backup_dir]]] \
-         [file tail [file dirname [els::scripts_dir]]]
+         [file tail [file dirname [els::find_root]]]
 } -result {els-data els-data els-data}
 
 # ---- bug-hunt wave 4: config + session robustness ------------------------

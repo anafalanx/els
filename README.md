@@ -31,7 +31,7 @@ Vincent Vercauteren", via Certum); Windows SmartScreen may still warn on first
 launch until that signature builds reputation — choose **More info → Run anyway**.
 
 els keeps all of its application-managed runtime state in a single **`els-data`**
-folder beside the executable — settings, backups, scripts, diagnostics, all of
+folder beside the executable — settings, backups, diagnostics, all of
 it. Put `els.exe` in a directory you can write to; moving els means moving two
 things, `els.exe` and `els-data`. It never falls back to the user profile and
 deliberately ignores old profile-stored els state. The complete inventory is
@@ -82,17 +82,10 @@ in your browser). Its source is [`resources/els-manual.html`](resources/els-manu
   large or network file met during startup or session restore opens as a
   **placeholder tab** (an unloaded tab, shown with a `○`) that loads when you
   click it — so launch never freezes or blocks on a share, and nothing is lost.
-- **Text commands** (Buffer menu): undo-atomic line ops — move lines up/down
+- **Text commands** (Buffer menu): a curated, undo-atomic set — move lines up/down
   (Alt+↑/↓), duplicate (Ctrl+D), delete (Ctrl+Shift+K), join (Ctrl+J), indent /
-  dedent (Tab / Shift+Tab).
-- **Buffer scripts** (Buffer menu): your own text filters as plain Tcl files in a
-  `scripts` folder inside `els-data` — each gets the selection (or the whole
-  buffer) in `$text`, and what it returns replaces it, as one undo. Scripts run
-  sandboxed (no file / exec / network access, hard time limit), so a script can at
-  worst mangle text — and undo covers that. The classic transforms (sort, reverse,
-  remove duplicates, UPPERCASE / lowercase, trim trailing whitespace) ship as
-  editable default scripts; delete what you don't want, restore them anytime with
-  **Buffer > Restore Default Scripts**, add your own with **New Script...**.
+  dedent (Tab / Shift+Tab), sort / sort-descending / reverse / remove-duplicate
+  lines, UPPERCASE / lowercase, and trim trailing whitespace.
 - **Encoding & EOL**: auto-detected on open and preserved on save (mixed line
   endings are normalized to one style), shown in the
   status bar. All 95 Tcl encodings, BOM sniffing (UTF-8/16/32), and
@@ -143,14 +136,13 @@ document writes happen only when you turn on **File > Auto-save**.
 
 - `els.conf` stores settings, window state, recents and session paths.
 - `backups\` holds the bounded previous-version ring when backups are enabled.
-- `scripts\` holds the editable buffer scripts.
 - `els.log` and its one rotated generation, `els.log.1`, hold diagnostics.
 - `.els-find\` is transient scratch for immutable find snapshots, isolated
   worker jobs, result indexes and staged replacements.
 
 There is no fallback to, migration from, or cleanup of older state beside the
 program or in the user profile, including `config.tcl`. A first start creates
-`els-data`; move it with `els.exe` to keep settings, backups and scripts.
+`els-data`; move it with `els.exe` to keep settings, backups and diagnostics.
 Maintenance only cleans inside the current state directory. Atomic writers also create
 short-lived temporary sidecars, and a failed document replacement deliberately
 retains the complete rescue copy beside that document and names it in the error.
@@ -282,7 +274,7 @@ Stated plainly so you know before you rely on it:
   manifest still lists Windows 7/8.1 for compatibility and els may launch there,
   but those are untested and path handling degrades without the UTF-8 code page.
   There is no 32-bit build.
-- **A writable directory for `els.exe`.** Settings, scripts, backups,
+- **A writable directory for `els.exe`.** Settings, backups,
   find-worker scratch and diagnostics are
   intentionally stored under the single `els-data` folder beside the executable, never in the user profile. A
   read-only application directory prevents those facilities from persisting;
