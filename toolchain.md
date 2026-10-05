@@ -263,11 +263,11 @@ verify the executable but are not runtime dependencies. `LICENSE.txt` and
 contains the exact applicable Tcl, Tk, MinGW-w64 runtime, GCC GPLv3 and runtime-exception,
 zlib, and LibTomMath notice files used by the build.
 
-At runtime, the packaged app keeps `els.conf`,
-`backups\`, rotating `els.log`/`els.log.1`, and transient
-`.els-find\` only beside `els.exe`; a source run uses the directory containing
-`els.tcl`. There is no profile fallback, migration, or deletion of old profile
-state. The sole legacy bridge is adjacent: when `els.conf` is absent but
-`config.tcl` exists in that same directory, els copies it once to `els.conf` and
-leaves the original intact. The application directory must therefore be
-writable. Moving the exe without those sidecars gives it separate, fresh state.
+At runtime, the packaged app keeps `els.conf`, `backups\`, `scripts\`,
+rotating `els.log`/`els.log.1`, and transient `.els-find\` under the single
+`els-data\` folder beside `els.exe`. A source run uses `els-data\` beside
+`els.tcl`. There is no fallback to, migration from, or cleanup of older state
+beside the program or in the user profile, including `config.tcl`. Maintenance
+operates only inside the current state directory. The application directory
+must be writable. Move `els.exe` and `els-data\` together to preserve settings,
+backups, scripts and diagnostics.

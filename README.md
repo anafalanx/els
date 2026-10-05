@@ -125,7 +125,7 @@ in your browser). Its source is [`resources/els-manual.html`](resources/els-manu
   on disk, Missing, Unavailable and Read-only. This is an early warning; every
   save still performs the authoritative conflict check.
 - **Go to line**, **Reload from Disk**, **Always on Top**, window- and zoom-level
-  persistence, executable-adjacent `els.conf`, the els look and the awl icon.
+  persistence in `els-data\els.conf`, the els look and the awl icon.
 
 ## Data safety
 
@@ -138,23 +138,20 @@ on a crash or power loss that unsaved text is gone (see "No recovery of unsaved
 text" below). Backups are sidecars, not writes into the open document; automatic
 document writes happen only when you turn on **File > Auto-save**.
 
-**Adjacent state inventory.** In a packaged run the directory containing
-`els.exe` is the one and only state directory; a source run uses the directory
-containing `els.tcl` instead.
+**Adjacent state inventory.** The state directory is `els-data\` beside
+`els.exe` in a packaged run, or beside `els.tcl` in a source run. It contains:
 
 - `els.conf` stores settings, window state, recents and session paths.
 - `backups\` holds the bounded previous-version ring when backups are enabled.
+- `scripts\` holds the editable buffer scripts.
 - `els.log` and its one rotated generation, `els.log.1`, hold diagnostics.
 - `.els-find\` is transient scratch for immutable find snapshots, isolated
   worker jobs, result indexes and staged replacements.
 
-0.95 removed crash-recovery snapshots and the single-instance handoff, so there
-are no longer any `swap\` or `handoff\` folders; a boot-time sweep deletes either
-one left behind by a pre-0.95 install.
-
-There is no profile fallback, migration or deletion. Everything lives under the
-one `els-data` folder beside the program; a first start simply creates it.
-Atomic writers also create
+There is no fallback to, migration from, or cleanup of older state beside the
+program or in the user profile, including `config.tcl`. A first start creates
+`els-data`; move it with `els.exe` to keep settings, backups and scripts.
+Maintenance only cleans inside the current state directory. Atomic writers also create
 short-lived temporary sidecars, and a failed document replacement deliberately
 retains the complete rescue copy beside that document and names it in the error.
 
@@ -285,8 +282,8 @@ Stated plainly so you know before you rely on it:
   manifest still lists Windows 7/8.1 for compatibility and els may launch there,
   but those are untested and path handling degrades without the UTF-8 code page.
   There is no 32-bit build.
-- **A writable directory for `els.exe`.** Settings, the deferred-open queue,
-  backups, find-worker scratch and diagnostics are
+- **A writable directory for `els.exe`.** Settings, scripts, backups,
+  find-worker scratch and diagnostics are
   intentionally stored under the single `els-data` folder beside the executable, never in the user profile. A
   read-only application directory prevents those facilities from persisting;
   move els and its adjacent state to a writable directory.
