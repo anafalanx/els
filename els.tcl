@@ -3319,9 +3319,12 @@ proc els::scripts_defaults {} {
 }
 proc els::script_write {path body} {
     set fh [::open $path w]
-    fconfigure $fh -encoding utf-8 -translation lf
-    puts -nonewline $fh $body
-    close $fh
+    try {
+        fconfigure $fh -encoding utf-8 -translation lf
+        puts -nonewline $fh $body
+    } finally {
+        close $fh
+    }
 }
 proc els::scripts_seed {} {
     set d [els::scripts_dir]
@@ -3362,9 +3365,12 @@ proc els::script_run {name} {
     if {$dir eq ""} { return }
     if {[catch {
         set fh [::open [file join $dir $name] r]
-        fconfigure $fh -encoding utf-8
-        set body [read $fh]
-        close $fh
+        try {
+            fconfigure $fh -encoding utf-8
+            set body [read $fh]
+        } finally {
+            close $fh
+        }
     } e]} {
         els::status_note "script failed: [file rootname $name]"
         catch {els::log error "script $name: $e"}

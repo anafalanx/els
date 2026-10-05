@@ -223,6 +223,103 @@ test scripts-err-1.3 {a runaway loop is cut off by the time limit; the buffer su
     list [sc_body] [$w edit modified]
 } -result {alive 0}
 
+# ---- script file I/O -------------------------------------------------------
+test scripts-io-1.1 {invalid UTF-8 closes the script and preserves the buffer and selection} -setup {
+    els_reset
+    set w [sc_fill "precious"]
+    sc_sel 1.0 1.4
+    $w edit modified 1
+    file mkdir [els::scripts_dir]
+    set p [file join [els::scripts_dir] "_invalid utf8.tcl"]
+    set fh [::open $p wb]
+    puts -nonewline $fh "return \xFF"
+    close $fh
+    set channels [lsort [chan names]]
+} -body {
+    els::script_run [file tail $p]
+    list [sc_body] [$w edit modified] [$w tag ranges sel] \
+         [string match "script failed:*" $::els::status_note_full] \
+         [expr {[lsort [chan names]] eq $channels}]
+} -cleanup {
+    foreach ch [chan names] { if {$ch ni $channels} { catch {close $ch} } }
+    file delete -force $p
+} -result {precious 1 {1.0 1.4} 1 1}
+
+test scripts-io-1.2 {a script write failure closes the channel and propagates the error} -setup {
+    els_reset
+    set p [file join $::ELS_TMP script-write-failure.tcl]
+    set ::sc_io_channel ""
+    proc ::els::puts {args} {
+        set ::sc_io_channel [lindex $args 1]
+        error "injected script write failure"
+    }
+} -body {
+    set rc [catch {els::script_write $p {return $text}} msg]
+    list $rc $msg [expr {$::sc_io_channel ni [chan names]}]
+} -cleanup {
+    rename ::els::puts {}
+    catch {close $::sc_io_channel}
+    unset ::sc_io_channel
+    file delete -force $p
+} -result {1 {injected script write failure} 1}
+
+test scripts-io-1.3 {a script configuration failure closes the writer and propagates the error} -setup {
+    els_reset
+    set p [file join $::ELS_TMP script-configure-failure.tcl]
+    set ::sc_io_channel ""
+    proc ::els::fconfigure {fh args} {
+        set ::sc_io_channel $fh
+        error "injected script configuration failure"
+    }
+} -body {
+    set rc [catch {els::script_write $p {return $text}} msg]
+    list $rc $msg [expr {$::sc_io_channel ni [chan names]}]
+} -cleanup {
+    rename ::els::fconfigure {}
+    catch {close $::sc_io_channel}
+    unset ::sc_io_channel
+    file delete -force $p
+} -result {1 {injected script configuration failure} 1}
+
+test scripts-io-1.4 {a script read close failure does not apply the script} -setup {
+    els_reset
+    set w [sc_fill "precious"]
+    file mkdir [els::scripts_dir]
+    set p [file join [els::scripts_dir] "_close failure.tcl"]
+    els::script_write $p {return changed}
+    set channels [lsort [chan names]]
+    proc ::els::close {fh} {
+        ::close $fh
+        error "injected script close failure"
+    }
+} -body {
+    els::script_run [file tail $p]
+    list [sc_body] [$w edit modified] \
+         [string match "script failed:*" $::els::status_note_full] \
+         [expr {[lsort [chan names]] eq $channels}]
+} -cleanup {
+    rename ::els::close {}
+    foreach ch [chan names] { if {$ch ni $channels} { catch {close $ch} } }
+    file delete -force $p
+} -result {precious 0 1 1}
+
+test scripts-io-1.5 {a script write close failure is still reported to the caller} -setup {
+    els_reset
+    set p [file join $::ELS_TMP script-close-failure.tcl]
+    set channels [lsort [chan names]]
+    proc ::els::close {fh} {
+        ::close $fh
+        error "injected script close failure"
+    }
+} -body {
+    set rc [catch {els::script_write $p {return $text}} msg]
+    list $rc $msg [expr {[lsort [chan names]] eq $channels}]
+} -cleanup {
+    rename ::els::close {}
+    foreach ch [chan names] { if {$ch ni $channels} { catch {close $ch} } }
+    file delete -force $p
+} -result {1 {injected script close failure} 1}
+
 # ---- New Script... ---------------------------------------------------------
 test scripts-new-1.1 {New Script writes the template, opens it in a tab, and appears in the menu} -setup {els_reset} -body {
     file mkdir [els::scripts_dir]
